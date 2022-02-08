@@ -2,10 +2,11 @@ import kivy
 
 kivy.require('2.0.0')
 from kivy.app import App
-from frontend.frontend import MainScreen
+from frontend.frontend import Frontend
 from bus.bus import Bus
 from backend.backend import Backend
 from kivy.lang import Builder
+
 
 class KaptchiApp(App):
     def __init__(self, **kwargs):
@@ -14,9 +15,14 @@ class KaptchiApp(App):
 
     def build(self):
         Builder.load_file('frontend/kaptchi.kv')
-        frontend = MainScreen()
-        bus = Bus(frontend)
-        self.backend = Backend(bus)
+        frontend = Frontend()
+        bus = Bus()
+        self.backend = Backend()
+
+        bus.set(backend=self.backend, frontend=frontend)
+        self.backend.set(bus)
+        frontend.set(bus)
+
         return frontend
 
     def on_stop(self):

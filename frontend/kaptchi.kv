@@ -1,5 +1,12 @@
-MainScreen:
+Frontend:
 
-<MainScreen>:
+<Frontend>:
+    orientation: 'vertical'
     Image:
         id: main_image
+    BoxLayout:
+        orientation: 'horizontal'
+        size_hint: 1, 0.3
+        Button:
+            text: 'change camera'
+            on_press: root.on_change_camera_btn_click()
