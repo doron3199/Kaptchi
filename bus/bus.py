@@ -1,4 +1,4 @@
-import cv2
+import cv2 as cv
 from kivy.graphics.texture import Texture
 from  kivy.properties import ObjectProperty
 
@@ -19,7 +19,7 @@ class Bus:
     def update_main_image(self, opencv_image):
         """this function get an opencv image, convert it to kivy texture
         and update the main image in the UI"""
-        buf1 = cv2.flip(opencv_image, 0)
+        buf1 = cv.flip(opencv_image, 0)
         buf = buf1.tostring()
         texture = Texture.create(size=(opencv_image.shape[1], opencv_image.shape[0]), colorfmt='bgr')
         # if working on RASPBERRY PI, use colorfmt='rgba' here instead, but stick with "bgr" in blit_buffer.
@@ -31,3 +31,6 @@ class Bus:
 
     def on_zoom_change(self, zoom):
         self.backend.on_zoom_change(zoom)
+
+    def on_whiteboard_filter_btn_click(self):
+        self.backend.on_whiteboard_filter_btn_click()

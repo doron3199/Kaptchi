@@ -1,9 +1,10 @@
 import numpy as np
-import cv2
+import cv2 as cv
 from bus.bus import Bus
 from kivy.clock import Clock
 from kivy.uix.widget import Widget
 import logging
+from backend.image_processing import WhiteboardFilter
 
 
 class Backend(Widget):
@@ -16,13 +17,15 @@ class Backend(Widget):
         self.zoom = 0.5
         self.zoom_center_x = 0
         self.zoom_center_y = 0
+        self.is_whiteboard_filter_on = False
+        self.image_processing = WhiteboardFilter()
 
     def set(self, bus: Bus):
         self.bus = bus
         self.start()
 
     def start(self):
-        self.cap = cv2.VideoCapture(self.ports[self.port_num], cv2.CAP_DSHOW)
+        self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
         if not self.cap.isOpened():
             logging.error("Cannot open camera")
         Clock.schedule_interval(self.send_video, 1 / 33.0)
@@ -36,6 +39,8 @@ class Backend(Widget):
             logging.error("Can't receive frame")
 
         zoomed_image = self.zoom_image(frame)
+        if self.is_whiteboard_filter_on:
+            zoomed_image = self.image_processing.clean_image(zoomed_image)
         self.bus.update_main_image(zoomed_image)
 
     def zoom_image(self, image):
@@ -48,15 +53,19 @@ class Backend(Widget):
         width_crop = int(w * self.zoom)
         cropped = image[self.zoom_center_y - height_crop: self.zoom_center_y + height_crop,
                   self.zoom_center_x - width_crop:self.zoom_center_x + width_crop]
-        return cv2.resize(cropped, (w, h))
+        return cv.resize(cropped, (w, h))
 
     def on_change_camera_btn_click(self):
         self.port_num = (self.port_num + 1) % len(self.ports)
-        self.cap = cv2.VideoCapture(self.ports[self.port_num], cv2.CAP_DSHOW)
+        self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
 
     def stop(self):
         """called when the application is closed"""
         self.cap.release()
+
+
+    def on_whiteboard_filter_btn_click(self):
+        self.is_whiteboard_filter_on = not self.is_whiteboard_filter_on
 
     def on_zoom_change(self, zoom):
         """we receive the zoom value as percentage, set it as a factor of magnification. multiply by
@@ -72,7 +81,7 @@ class Backend(Widget):
         working_ports = []
         available_ports = []
         while len(non_working_ports) < 3:  # if there are more than 2 non working ports stop the testing.
-            camera = cv2.VideoCapture(dev_port, cv2.CAP_DSHOW)
+            camera = cv.VideoCapture(dev_port, cv.CAP_DSHOW)
             if not camera.isOpened():
                 non_working_ports.append(dev_port)
             else:
@@ -83,3 +92,4 @@ class Backend(Widget):
                     available_ports.append(dev_port)
             dev_port += 1
         return working_ports
+

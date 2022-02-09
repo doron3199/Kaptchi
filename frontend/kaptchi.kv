@@ -13,7 +13,10 @@ Frontend:
             max: 100
             step: 1
             orientation: 'horizontal'
-            on_touch_move: root.on_zoom_slider_change()
+            on_value: root.on_zoom_slider_change(self)
         Button:
             text: 'change camera'
             on_press: root.on_change_camera_btn_click()
+        ToggleButton:
+            text: 'whiteboard filter'
+            on_state: root.on_whiteboard_filter_btn_click()
