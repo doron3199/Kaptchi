@@ -1,5 +1,7 @@
 import cv2
 from kivy.graphics.texture import Texture
+from  kivy.properties import ObjectProperty
+
 """Get data from the backend to front end and vice versa
 For example -> get parameters from sliders, and send to the backend
 From the backend it get an openCV image variable and convert it to variable that kivy can display """
@@ -26,3 +28,6 @@ class Bus:
 
     def on_change_camera_btn_click(self):
         self.backend.on_change_camera_btn_click()
+
+    def on_zoom_change(self, zoom):
+        self.backend.on_zoom_change(zoom)

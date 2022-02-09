@@ -7,6 +7,13 @@ Frontend:
     BoxLayout:
         orientation: 'horizontal'
         size_hint: 1, 0.3
+        Slider:
+            id: zoom
+            min: 0
+            max: 0.9
+            step: 0.01
+            orientation: 'horizontal'
+            on_touch_move: root.on_zoom_slider_change()
         Button:
             text: 'change camera'
             on_press: root.on_change_camera_btn_click()

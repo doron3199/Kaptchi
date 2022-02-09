@@ -13,6 +13,9 @@ class Backend(Widget):
         self.cap = None
         self.ports = self.list_ports()
         self.port_num = 0
+        self.zoom = 0.5
+        self.zoom_center_x = 0
+        self.zoom_center_y = 0
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -31,7 +34,21 @@ class Backend(Widget):
         # if frame is read correctly ret is True
         if not ret:
             logging.error("Can't receive frame")
-        self.bus.update_main_image(frame)
+
+        zoomed_image = self.zoom_image(frame)
+        self.bus.update_main_image(zoomed_image)
+
+    def zoom_image(self, image):
+        """zoom image, zoom factor - how much zoom, zoom_center_x and zoom_center_y are for where to zoom in the
+        image"""
+        h, w = image.shape[0:2]
+        self.zoom_center_x = w // 2
+        self.zoom_center_y = h // 2
+        height_crop = int(h * self.zoom)
+        width_crop = int(w * self.zoom)
+        cropped = image[self.zoom_center_y - height_crop: self.zoom_center_y + height_crop,
+                  self.zoom_center_x - width_crop:self.zoom_center_x + width_crop]
+        return cv2.resize(cropped, None, fx=h / cropped.shape[0], fy=w / cropped.shape[1])
 
     def on_change_camera_btn_click(self):
         self.port_num = (self.port_num + 1) % len(self.ports)
@@ -40,6 +57,11 @@ class Backend(Widget):
     def stop(self):
         """called when the application is closed"""
         self.cap.release()
+
+    def on_zoom_change(self, zoom):
+        """we receive the zoom value as percentage, set it as a factor of magnification
+        device by 2 because we do it from the middle"""
+        self.zoom = (1 - zoom)/2
 
     def list_ports(self):
         """
