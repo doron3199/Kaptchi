@@ -48,7 +48,7 @@ class Backend(Widget):
         width_crop = int(w * self.zoom)
         cropped = image[self.zoom_center_y - height_crop: self.zoom_center_y + height_crop,
                   self.zoom_center_x - width_crop:self.zoom_center_x + width_crop]
-        return cv2.resize(cropped, None, fx=h / cropped.shape[0], fy=w / cropped.shape[1])
+        return cv2.resize(cropped, (w, h))
 
     def on_change_camera_btn_click(self):
         self.port_num = (self.port_num + 1) % len(self.ports)
