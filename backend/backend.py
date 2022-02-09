@@ -59,9 +59,9 @@ class Backend(Widget):
         self.cap.release()
 
     def on_zoom_change(self, zoom):
-        """we receive the zoom value as percentage, set it as a factor of magnification
-        device by 2 because we do it from the middle"""
-        self.zoom = (1 - zoom)/2
+        """we receive the zoom value as percentage, set it as a factor of magnification. multiply by
+        0.99 because zoom = 0 will break the program. device by 2 because we do it from the middle"""
+        self.zoom = (1 - zoom * 0.99) / 2
 
     def list_ports(self):
         """

@@ -16,7 +16,7 @@ class Frontend(BoxLayout):
 
     def on_zoom_slider_change(self):
         """notice! slider can change and invoke this function without zoom value change!"""
-        self.zoom = self.ids.zoom.value
+        self.zoom = self.ids.zoom.value_normalized
 
     def on_zoom(self, instance, value):
         """invoked only when zoom value change. send value to the bus"""
