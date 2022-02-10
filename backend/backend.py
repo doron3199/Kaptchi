@@ -7,6 +7,9 @@ import logging
 from backend.image_processing import WhiteboardFilter
 
 
+HIGH_VALUE = 10000
+
+
 class Backend(Widget):
     def __init__(self, **kwargs):
         super(Backend, self).__init__(**kwargs)
@@ -26,6 +29,9 @@ class Backend(Widget):
 
     def start(self):
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
+        # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
+        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
+        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, HIGH_VALUE)
         if not self.cap.isOpened():
             logging.error("Cannot open camera")
         Clock.schedule_interval(self.send_video, 1 / 33.0)
@@ -58,11 +64,13 @@ class Backend(Widget):
     def on_change_camera_btn_click(self):
         self.port_num = (self.port_num + 1) % len(self.ports)
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
+        # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
+        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
+        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, HIGH_VALUE)
 
     def stop(self):
         """called when the application is closed"""
         self.cap.release()
-
 
     def on_whiteboard_filter_btn_click(self):
         self.is_whiteboard_filter_on = not self.is_whiteboard_filter_on
@@ -92,4 +100,3 @@ class Backend(Widget):
                     available_ports.append(dev_port)
             dev_port += 1
         return working_ports
-

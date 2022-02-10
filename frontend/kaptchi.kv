@@ -2,11 +2,16 @@ Frontend:
 
 <Frontend>:
     orientation: 'vertical'
-    Image:
-        id: main_image
+    AnchorLayout:
+        Image:
+            id: main_image
+            allow_stretch: True
+        MainImageBlock:
+            id: main_image_block
     BoxLayout:
         orientation: 'horizontal'
-        size_hint: 1, 0.3
+        size_hint: 1, 0.1
+        id: bottom_bar
         Slider:
             id: zoom
             min: 1
@@ -20,3 +25,9 @@ Frontend:
         ToggleButton:
             text: 'whiteboard filter'
             on_state: root.on_whiteboard_filter_btn_click()
+
+<MainImageBlock>:
+
+
+
+
