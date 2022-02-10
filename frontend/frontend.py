@@ -2,34 +2,49 @@ from kivy.core.window import Window
 from kivy.graphics import Rectangle, Color, Line, Ellipse
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.relativelayout import RelativeLayout
-from kivy.properties import NumericProperty, ObjectProperty
+from kivy.properties import NumericProperty, ObjectProperty, ListProperty
 from bus.bus import Bus
+from kivy.metrics import dp
 
 
 class MainImageBlock(RelativeLayout):
     bottom_bar_height = NumericProperty(0)
     window_width = NumericProperty(0)
     image_ratio = NumericProperty(0)
+    rectangle_start_x = NumericProperty(0)
+    rectangle_start_y = NumericProperty(0)
+    points = ListProperty([])
 
     def __init__(self, **kw):
         super().__init__(**kw)
-
         Window.bind(on_resize=self.on_window_resize)
 
     def on_window_resize(self, window, width, height):
         self.window_width = width
 
     def on_touch_down(self, touch):
-        color = (0.5, 1, 1)
         if self.is_on_image(touch):
             with self.canvas:
-                Color(*color, mode='hsv')
-                d = 30.
-                Ellipse(pos=(touch.x - d / 2, touch.y - d / 2 - self.bottom_bar_height), size=(d, d))
+                if len(self.points) >= 4:
+                    self.points.clear()
+                    self.canvas.clear()
+                d = dp(10)
+                pos = (touch.x - d / 2, touch.y - d / 2 - self.bottom_bar_height)
+                self.points.append(pos)
+                self.rectangle_start_x, self.rectangle_start_y = touch.x, touch.y
+                Color(1, 0, 0)
+                Ellipse(pos=pos, size=(d, d))
                 touch.ud['line'] = Line(points=(touch.x, touch.y - self.bottom_bar_height))
 
     def on_touch_move(self, touch):
         if self.is_on_image(touch):
+            self.canvas.clear()
+            self.points.clear()
+            with self.canvas:
+                Color(1, 0, 0, 0.3)
+                Rectangle(pos=(self.rectangle_start_x, self.rectangle_start_y - self.bottom_bar_height),
+                          size=(touch.x - self.rectangle_start_x, touch.y - self.rectangle_start_y))
+
             touch.ud['line'].points += [touch.x, touch.y - self.bottom_bar_height]
 
     def is_on_image(self, touch):
