@@ -28,6 +28,13 @@ class MainImageBlock(RelativeLayout):
     def on_touch_down(self, touch):
         if self.is_on_image(touch):
 
+            if touch.is_mouse_scrolling:
+                if touch.button == 'scrolldown':
+                    self.parent.parent.ids.zoom.value = min(self.parent.parent.ids.zoom.value + 5, 100)
+                elif touch.button == 'scrollup':
+                    self.parent.parent.ids.zoom.value = max(self.parent.parent.ids.zoom.value - 5, 1)
+
+
             if self.is_cut_region:
                 with self.canvas:
                     if len(self.points) >= 4:
