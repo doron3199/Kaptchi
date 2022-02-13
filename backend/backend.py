@@ -6,8 +6,8 @@ from kivy.uix.widget import Widget
 import logging
 from backend.image_processing import WhiteboardFilter
 
-
 HIGH_VALUE = 10000
+ZOOM_VALUE_FULL = 0.5
 
 
 class Backend(Widget):
@@ -49,16 +49,23 @@ class Backend(Widget):
             zoomed_image = self.image_processing.clean_image(zoomed_image)
         self.bus.update_main_image(zoomed_image)
 
+    def on_change_zoom_center(self, x, y):
+        self.zoom_center_x += int(x * self.zoom * 9)
+        self.zoom_center_y += int(-y * self.zoom * 9)
+
     def zoom_image(self, image):
         """zoom image, zoom factor - how much zoom, zoom_center_x and zoom_center_y are for where to zoom in the
         image"""
         h, w = image.shape[0:2]
-        self.zoom_center_x = w // 2
-        self.zoom_center_y = h // 2
+        if self.zoom_center_x == 0 or self.zoom_center_y == 0 or self.zoom == ZOOM_VALUE_FULL:
+            self.zoom_center_x = w // 2
+            self.zoom_center_y = h // 2
         height_crop = int(h * self.zoom)
         width_crop = int(w * self.zoom)
+        self.zoom_center_x = min(max(self.zoom_center_x, width_crop), w - width_crop)
+        self.zoom_center_y = min(max(self.zoom_center_y, height_crop), h - height_crop)
         cropped = image[self.zoom_center_y - height_crop: self.zoom_center_y + height_crop,
-                  self.zoom_center_x - width_crop:self.zoom_center_x + width_crop]
+                        self.zoom_center_x - width_crop: self.zoom_center_x + width_crop]
         return cv.resize(cropped, (w, h))
 
     def on_change_camera_btn_click(self):

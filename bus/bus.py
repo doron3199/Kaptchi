@@ -1,6 +1,6 @@
 import cv2 as cv
 from kivy.graphics.texture import Texture
-from  kivy.properties import ObjectProperty
+from kivy.properties import ObjectProperty
 
 """Get data from the backend to front end and vice versa
 For example -> get parameters from sliders, and send to the backend
@@ -34,3 +34,6 @@ class Bus:
 
     def on_whiteboard_filter_btn_click(self):
         self.backend.on_whiteboard_filter_btn_click()
+
+    def on_change_zoom_center(self, x, y):
+        self.backend.on_change_zoom_center(x, y)
