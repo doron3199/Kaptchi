@@ -7,6 +7,9 @@ from bus.bus import Bus
 from kivy.metrics import dp
 
 
+
+
+
 class MainImageBlock(RelativeLayout):
     bottom_bar_height = NumericProperty(0)
     window_width = NumericProperty(0)
@@ -33,9 +36,11 @@ class MainImageBlock(RelativeLayout):
                     self.parent.parent.ids.zoom.value = min(self.parent.parent.ids.zoom.value + 5, 100)
                 elif touch.button == 'scrollup':
                     self.parent.parent.ids.zoom.value = max(self.parent.parent.ids.zoom.value - 5, 1)
-
-
-            if self.is_cut_region:
+            elif touch.button == 'right':
+                self.canvas.clear()
+                self.points.clear()
+                self.parent.parent.is_cut_region_disabled = True
+            elif touch.is_double_tap:
                 with self.canvas:
                     if len(self.points) >= 4:
                         self.points.clear()
@@ -44,28 +49,37 @@ class MainImageBlock(RelativeLayout):
                     pos = (touch.x - d / 2, touch.y - d / 2 - self.bottom_bar_height)
                     self.points.append((touch.x, touch.y - self.bottom_bar_height))
                     self.rectangle_start_x, self.rectangle_start_y = touch.x, touch.y
-                    Color(1, 0, 0)
+                    Color(1, 1, 0, 0.5)
                     Ellipse(pos=pos, size=(d, d))
+                    if len(self.points) == 4:
+                        self.parent.parent.is_cut_region_disabled = False
+                    else:
+                        self.parent.parent.is_cut_region_disabled = True
+
             else:
                 self.zoom_center_start_x = touch.x
                 self.zoom_center_start_y = touch.y
 
-    def on_is_cut_region(self, _, __):
+    def on_is_cut_region(self, _, state):
+        self.parent.parent.bus.cut_region(self.canvas_to_image_coordinates(self.points))
         self.canvas.clear()
         self.points.clear()
+        if not state:
+            self.parent.parent.is_cut_region_disabled = True
 
     def on_touch_move(self, touch):
         if self.is_on_image(touch):
-            if self.is_cut_region:
+            if touch.is_double_tap:
                 self.canvas.clear()
                 self.points.clear()
                 self.points = self.rect_to_four_points(
                     (self.rectangle_start_x, self.rectangle_start_y - self.bottom_bar_height),
-                    (touch.x - self.rectangle_start_x, touch.y - self.rectangle_start_y))
+                    (touch.x, touch.y - self.bottom_bar_height))
                 with self.canvas:
                     Color(1, 0, 0, 0.3)
                     Rectangle(pos=(self.rectangle_start_x, self.rectangle_start_y - self.bottom_bar_height),
                               size=(touch.x - self.rectangle_start_x, touch.y - self.rectangle_start_y))
+                    self.parent.parent.is_cut_region_disabled = False
             else:
                 # by resetting the start we measure the "speed" and not the distance, because if we measure the
                 # distance, if we're going with the mouse to one way and then turning back a little it still positive
@@ -75,10 +89,6 @@ class MainImageBlock(RelativeLayout):
                     self.zoom_center_start_y = touch.y
                 self.parent.parent.bus.on_change_zoom_center(self.zoom_center_start_x - touch.x,
                                                              self.zoom_center_start_y - touch.y)
-
-    def rect_to_four_points(self, a, b):
-        """get two points of a rectangle, a is upper left, b it bottom right, return the rectangle edges"""
-        return (a[0], b[0]), (a[1], b[0]), (a[0], b[1]), (a[1], b[1])
 
     def is_on_image(self, touch):
         if self.collide_point(*touch.pos):
@@ -95,8 +105,52 @@ class MainImageBlock(RelativeLayout):
                 return True
         return False
 
+    def canvas_to_image_coordinates(self, points):
+        """ this function get a list of points with coordinates from the image widget and convert it to
+        a list of points that looks like in the same place, but in the real image coordinates"""
+        # just make it more readable
+        image_height = self.parent.parent.image_height
+        image_width = self.parent.parent.image_width
+        # calc up-down borders
+        widget_image_height = (1 / self.image_ratio) * self.width
+        border_y = max(0, (self.height - widget_image_height) / 2)
+        # calc side borders
+        widget_image_width = self.image_ratio * self.height
+        border_x = max(0, (self.width - widget_image_width) / 2)
+
+        # where are the borders?
+        if border_y == 0:
+            # side borders
+            widget_height = self.height
+            widget_width = self.width - border_x * 2
+        else:
+            # up-down borders
+            widget_height = self.height - border_y * 2
+            widget_width = self.width
+
+        final_points = []
+        # change it to numpy matrix multiplication for performance increase,
+        # but it will be at most 4 points, so it will be pointless! haha! get it? I am lonely
+        for point in points:
+            # just in case its a tuple
+            point = list(point)
+            point[0] -= border_x
+            point[1] -= border_y
+
+            # calc the borders by the unit percentage
+            width = (point[0] / widget_width) * image_width
+            # wait why minus? because kivy 0 y is bottom and in opencv 0 y is top
+            height = image_height - (point[1] / widget_height) * image_height
+            final_points.append((int(width), int(height)))
+        return final_points
+
+    def rect_to_four_points(self, a, b):
+        """get two points of a rectangle, a is upper left, b it bottom right, return the rectangle edges"""
+        return (a[0], a[1]), (a[0], b[1]), (b[0], a[1]), (b[0], b[1])
+
 
 class Frontend(BoxLayout):
+    is_cut_region_disabled = BooleanProperty(True)
     bus = ObjectProperty(None)
     image_height = NumericProperty(0)
     image_width = NumericProperty(0)

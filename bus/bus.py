@@ -37,3 +37,7 @@ class Bus:
 
     def on_change_zoom_center(self, x, y):
         self.backend.on_change_zoom_center(x, y)
+
+    def cut_region(self, points):
+        self.backend.cut_region(points)
+

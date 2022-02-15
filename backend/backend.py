@@ -5,7 +5,7 @@ from kivy.clock import Clock
 from kivy.uix.widget import Widget
 import logging
 from backend.image_processing import WhiteboardFilter
-
+from backend.transfrom import four_point_transform
 HIGH_VALUE = 10000
 ZOOM_VALUE_FULL = 0.5
 
@@ -22,6 +22,8 @@ class Backend(Widget):
         self.zoom_center_y = 0
         self.is_whiteboard_filter_on = False
         self.image_processing = WhiteboardFilter()
+        self.points_to_cut = []
+
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -44,10 +46,17 @@ class Backend(Widget):
         if not ret:
             logging.error("Can't receive frame")
 
+
         zoomed_image = self.zoom_image(frame)
         if self.is_whiteboard_filter_on:
             zoomed_image = self.image_processing.clean_image(zoomed_image)
+        if len(self.points_to_cut) == 4:
+            zoomed_image = four_point_transform(zoomed_image, self.points_to_cut)
         self.bus.update_main_image(zoomed_image)
+
+    def cut_region(self, cut_region):
+        self.points_to_cut = np.array(cut_region)
+
 
     def on_change_zoom_center(self, x, y):
         self.zoom_center_x += int(x * self.zoom * 9)
@@ -107,3 +116,7 @@ class Backend(Widget):
                     available_ports.append(dev_port)
             dev_port += 1
         return working_ports
+
+
+
+

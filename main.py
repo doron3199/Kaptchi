@@ -1,5 +1,6 @@
 import kivy
-
+from kivy.config import Config
+Config.set('input', 'mouse', 'mouse,multitouch_on_demand')
 kivy.require('2.0.0')
 from kivy.app import App
 from frontend.frontend import Frontend
