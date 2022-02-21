@@ -9,29 +9,74 @@ Frontend:
         MainImageBlock:
             id: main_image_block
     BoxLayout:
-        orientation: 'horizontal'
-        size_hint: 1, 0.1
+        orientation: 'vertical'
+        size_hint: 1, 0.2 if root.is_video_player else 0.1
         id: bottom_bar
-        Slider:
-            id: zoom
-            min: 1
-            max: 100
-            step: 1
+        BoxLayout:
+            visible: root.is_video_player
+            size_hint_y: 1 if self.visible else 0
+            opacity: 1 if self.visible else 0
+            disabled: not self.visible
             orientation: 'horizontal'
-            on_value: root.on_zoom_slider_change(self)
-        Button:
-            text: 'change camera'
-            on_press: root.on_change_camera_btn_click()
-        ToggleButton:
-            text: 'cut region'
-            on_state: root.on_cut_region_btn_click()
-            disabled: root.is_cut_region_disabled
-        ToggleButton:
-            text: 'whiteboard filter'
-            on_state: root.on_whiteboard_filter_btn_click()
+            id: video_control_bar
+            ToggleButton:
+                id: play_pause_btn
+                visible: root.is_video_player
+                size_hint_y: 1 if self.visible else 0
+                opacity: 1 if self.visible else 0
+                disabled: not self.visible
+                size_hint: None, 1
+                width: self.size[1]
+                background_down: 'frontend/play_icon.png'
+                background_normal: 'frontend/pause_icon.png'
+                on_press: root.on_play_pause_btn_press()
+            VideoSlider:
+                id: video_bar
+                visible: root.is_video_player
+                size_hint_x: 1 if self.visible else 0
+                opacity: 1 if self.visible else 0
+                disabled: not self.visible
+        BoxLayout:
+            orientation: 'horizontal'
+            Slider:
+                id: zoom
+                min: 1
+                max: 100
+                step: 1
+                orientation: 'horizontal'
+                on_value: root.on_zoom_slider_change(self)
+            BoxLayout:
+                orientation: "vertical"
+                TextInput:
+                    id: video_link
+                    hint_text: "video link"
+                    on_text: root.on_video_link_value(self.text)
+                    multiline: False
+                Button:
+                    text: "choose video"
+                    on_press: root.on_pick_video_btn_click(video_link.text)
+                    disabled: root.pick_button_disabled
+            Button:
+                text: 'change camera'
+                on_press: root.on_change_camera_btn_click()
+            ToggleButton:
+                text: 'cut region'
+                on_state: root.on_cut_region_btn_click()
+                disabled: root.is_cut_region_disabled
+            ToggleButton:
+                text: 'whiteboard filter'
+                on_state: root.on_whiteboard_filter_btn_click()
 
 <MainImageBlock>:
 
+<VideoSlider>:
+    Slider:
+        id: video_slider
+        value_track: True
+        min: 0
+        max: root.video_length_in_seconds
+        value: root.video_slider_value
+        on_value: root.set_video_slider_value(self.value)
 
 
 

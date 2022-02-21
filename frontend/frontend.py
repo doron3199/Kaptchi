@@ -1,18 +1,36 @@
-from kivy.core.window import Window
 from kivy.graphics import Rectangle, Color, Line, Ellipse
 from kivy.uix.boxlayout import BoxLayout
 from kivy.uix.relativelayout import RelativeLayout
-from kivy.properties import NumericProperty, ObjectProperty, ListProperty, BooleanProperty
+from kivy.properties import NumericProperty, ObjectProperty, ListProperty, BooleanProperty, StringProperty
 from bus.bus import Bus
 from kivy.metrics import dp
 
 
+class VideoSlider(BoxLayout):
+    video_length_in_seconds = NumericProperty(0)
+    video_slider_value = NumericProperty(0)
 
+    def set_video_length_in_seconds(self, value):
+        self.ids.video_slider.max = value
+
+    def set_video_slider_value(self, value):
+        self.ids.video_slider.value = value
+
+    def on_touch_down(self, touch):
+        super(VideoSlider, self).on_touch_down(touch)
+        if self.collide_point(*touch.pos):
+            self.parent.parent.parent.bus.play_pause(False)
+
+    def on_touch_up(self, touch):
+        super(VideoSlider, self).on_touch_up(touch)
+        if self.collide_point(*touch.pos):
+            self.parent.parent.parent.bus.set_video_time(self.ids.video_slider.value)
+            if self.parent.parent.parent.play:
+                self.parent.parent.parent.bus.play_pause(True)
 
 
 class MainImageBlock(RelativeLayout):
     bottom_bar_height = NumericProperty(0)
-    window_width = NumericProperty(0)
     image_ratio = NumericProperty(0)
     rectangle_start_x = NumericProperty(0)
     rectangle_start_y = NumericProperty(0)
@@ -20,13 +38,6 @@ class MainImageBlock(RelativeLayout):
     is_cut_region = BooleanProperty(False)
     zoom_center_start_x = NumericProperty(0)
     zoom_center_start_y = NumericProperty(0)
-
-    def __init__(self, **kw):
-        super().__init__(**kw)
-        Window.bind(on_resize=self.on_window_resize)
-
-    def on_window_resize(self, window, width, height):
-        self.window_width = width
 
     def on_touch_down(self, touch):
         if self.is_on_image(touch):
@@ -155,18 +166,16 @@ class Frontend(BoxLayout):
     image_height = NumericProperty(0)
     image_width = NumericProperty(0)
     frame_counter = NumericProperty(0)
-
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
-        Window.bind(on_resize=self.on_window_resize)
-
-    def on_window_resize(self, window, width, height):
-        self.ids.main_image_block.bottom_bar_height = self.ids.bottom_bar.height
+    video_link_value = StringProperty("")
+    pick_button_disabled = BooleanProperty(True)
+    is_video_player = BooleanProperty(False)
+    play = BooleanProperty(True)
 
     def set(self, bus: Bus):
         self.bus = bus
 
     def on_change_camera_btn_click(self):
+        self.is_video_player = False
         self.bus.on_change_camera_btn_click()
 
     def on_whiteboard_filter_btn_click(self):
@@ -185,5 +194,24 @@ class Frontend(BoxLayout):
             self.image_height = texture.height
             self.image_width = texture.width
             self.ids.main_image_block.image_ratio = self.image_width / self.image_height
+        if self.ids.main_image_block.bottom_bar_height != self.ids.bottom_bar.height:
             self.ids.main_image_block.bottom_bar_height = self.ids.bottom_bar.height
         self.ids.main_image.texture = texture
+
+    def on_video_link_value(self, value):
+        # TODO: check if its a link with regex
+        self.pick_button_disabled = value == ""
+
+    def update_video_slider(self, video_second):
+        self.ids.video_bar.set_video_slider_value(video_second)
+
+    def on_pick_video_btn_click(self, value):
+        self.is_video_player = True
+        self.bus.on_video_link_btn_click(value)
+
+    def set_video_bar(self, length_in_seconds):
+        self.ids.video_bar.set_video_length_in_seconds(length_in_seconds)
+
+    def on_play_pause_btn_press(self):
+        self.bus.play_pause()
+        self.play = not self.play
