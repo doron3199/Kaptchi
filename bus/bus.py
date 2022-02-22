@@ -34,6 +34,9 @@ class Bus:
     def on_whiteboard_filter_btn_click(self):
         self._backend.on_whiteboard_filter_btn_click()
 
+    def on_remove_foreground_btn_click(self):
+        self._backend.on_remove_foreground_btn_click()
+
     def on_change_zoom_center(self, x, y):
         self._backend.on_change_zoom_center(x, y)
 

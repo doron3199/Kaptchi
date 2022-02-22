@@ -14,6 +14,7 @@ from backend.transfrom import four_point_transform
 HIGH_VALUE = 10000
 ZOOM_VALUE_FULL = 0.5
 GENERAL_FPS = 30.0
+NUMBER_OF_PARTS = 10
 
 
 class Backend(Widget):
@@ -37,6 +38,11 @@ class Backend(Widget):
         self.fps = 0
         self.play = True
         self.slider_time = 0
+        self.is_remove_foreground_on = False
+        self.fgbg = cv.createBackgroundSubtractorKNN()
+        self.fgbg.setHistory(300)
+        self.parts = []
+        self.final_image = None
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -63,13 +69,14 @@ class Backend(Widget):
                 # you can also just count it, maybe better performance?
                 self.second_in_video = int(self.cap.stream.get(cv.CAP_PROP_POS_MSEC) / 1000)
                 s = self.second_in_video
-                print(f'{s//60}:{s%60}')
             else:
                 ret, frame = self.cap.read()
                 if not ret:
                     self.loop_func.cancel()
                     return
             # if frame is read correctly ret is True
+            if self.is_remove_foreground_on:
+                frame = self.remove_foreground(frame)
             frame = self.zoom_image(frame)
             if self.is_whiteboard_filter_on:
                 frame = self.image_processing.clean_image(frame)
@@ -77,6 +84,19 @@ class Backend(Widget):
                 frame = four_point_transform(frame, self.points_to_cut)
             self.bus.update_main_image(frame)
             self.bus.update_video_slider(self.second_in_video)
+
+    def remove_foreground(self, image):
+        fgmask = self.fgbg.apply(image)
+        h, w = image.shape[0:2]
+        dist = np.linspace(0, w, NUMBER_OF_PARTS, dtype=int)
+        if self.final_image is None:
+            self.final_image = image.copy()
+        for i in range(NUMBER_OF_PARTS - 1):
+            still = not (np.average(fgmask[:, dist[i]:dist[i + 1]]))
+            self.final_image[:, dist[i]:dist[i + 1]] = \
+                np.multiply(image[:, dist[i]:dist[i + 1]], still) + \
+                np.multiply(self.final_image[:, dist[i]:dist[i + 1]], not still)
+        return self.final_image
 
     def cut_region(self, cut_region):
         self.points_to_cut = np.array(cut_region)
@@ -132,7 +152,6 @@ class Backend(Widget):
             self.cap.Q.queue.clear()
             self.cap.stream.set(cv.CAP_PROP_POS_MSEC, value * 1000)
 
-
     def database_init(self):
         parent_path = pathlib.Path(__file__).parent.parent.resolve()
         database_path = os.path.join(parent_path, 'database')
@@ -156,6 +175,9 @@ class Backend(Widget):
     def on_whiteboard_filter_btn_click(self):
         self.is_whiteboard_filter_on = not self.is_whiteboard_filter_on
 
+    def on_remove_foreground_btn_click(self):
+        self.is_remove_foreground_on = not self.is_remove_foreground_on
+
     def on_zoom_change(self, zoom):
         """we receive the zoom value as percentage, set it as a factor of magnification. multiply by
         0.99 because zoom = 0 will break the program. device by 2 because we do it from the middle"""
@@ -166,8 +188,6 @@ class Backend(Widget):
             self.play = not self.play
         else:
             self.play = value
-
-        print('play' if self.play else 'pause')
 
     def list_ports(self):
         """

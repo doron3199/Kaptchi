@@ -181,6 +181,9 @@ class Frontend(BoxLayout):
     def on_whiteboard_filter_btn_click(self):
         self.bus.on_whiteboard_filter_btn_click()
 
+    def on_remove_foreground_btn_click(self):
+        self.bus.on_remove_foreground_btn_click()
+
     def on_cut_region_btn_click(self):
         self.ids.main_image_block.is_cut_region = not self.ids.main_image_block.is_cut_region
 
