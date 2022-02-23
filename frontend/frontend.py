@@ -178,7 +178,12 @@ class Frontend(BoxLayout):
         self.is_video_player = False
         self.bus.on_change_camera_btn_click()
 
-    def on_whiteboard_filter_btn_click(self):
+    def on_whiteboard_filter_btn_click(self, widget):
+        if widget.state == 'down':
+            self.ids.remove_foreground_btn.state = "down"
+            self.ids.remove_foreground_btn.disabled = True
+        else:
+            self.ids.remove_foreground_btn.disabled = False
         self.bus.on_whiteboard_filter_btn_click()
 
     def on_remove_foreground_btn_click(self):

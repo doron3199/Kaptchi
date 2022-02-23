@@ -64,9 +64,11 @@ Frontend:
                 on_state: root.on_cut_region_btn_click()
                 disabled: root.is_cut_region_disabled
             ToggleButton:
+                id: filter_btn
                 text: 'whiteboard filter'
-                on_state: root.on_whiteboard_filter_btn_click()
+                on_state: root.on_whiteboard_filter_btn_click(self)
             ToggleButton:
+                id: remove_foreground_btn
                 text: 'remove foreground'
                 on_state: root.on_remove_foreground_btn_click()
 
