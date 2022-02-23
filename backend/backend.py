@@ -77,6 +77,9 @@ class Backend(Widget):
             # if frame is read correctly ret is True
             if self.is_remove_foreground_on:
                 frame = self.remove_foreground(frame)
+            else:
+                # then there is still a background picture to use
+                self.remove_foreground(frame)
             frame = self.zoom_image(frame)
             if self.is_whiteboard_filter_on:
                 frame = self.image_processing.clean_image(frame)
