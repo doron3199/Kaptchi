@@ -4,7 +4,7 @@ from kivy.uix.relativelayout import RelativeLayout
 from kivy.properties import NumericProperty, ObjectProperty, ListProperty, BooleanProperty, StringProperty
 from bus.bus import Bus
 from kivy.metrics import dp
-
+from kivy.uix.image import Image
 
 class VideoSlider(BoxLayout):
     video_length_in_seconds = NumericProperty(0)
@@ -30,7 +30,6 @@ class VideoSlider(BoxLayout):
 
 
 class MainImageBlock(RelativeLayout):
-    bottom_bar_height = NumericProperty(0)
     image_ratio = NumericProperty(0)
     rectangle_start_x = NumericProperty(0)
     rectangle_start_y = NumericProperty(0)
@@ -44,39 +43,39 @@ class MainImageBlock(RelativeLayout):
 
             if touch.is_mouse_scrolling:
                 if touch.button == 'scrolldown':
-                    self.parent.parent.ids.zoom.value = min(self.parent.parent.ids.zoom.value + 5, 100)
+                    self.parent.parent.parent.ids.zoom.value = min(self.parent.parent.parent.ids.zoom.value + 5, 100)
                 elif touch.button == 'scrollup':
-                    self.parent.parent.ids.zoom.value = max(self.parent.parent.ids.zoom.value - 5, 1)
+                    self.parent.parent.parent.ids.zoom.value = max(self.parent.parent.parent.ids.zoom.value - 5, 1)
             elif touch.button == 'right':
                 self.canvas.clear()
                 self.points.clear()
-                self.parent.parent.is_cut_region_disabled = True
+                self.parent.parent.parent.is_cut_region_disabled = True
             elif touch.is_double_tap:
                 with self.canvas:
                     if len(self.points) >= 4:
                         self.points.clear()
                         self.canvas.clear()
                     d = dp(10)
-                    pos = (touch.x - d / 2, touch.y - d / 2 - self.bottom_bar_height)
-                    self.points.append((touch.x, touch.y - self.bottom_bar_height))
+                    pos = (touch.x - d / 2, touch.y - d / 2 )
+                    self.points.append((touch.x, touch.y ))
                     self.rectangle_start_x, self.rectangle_start_y = touch.x, touch.y
                     Color(1, 1, 0, 0.5)
                     Ellipse(pos=pos, size=(d, d))
                     if len(self.points) == 4:
-                        self.parent.parent.is_cut_region_disabled = False
+                        self.parent.parent.parent.is_cut_region_disabled = False
                     else:
-                        self.parent.parent.is_cut_region_disabled = True
+                        self.parent.parent.parent.is_cut_region_disabled = True
 
             else:
                 self.zoom_center_start_x = touch.x
                 self.zoom_center_start_y = touch.y
 
     def on_is_cut_region(self, _, state):
-        self.parent.parent.bus.cut_region(self.canvas_to_image_coordinates(self.points))
+        self.parent.parent.parent.bus.cut_region(self.canvas_to_image_coordinates(self.points))
         self.canvas.clear()
         self.points.clear()
         if not state:
-            self.parent.parent.is_cut_region_disabled = True
+            self.parent.parent.parent.is_cut_region_disabled = True
 
     def on_touch_move(self, touch):
         if self.is_on_image(touch):
@@ -84,21 +83,21 @@ class MainImageBlock(RelativeLayout):
                 self.canvas.clear()
                 self.points.clear()
                 self.points = self.rect_to_four_points(
-                    (self.rectangle_start_x, self.rectangle_start_y - self.bottom_bar_height),
-                    (touch.x, touch.y - self.bottom_bar_height))
+                    (self.rectangle_start_x, self.rectangle_start_y),
+                    (touch.x, touch.y))
                 with self.canvas:
                     Color(1, 0, 0, 0.3)
-                    Rectangle(pos=(self.rectangle_start_x, self.rectangle_start_y - self.bottom_bar_height),
+                    Rectangle(pos=(self.rectangle_start_x, self.rectangle_start_y),
                               size=(touch.x - self.rectangle_start_x, touch.y - self.rectangle_start_y))
-                    self.parent.parent.is_cut_region_disabled = False
+                    self.parent.parent.parent.is_cut_region_disabled = False
             else:
                 # by resetting the start we measure the "speed" and not the distance, because if we measure the
                 # distance, if we're going with the mouse to one way and then turning back a little it still positive
                 # distance, and we will go to the wrong side
-                if self.parent.parent.frame_counter % 2 == 0:
+                if self.parent.parent.parent.frame_counter % 2 == 0:
                     self.zoom_center_start_x = touch.x
                     self.zoom_center_start_y = touch.y
-                self.parent.parent.bus.on_change_zoom_center(self.zoom_center_start_x - touch.x,
+                self.parent.parent.parent.bus.on_change_zoom_center(self.zoom_center_start_x - touch.x,
                                                              self.zoom_center_start_y - touch.y)
 
     def is_on_image(self, touch):
@@ -106,7 +105,7 @@ class MainImageBlock(RelativeLayout):
             # check up down borders
             image_height = (1 / self.image_ratio) * self.width
             border_y = (self.height - image_height) / 2
-            if 0 < border_y < touch.y - self.bottom_bar_height < self.height - border_y:
+            if 0 < border_y < touch.y < self.height - border_y:
                 return True
 
             # check side borders
@@ -120,8 +119,8 @@ class MainImageBlock(RelativeLayout):
         """ this function get a list of points with coordinates from the image widget and convert it to
         a list of points that looks like in the same place, but in the real image coordinates"""
         # just make it more readable
-        image_height = self.parent.parent.image_height
-        image_width = self.parent.parent.image_width
+        image_height = self.parent.parent.parent.image_height
+        image_width = self.parent.parent.parent.image_width
         # calc up-down borders
         widget_image_height = (1 / self.image_ratio) * self.width
         border_y = max(0, (self.height - widget_image_height) / 2)
@@ -202,8 +201,6 @@ class Frontend(BoxLayout):
             self.image_height = texture.height
             self.image_width = texture.width
             self.ids.main_image_block.image_ratio = self.image_width / self.image_height
-        if self.ids.main_image_block.bottom_bar_height != self.ids.bottom_bar.height:
-            self.ids.main_image_block.bottom_bar_height = self.ids.bottom_bar.height
         self.ids.main_image.texture = texture
 
     def on_video_link_value(self, value):
@@ -223,3 +220,11 @@ class Frontend(BoxLayout):
     def on_play_pause_btn_press(self):
         self.bus.play_pause()
         self.play = not self.play
+
+    def on_shot_btn_click(self):
+        self.bus.on_shot_btn_click()
+
+    def add_saved_image(self, texture):
+        img = Image(texture=texture)
+        self.ids.saved_img_list.height += img.height
+        self.ids.saved_img_list.add_widget(img)

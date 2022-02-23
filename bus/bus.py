@@ -15,7 +15,7 @@ class Bus:
         self._frontend = frontend
         self._backend = backend
 
-    def update_main_image(self, opencv_image):
+    def convert_image_to_texture(self, opencv_image):
         """this function get an opencv image, convert it to kivy texture
         and update the main image in the UI"""
         buf1 = cv.flip(opencv_image, 0)
@@ -23,7 +23,10 @@ class Bus:
         texture = Texture.create(size=(opencv_image.shape[1], opencv_image.shape[0]), colorfmt='bgr')
         # if working on RASPBERRY PI, use colorfmt='rgba' here instead, but stick with "bgr" in blit_buffer.
         texture.blit_buffer(buf, colorfmt='bgr', bufferfmt='ubyte')
-        self._frontend.update_main_image(texture)
+        return texture
+
+    def update_main_image(self, opencv_image):
+        self._frontend.update_main_image(self.convert_image_to_texture(opencv_image))
 
     def on_change_camera_btn_click(self):
         self._backend.on_change_camera_btn_click()
@@ -57,3 +60,9 @@ class Bus:
 
     def play_pause(self, value=None):
         self._backend.play_pause(value)
+
+    def on_shot_btn_click(self):
+        self._backend.on_shot_btn_click()
+
+    def add_saved_image(self, image):
+        self._frontend.add_saved_image(self.convert_image_to_texture(image))

@@ -2,12 +2,45 @@ Frontend:
 
 <Frontend>:
     orientation: 'vertical'
-    AnchorLayout:
-        Image:
-            id: main_image
-            allow_stretch: True
-        MainImageBlock:
-            id: main_image_block
+    BoxLayout:
+        RelativeLayout:
+            Image:
+                pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+                id: main_image
+                allow_stretch: True
+            MainImageBlock:
+                pos_hint: {'center_x': 0.5, 'center_y': 0.5}
+                id: main_image_block
+            Button:
+                pos_hint: {'x': 0.975, 'y': 0.5}
+                size_hint: 0.025, 0.05
+                text: '<'
+                on_press: save_panel.visible = not save_panel.visible
+        BoxLayout:
+            orientation: 'vertical'
+            id: save_panel
+            size_hint_y: 1
+            visible: False
+            size_hint_x: 0.2 if self.visible else 0
+            opacity: 1 if self.visible else 0
+            disabled: not self.visible
+            BoxLayout:
+                ScrollView:
+                    BoxLayout:
+                        orientation: 'vertical'
+                        id: saved_img_list
+                        size_hint: 1, None
+                        height: self.minimum_height
+            Button:
+                id: pdf_export_btn
+                size_hint: 1,0.1
+                text: 'Export as PDF'
+#            Button:
+#                 id: image_export_btn
+#                size_hint: 1,0.1
+#                text: 'Export as images'
+
+
     BoxLayout:
         orientation: 'vertical'
         size_hint: 1, 0.2 if root.is_video_player else 0.1
@@ -71,6 +104,10 @@ Frontend:
                 id: remove_foreground_btn
                 text: 'remove foreground'
                 on_state: root.on_remove_foreground_btn_click()
+            Button:
+                id: shot_btn
+                text: 'shot'
+                on_press: root.on_shot_btn_click()
 
 <MainImageBlock>:
 

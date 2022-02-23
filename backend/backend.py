@@ -43,6 +43,8 @@ class Backend(Widget):
         self.fgbg.setHistory(300)
         self.parts = []
         self.final_image = None
+        self.current_frame = None
+        self.saved_image_list = []
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -85,6 +87,7 @@ class Backend(Widget):
                 frame = self.image_processing.clean_image(frame)
             if len(self.points_to_cut) == 4:
                 frame = four_point_transform(frame, self.points_to_cut)
+            self.current_frame = frame
             self.bus.update_main_image(frame)
             self.bus.update_video_slider(self.second_in_video)
 
@@ -191,6 +194,11 @@ class Backend(Widget):
             self.play = not self.play
         else:
             self.play = value
+
+    def on_shot_btn_click(self):
+        self.saved_image_list.append(self.current_frame)
+        self.bus.add_saved_image(self.current_frame)
+
 
     def list_ports(self):
         """
