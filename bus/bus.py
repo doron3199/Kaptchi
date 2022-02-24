@@ -72,3 +72,6 @@ class Bus:
 
     def export_as_pdf_btn_click(self):
         self._backend.export_as_pdf_btn_click()
+
+    def on_auto_save_btn_click(self):
+        self._backend.on_auto_save_btn_click()

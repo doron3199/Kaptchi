@@ -247,3 +247,6 @@ class Frontend(BoxLayout):
     def export_as_pdf_btn_click(self):
         self.bus.export_as_pdf_btn_click()
 
+    def on_auto_save_btn_click(self):
+        self.bus.on_auto_save_btn_click()
+

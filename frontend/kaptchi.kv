@@ -63,6 +63,14 @@ Frontend:
         BoxLayout:
             orientation: 'horizontal'
             Slider:
+                # remove from here
+                visible: False
+                size_hint: None,None
+                width: "0dp"
+                height: "0dp"
+                opacity: 0
+                disabled: True
+                # to here to make slider visable
                 id: zoom
                 min: 1
                 max: 100
@@ -81,7 +89,10 @@ Frontend:
                     on_press: root.on_pick_video_btn_click(video_link.text)
                     disabled: root.pick_button_disabled
             Button:
-                text: 'change camera'
+                text: 'change\ncamera'
+                valign: 'center'
+                halign: 'center'
+                text_size: None,None
                 on_press: root.on_change_camera_btn_click()
             ToggleButton:
                 text: 'cut region'
@@ -89,12 +100,25 @@ Frontend:
                 disabled: root.is_cut_region_disabled
             ToggleButton:
                 id: filter_btn
-                text: 'whiteboard filter'
+                text: 'whiteboard\nfilter'
+                valign: 'center'
+                halign: 'center'
+                text_size: None,None
                 on_state: root.on_whiteboard_filter_btn_click(self)
             ToggleButton:
                 id: remove_foreground_btn
-                text: 'remove foreground'
+                text: 'remove\nforeground'
+                valign: 'center'
+                halign: 'center'
+                text_size: None,None
                 on_state: root.on_remove_foreground_btn_click()
+            ToggleButton:
+                id: auto_save_btn
+                text: 'auto\nsave'
+                valign: 'center'
+                halign: 'center'
+                text_size: None,None
+                on_state: root.on_auto_save_btn_click()
             BoxLayout:
                 orientation: 'vertical'
                 Button:

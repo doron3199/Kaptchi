@@ -11,12 +11,13 @@ from PIL import Image as PIL_Image
 from imutils.video import FileVideoStream
 from backend.image_processing import WhiteboardFilter
 from backend.transfrom import four_point_transform
+from queue import Queue
 
 HIGH_VALUE = 10000
 ZOOM_VALUE_FULL = 0.5
 GENERAL_FPS = 30.0
 NUMBER_OF_PARTS = 10
-
+AUTO_SAVE_QUEUE_SIZE = int(GENERAL_FPS * 3)
 
 class Backend(Widget):
     def __init__(self, **kwargs):
@@ -48,6 +49,10 @@ class Backend(Widget):
         self.current_frame = None
         self.saved_image_dict = {}
         self.image_counter = 0
+        self.is_auto_save = False
+        self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
+        self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
+        self.auto_save_counter = 0
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -82,15 +87,21 @@ class Backend(Widget):
             # if frame is read correctly ret is True
             if self.is_remove_foreground_on:
                 frame = self.remove_foreground(frame)
+                removed_foreground = frame
             else:
                 # then there is still a background picture to use
-                self.remove_foreground(frame)
+                removed_foreground = self.remove_foreground(frame)
             frame = self.zoom_image(frame)
             if self.is_whiteboard_filter_on:
                 frame = self.image_processing.clean_image(frame)
             if len(self.points_to_cut) == 4:
                 frame = four_point_transform(frame, self.points_to_cut)
             self.current_frame = frame
+            if self.is_auto_save:
+                if self.is_whiteboard_filter_on:
+                    self.auto_save(frame)
+                else:
+                    self.auto_save(self.image_processing.clean_image(removed_foreground))
             self.bus.update_main_image(frame)
             self.bus.update_video_slider(self.second_in_video)
 
@@ -130,6 +141,7 @@ class Backend(Widget):
         return cv.resize(cropped, (w, h))
 
     def on_change_camera_btn_click(self):
+        self.final_image = None
         self.port_num = (self.port_num + 1) % len(self.ports)
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
         # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
@@ -139,6 +151,7 @@ class Backend(Widget):
         self.loop_func = Clock.schedule_interval(self.send_video, 1 / GENERAL_FPS)
 
     def on_video_link_btn_click(self, link):
+        self.final_image = None
         if 'www.youtube.com' in link:
             yt = YouTube(link)
             video = yt.streams.get_highest_resolution()
@@ -217,7 +230,27 @@ class Backend(Widget):
         while os.path.exists(os.path.join(self.output_path, f'whiteboard_{i}.pdf')):
             i += 1
 
-        pil_list[0].save(os.path.join(self.output_path, f'whiteboard_{i}.pdf'), save_all=True, append_images=pil_list[1:])
+        pil_list[0].save(os.path.join(self.output_path, f'whiteboard_{i}.pdf'), save_all=True,
+                         append_images=pil_list[1:])
+
+    def on_auto_save_btn_click(self):
+        self.is_auto_save = not self.is_auto_save
+
+    def auto_save(self, image):
+        # threshold the image so the pen strikes will be uniform
+        self.auto_save_cache_images.put(image)
+        curr_image = cv.cvtColor(image, cv.COLOR_BGR2GRAY)
+        _, curr_image = cv.threshold(curr_image, 240, 255, cv.THRESH_BINARY_INV)
+        curr_average = np.average(curr_image)
+        self.auto_save_cache_averages.put(np.average(curr_average))
+
+        if self.auto_save_cache_images.full():
+            prev_image = self.auto_save_cache_images.get()
+            prev_average = self.auto_save_cache_averages.get()
+            if prev_average/curr_average > 1.5:
+                self.saved_image_dict[str(self.image_counter)] = prev_image
+                self.bus.add_saved_image(prev_image, self.image_counter)
+                self.image_counter += 1
 
     def list_ports(self):
         """
