@@ -5,6 +5,8 @@ from kivy.properties import NumericProperty, ObjectProperty, ListProperty, Boole
 from bus.bus import Bus
 from kivy.metrics import dp
 from kivy.uix.image import Image
+from kivy.uix.button import Button
+
 
 class VideoSlider(BoxLayout):
     video_length_in_seconds = NumericProperty(0)
@@ -56,8 +58,8 @@ class MainImageBlock(RelativeLayout):
                         self.points.clear()
                         self.canvas.clear()
                     d = dp(10)
-                    pos = (touch.x - d / 2, touch.y - d / 2 )
-                    self.points.append((touch.x, touch.y ))
+                    pos = (touch.x - d / 2, touch.y - d / 2)
+                    self.points.append((touch.x, touch.y))
                     self.rectangle_start_x, self.rectangle_start_y = touch.x, touch.y
                     Color(1, 1, 0, 0.5)
                     Ellipse(pos=pos, size=(d, d))
@@ -98,7 +100,7 @@ class MainImageBlock(RelativeLayout):
                     self.zoom_center_start_x = touch.x
                     self.zoom_center_start_y = touch.y
                 self.parent.parent.parent.bus.on_change_zoom_center(self.zoom_center_start_x - touch.x,
-                                                             self.zoom_center_start_y - touch.y)
+                                                                    self.zoom_center_start_y - touch.y)
 
     def is_on_image(self, touch):
         if self.collide_point(*touch.pos):
@@ -224,7 +226,24 @@ class Frontend(BoxLayout):
     def on_shot_btn_click(self):
         self.bus.on_shot_btn_click()
 
-    def add_saved_image(self, texture):
+    def add_saved_image(self, texture, image_id):
+        box = BoxLayout(orientation='vertical')
         img = Image(texture=texture)
-        self.ids.saved_img_list.height += img.height
-        self.ids.saved_img_list.add_widget(img)
+        box.add_widget(img)
+        btn = Button(size_hint=(0.5, 0.5), pos_hint={'center_x': 0.5, 'center_y': 0.5},
+                     text='delete')
+        btn.create_property('image_id')
+        btn.image_id = image_id
+        btn.bind(on_press=self.delete_image_btn_press)
+        box.add_widget(btn)
+        self.ids.saved_img_list.height += box.height
+        self.ids.saved_img_list.add_widget(box)
+
+    def delete_image_btn_press(self, obj):
+        self.bus.delete_image_btn_press(obj.image_id)
+        self.ids.saved_img_list.height -= obj.parent.height
+        self.ids.saved_img_list.remove_widget(obj.parent)
+
+    def export_as_pdf_btn_click(self):
+        self.bus.export_as_pdf_btn_click()
+

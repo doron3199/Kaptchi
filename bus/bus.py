@@ -64,5 +64,11 @@ class Bus:
     def on_shot_btn_click(self):
         self._backend.on_shot_btn_click()
 
-    def add_saved_image(self, image):
-        self._frontend.add_saved_image(self.convert_image_to_texture(image))
+    def add_saved_image(self, image, value):
+        self._frontend.add_saved_image(self.convert_image_to_texture(image), value)
+
+    def delete_image_btn_press(self, image_id):
+        self._backend.delete_image_btn_press(image_id)
+
+    def export_as_pdf_btn_click(self):
+        self._backend.export_as_pdf_btn_click()

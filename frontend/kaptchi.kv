@@ -24,21 +24,12 @@ Frontend:
             size_hint_x: 0.2 if self.visible else 0
             opacity: 1 if self.visible else 0
             disabled: not self.visible
-            BoxLayout:
-                ScrollView:
-                    BoxLayout:
-                        orientation: 'vertical'
-                        id: saved_img_list
-                        size_hint: 1, None
-                        height: self.minimum_height
-            Button:
-                id: pdf_export_btn
-                size_hint: 1,0.1
-                text: 'Export as PDF'
-#            Button:
-#                 id: image_export_btn
-#                size_hint: 1,0.1
-#                text: 'Export as images'
+            ScrollView:
+                BoxLayout:
+                    orientation: 'vertical'
+                    id: saved_img_list
+                    size_hint: 1, None
+                    height: self.minimum_height
 
 
     BoxLayout:
@@ -104,10 +95,18 @@ Frontend:
                 id: remove_foreground_btn
                 text: 'remove foreground'
                 on_state: root.on_remove_foreground_btn_click()
-            Button:
-                id: shot_btn
-                text: 'shot'
-                on_press: root.on_shot_btn_click()
+            BoxLayout:
+                orientation: 'vertical'
+                Button:
+                    id: shot_btn
+                    text: 'shot'
+                    on_press: root.on_shot_btn_click()
+                Button:
+                    id: pdf_export_btn
+                    text: 'Export as PDF'
+                    on_press: root.export_as_pdf_btn_click()
+
+
 
 <MainImageBlock>:
 

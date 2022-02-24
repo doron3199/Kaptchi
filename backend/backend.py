@@ -7,6 +7,7 @@ import logging
 from pytube import YouTube
 import os
 import pathlib
+from PIL import Image as PIL_Image
 from imutils.video import FileVideoStream
 from backend.image_processing import WhiteboardFilter
 from backend.transfrom import four_point_transform
@@ -22,6 +23,7 @@ class Backend(Widget):
         super(Backend, self).__init__(**kwargs)
         self.raw_videos_path = ''
         self.edited_videos_path = ''
+        self.output_path = ''
         self.database_init()
         self.bus = None
         self.cap = None
@@ -44,7 +46,8 @@ class Backend(Widget):
         self.parts = []
         self.final_image = None
         self.current_frame = None
-        self.saved_image_list = []
+        self.saved_image_dict = {}
+        self.image_counter = 0
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -163,9 +166,9 @@ class Backend(Widget):
         database_path = os.path.join(parent_path, 'database')
         if not os.path.isdir(database_path):
             os.mkdir(database_path)
-            for folder in ['raw_videos', 'edited_videos']:
+            for folder in ['raw_videos', 'edited_videos', 'output']:
                 os.mkdir(os.path.join(database_path, folder))
-        for folder in ['raw_videos', 'edited_videos']:
+        for folder in ['raw_videos', 'edited_videos', 'output']:
             folder_path = os.path.join(database_path, folder)
             if not os.path.isdir(folder_path):
                 os.mkdir(folder_path)
@@ -196,9 +199,25 @@ class Backend(Widget):
             self.play = value
 
     def on_shot_btn_click(self):
-        self.saved_image_list.append(self.current_frame)
-        self.bus.add_saved_image(self.current_frame)
+        self.saved_image_dict[str(self.image_counter)] = self.current_frame
+        self.bus.add_saved_image(self.current_frame, self.image_counter)
+        self.image_counter += 1
 
+    def delete_image_btn_press(self, image_id):
+        self.saved_image_dict.pop(str(image_id))
+
+    def export_as_pdf_btn_click(self):
+        pil_list = []
+
+        for image in self.saved_image_dict.values():
+            tmp = cv.cvtColor(image, cv.COLOR_BGR2RGB)
+            pil_list.append(PIL_Image.fromarray(tmp).convert('RGB'))
+
+        i = 0
+        while os.path.exists(os.path.join(self.output_path, f'whiteboard_{i}.pdf')):
+            i += 1
+
+        pil_list[0].save(os.path.join(self.output_path, f'whiteboard_{i}.pdf'), save_all=True, append_images=pil_list[1:])
 
     def list_ports(self):
         """
