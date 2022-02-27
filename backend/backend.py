@@ -16,7 +16,7 @@ from queue import Queue
 HIGH_VALUE = 10000
 ZOOM_VALUE_FULL = 0.5
 GENERAL_FPS = 30.0
-NUMBER_OF_PARTS = 10
+NUMBER_OF_PARTS = 100
 AUTO_SAVE_QUEUE_SIZE = int(GENERAL_FPS * 3)
 
 class Backend(Widget):
@@ -43,7 +43,6 @@ class Backend(Widget):
         self.slider_time = 0
         self.is_remove_foreground_on = False
         self.fgbg = cv.createBackgroundSubtractorKNN()
-        self.fgbg.setHistory(300)
         self.parts = []
         self.final_image = None
         self.current_frame = None
