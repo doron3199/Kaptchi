@@ -76,9 +76,7 @@ class Backend(Widget):
                     self.loop_func.cancel()
                     return
                 frame = self.cap.read()
-                # you can also just count it, maybe better performance?
                 self.second_in_video = int(self.cap.stream.get(cv.CAP_PROP_POS_MSEC) / 1000)
-                s = self.second_in_video
             else:
                 ret, frame = self.cap.read()
                 if not ret:
@@ -89,9 +87,11 @@ class Backend(Widget):
                 frame = self.remove_foreground(frame)
                 removed_foreground = frame
             else:
+                pass
                 # then there is still a background picture to use
                 removed_foreground = self.remove_foreground(frame)
-            frame = self.zoom_image(frame)
+            if self.zoom != ZOOM_VALUE_FULL:
+                frame = self.zoom_image(frame)
             if self.is_whiteboard_filter_on:
                 frame = self.image_processing.clean_image(frame)
             if len(self.points_to_cut) == 4:
