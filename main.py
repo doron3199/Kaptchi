@@ -7,7 +7,7 @@ from frontend.frontend import Frontend
 from bus.bus import Bus
 from backend.backend import Backend
 from kivy.lang import Builder
-
+import os
 
 class KaptchiApp(App):
     def __init__(self, **kwargs):
@@ -15,7 +15,7 @@ class KaptchiApp(App):
         self.backend = None
 
     def build(self):
-        Builder.load_file('frontend/kaptchi.kv')
+        Builder.load_file(os.path.join('frontend','kaptchi.kv'))
         frontend = Frontend()
         bus = Bus()
         self.backend = Backend()
