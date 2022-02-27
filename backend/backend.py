@@ -26,7 +26,7 @@ class Backend(Widget):
     def __init__(self, **kwargs):
         super(Backend, self).__init__(**kwargs)
         self.play = True
-        self.transform = Transform()
+        self.transform = Transform().start()
         self.raw_videos_path = ''
         self.edited_videos_path = ''
         self.output_path = ''
@@ -42,6 +42,11 @@ class Backend(Widget):
         self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_counter = 0
+        # used to record the time when we processed last frame
+        self.prev_frame_time = 0
+
+        # used to record the time at which we processed current frame
+        self.new_frame_time = 0
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -60,17 +65,31 @@ class Backend(Widget):
         """send video to the bus"""
         if self.play:
             # Capture frame-by-frame
-            self.current_frame = self.get_frame()
-            if self.current_frame is None:
+            frame = self.get_frame()
+            if frame is None:
                 self.loop_func.cancel()
                 return
-            # self.current_frame = self.transform.transform(frame)
+
+            # because we want the read and the ui will be somewhat in the
+            # same rate, we put the transform in a different thread.
+            # for example if the transform is too long, then we use
+            # the previous image, until we get the new transform image.
+            # but we still read the video, and we throw away frames that
+            # we don't want (mainly the transform is long when we use it
+            # remove foreground, so we don't see guttering or jumping
+            self.transform.put(frame)
+            if self.transform.more():
+                self.current_frame = self.transform.read()
+
+            # just for the first frame
+            if self.current_frame is None:
+                self.current_frame = frame
             # if self.is_auto_save:
             #     if self.is_whiteboard_filter_on:
             #         self.auto_save(frame)
             #     else:
             #         self.auto_save(self.image_processing.clean_image(removed_foreground))
-            self.bus.update_main_image(self.current_frame)
+            self.bus.update_main_image(frame)
             self.bus.update_video_slider(self.second_in_video)
 
     def get_frame(self):
@@ -88,11 +107,12 @@ class Backend(Widget):
                 return None
 
     def on_change_zoom_center(self, x, y):
-        self.transform.zoom_center_x += int(x * self.transform.zoom * 9)
-        self.transform.zoom_center_y += int(-y * self.transform.zoom * 9)
+        zoom = self.transform.get_variable('zoom')
+        self.transform.set_variable('zoom_center_x', self.transform.get_variable('zoom_center_x') + int(x * zoom * 9))
+        self.transform.set_variable('zoom_center_y', self.transform.get_variable('zoom_center_y') + int(-y * zoom * 9))
 
     def on_change_camera_btn_click(self):
-        self.transform.final_image = None
+        self.transform.set_variable('final_image', None)
         self.port_num = (self.port_num + 1) % len(self.ports)
         self.cap = cv2.VideoCapture(self.ports[self.port_num], cv2.CAP_DSHOW)
         # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
@@ -102,18 +122,18 @@ class Backend(Widget):
         self.loop_func = Clock.schedule_interval(self.send_video, 1 / GENERAL_FPS)
 
     def on_video_link_btn_click(self, link):
-        self.transform.final_image = None
+        self.transform.set_variable('final_image', None)
         if 'www.youtube.com' in link:
             yt = YouTube(link)
             video = yt.streams.get_highest_resolution()
-            self.cap = FileVideoStream(video.url,transform=self.transform.transform).start()
+            self.cap = FileVideoStream(video.url, transform=self.transform.transform).start()
             self.loop_func.cancel()
             fps = video.fps
             self.loop_func = Clock.schedule_interval(self.send_video, 1 / fps)
             video_length_in_seconds = yt.length
             self.bus.set_video_bar(video_length_in_seconds)
         else:
-            self.cap = FileVideoStream(link,transform=self.transform.transform).start()
+            self.cap = FileVideoStream(link, transform=self.transform.transform).start()
             video_length_in_seconds = int(self.cap.stream.get(
                 cv2.CAP_PROP_FRAME_COUNT) / self.cap.stream.get(cv2.CAP_PROP_FPS))
             self.bus.set_video_bar(video_length_in_seconds)
@@ -146,18 +166,20 @@ class Backend(Widget):
             self.cap.release()
 
     def on_whiteboard_filter_btn_click(self):
-        self.transform.is_whiteboard_filter_on = not self.transform.is_whiteboard_filter_on
+        self.transform.set_variable('is_whiteboard_filter_on',
+                                    not self.transform.get_variable('is_whiteboard_filter_on'))
 
     def on_remove_foreground_btn_click(self):
-        self.transform.is_remove_foreground_on = not self.transform.is_remove_foreground_on
+        self.transform.set_variable('is_remove_foreground_on',
+                                    not self.transform.get_variable('is_remove_foreground_on'))
 
     def on_zoom_change(self, zoom):
         """we receive the zoom value as percentage, set it as a factor of magnification. multiply by
         0.99 because zoom = 0 will break the program. device by 2 because we do it from the middle"""
-        self.transform.zoom = (1 - zoom * 0.99) / 2
+        self.transform.set_variable('zoom', (1 - zoom * 0.99) / 2)
 
     def cut_region(self, cut_region):
-        self.transform.points_to_cut = np.array(cut_region)
+        self.transform.set_variable('points_to_cut', np.array(cut_region))
 
     def play_pause(self, value=None):
         if value is None:
@@ -229,7 +251,8 @@ class Backend(Widget):
 
 
 class Transform:
-    def __init__(self):
+    def __init__(self, queue_size=1):
+        self.stopped = False
         self.zoom = 0.5
         self.zoom_center_x = 0
         self.zoom_center_y = 0
@@ -246,15 +269,69 @@ class Transform:
         self.saved_image_dict = {}
         self.image_counter = 0
 
+        # initialize the queue used to store frames read from
+        # the video file
+        self.Q_in = Queue(maxsize=queue_size)
+        self.Q_out = Queue(maxsize=queue_size)
+
+        # intialize thread
+        self.thread = Thread(target=self.update, args=())
+        self.thread.daemon = True
+
+    def set_variable(self, key, value):
+        with self.Q_in.mutex:
+            self.Q_in.queue.clear()
+            self.__setattr__(key, value)
+
+    def get_variable(self, key):
+        with self.Q_in.mutex:
+            return self.__getattribute__(key)
+
+    def start(self):
+        # start a thread to read frames from the file video stream
+        self.thread.start()
+        return self
+
+    def put(self, image):
+        if not self.Q_in.full():
+            self.Q_in.put(image)
+
+    def update(self):
+        while True:
+            if not self.Q_in.empty():
+                image = self.Q_in.get()
+                with self.Q_in.mutex:
+                    image = self.transform(image)
+                self.Q_out.put(image)
+            else:
+                time.sleep(0.1)
+
+    def read(self):
+        # return next frame in the queue
+        return self.Q_out.get()
+
+    # Insufficient to have consumer use while(more()) which does
+    # not take into account if the producer has reached end of
+    # file stream.
+    def running(self):
+        return self.more() or not self.stopped
+
+    def more(self):
+        return self.Q_out.qsize() > 0
+
+    def stop(self):
+        # indicate that the thread should be stopped
+        self.stopped = True
+        # wait until stream resources are released (producer thread might be still grabbing frame)
+        self.thread.join()
+
     def transform(self, image):
         # if frame is read correctly ret is True
         if self.is_remove_foreground_on:
             image = self.remove_foreground(image)
-            removed_foreground = image
         else:
-            pass
             # then there is still a background picture to use
-            removed_foreground = self.remove_foreground(image)
+            self.remove_foreground(image)
         if self.zoom != ZOOM_VALUE_FULL:
             image = self.zoom_image(image)
         if self.is_whiteboard_filter_on:
@@ -292,6 +369,5 @@ class Transform:
         self.zoom_center_x = min(max(self.zoom_center_x, width_crop), w - width_crop)
         self.zoom_center_y = min(max(self.zoom_center_y, height_crop), h - height_crop)
         cropped = image[self.zoom_center_y - height_crop: self.zoom_center_y + height_crop,
-                        self.zoom_center_x - width_crop: self.zoom_center_x + width_crop]
+                  self.zoom_center_x - width_crop: self.zoom_center_x + width_crop]
         return cv2.resize(cropped, (w, h))
-
