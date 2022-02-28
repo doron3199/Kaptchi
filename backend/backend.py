@@ -17,8 +17,8 @@ import time
 
 HIGH_VALUE = 10000
 ZOOM_VALUE_FULL = 0.5
-GENERAL_FPS = 30.0
-NUMBER_OF_PARTS = 10
+GENERAL_FPS = 30
+NUMBER_OF_PARTS = 50
 AUTO_SAVE_QUEUE_SIZE = int(GENERAL_FPS * 3)
 
 
@@ -42,10 +42,7 @@ class Backend(Widget):
         self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_counter = 0
-        # used to record the time when we processed last frame
         self.prev_frame_time = 0
-
-        # used to record the time at which we processed current frame
         self.new_frame_time = 0
 
     def set(self, bus: Bus):
@@ -53,6 +50,7 @@ class Backend(Widget):
         self.start()
 
     def start(self):
+        """use to start the camera in the beginning"""
         self.cap = cv2.VideoCapture(self.ports[self.port_num], cv2.CAP_DSHOW)
         # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
@@ -61,7 +59,7 @@ class Backend(Widget):
             logging.error("Cannot open camera")
         self.loop_func = Clock.schedule_interval(self.send_video, 1 / GENERAL_FPS)
 
-    def send_video(self, dt):
+    def send_video(self, _):
         """send video to the bus"""
         if self.play:
             # Capture frame-by-frame
@@ -70,17 +68,23 @@ class Backend(Widget):
                 self.loop_func.cancel()
                 return
 
-            # because we want the read and the ui will be somewhat in the
-            # same rate, we put the transform in a different thread.
-            # for example if the transform is too long, then we use
-            # the previous image, until we get the new transform image.
-            # but we still read the video, and we throw away frames that
-            # we don't want (mainly the transform is long when we use it
-            # remove foreground, so we don't see guttering or jumping
+            # put the latest image in the queue
             self.transform.put(frame)
+            transform_frame = None
+            # check if the latest image finished, it may be from previous loop
             if self.transform.more():
-                self.current_frame = self.transform.read()
+                transform_frame = self.transform.read()
 
+            # if remove foreground is on, we don't need to worry about lagging,
+            # se we can put images not in 30 fps
+            if self.transform.get_variable('is_remove_foreground_on'):
+                if transform_frame is not None:
+                    self.current_frame = transform_frame
+            else:
+                # if not, we need to put images at a fast FPS, so we take the original frame and
+                # use it. with the fast transform function we can still zoom in and move
+                self.current_frame = self.fast_transform(frame, self.transform.get_variable('points_to_cut'),
+                                                         self.transform.get_variable('zoom'))
             # just for the first frame
             if self.current_frame is None:
                 self.current_frame = frame
@@ -89,10 +93,26 @@ class Backend(Widget):
             #         self.auto_save(frame)
             #     else:
             #         self.auto_save(self.image_processing.clean_image(removed_foreground))
-            self.bus.update_main_image(frame)
+            self.bus.update_main_image(self.current_frame)
             self.bus.update_video_slider(self.second_in_video)
 
+    def print_fps(self):
+        self.new_frame_time = time.time()
+        fps = 1 / (self.new_frame_time - self.prev_frame_time)
+        self.prev_frame_time = self.new_frame_time
+        print(int(fps))
+
+    def fast_transform(self, image, four_points, zoom):
+        """this is fast transform function that should not make lagging
+        use for when the remove foreground is off so we need flow motion"""
+        if zoom != ZOOM_VALUE_FULL:
+            image = self.transform.zoom_image(image)
+        if len(four_points) == 4:
+            image = four_point_transform(image, four_points)
+        return image
+
     def get_frame(self):
+        """get frame from camera or video"""
         if isinstance(self.cap, FileVideoStream):
             if self.cap.more():
                 self.second_in_video = int(self.cap.stream.get(cv2.CAP_PROP_POS_MSEC) / 1000)
@@ -126,14 +146,14 @@ class Backend(Widget):
         if 'www.youtube.com' in link:
             yt = YouTube(link)
             video = yt.streams.get_highest_resolution()
-            self.cap = FileVideoStream(video.url, transform=self.transform.transform).start()
+            self.cap = FileVideoStream(video.url, queue_size=5).start()
             self.loop_func.cancel()
             fps = video.fps
             self.loop_func = Clock.schedule_interval(self.send_video, 1 / fps)
             video_length_in_seconds = yt.length
             self.bus.set_video_bar(video_length_in_seconds)
         else:
-            self.cap = FileVideoStream(link, transform=self.transform.transform).start()
+            self.cap = FileVideoStream(link, queue_size=5).start()
             video_length_in_seconds = int(self.cap.stream.get(
                 cv2.CAP_PROP_FRAME_COUNT) / self.cap.stream.get(cv2.CAP_PROP_FPS))
             self.bus.set_video_bar(video_length_in_seconds)
@@ -262,8 +282,7 @@ class Transform:
         self.fps = 0
         self.slider_time = 0
         self.is_remove_foreground_on = False
-        self.fgbg = cv2.createBackgroundSubtractorKNN()
-        self.fgbg.setHistory(300)
+        self.fgbg = cv2.createBackgroundSubtractorKNN(history=100, dist2Threshold=200, detectShadows=False)
         self.parts = []
         self.final_image = None
         self.saved_image_dict = {}
@@ -329,6 +348,7 @@ class Transform:
         # if frame is read correctly ret is True
         if self.is_remove_foreground_on:
             image = self.remove_foreground(image)
+
         else:
             # then there is still a background picture to use
             self.remove_foreground(image)
@@ -352,7 +372,6 @@ class Transform:
                 np.multiply(image[:, dist[i]:dist[i + 1]], still) + \
                 np.multiply(self.final_image[:, dist[i]:dist[i + 1]], not still)
         return self.final_image
-
     def on_change_zoom_center(self, x, y):
         self.zoom_center_x += int(x * self.zoom * 9)
         self.zoom_center_y += int(-y * self.zoom * 9)
