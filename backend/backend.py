@@ -39,11 +39,12 @@ class Backend(Widget):
         self.port_num = 0
         self.current_frame = None
         self.is_auto_save = False
-        self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
-        self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_counter = 0
         self.prev_frame_time = 0
         self.new_frame_time = 0
+        self.saved_image_dict = {}
+        self.image_counter = 0
+        self.auto_save = AutoSave(self.saved_image_dict, self.image_counter, self.bus).start()
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -88,11 +89,13 @@ class Backend(Widget):
             # just for the first frame
             if self.current_frame is None:
                 self.current_frame = frame
-            # if self.is_auto_save:
-            #     if self.is_whiteboard_filter_on:
-            #         self.auto_save(frame)
-            #     else:
-            #         self.auto_save(self.image_processing.clean_image(removed_foreground))
+
+            # make sure that auto save is working while sending there the images
+            if self.is_auto_save:
+                self.auto_save.turn_on()
+                self.auto_save.put(self.transform.get_last_removed_foreground())
+            else:
+                self.auto_save.turn_of()
             self.bus.update_main_image(self.current_frame)
             self.bus.update_video_slider(self.second_in_video)
 
@@ -232,22 +235,6 @@ class Backend(Widget):
     def on_auto_save_btn_click(self):
         self.is_auto_save = not self.is_auto_save
 
-    def auto_save(self, image):
-        # threshold the image so the pen strikes will be uniform
-        self.auto_save_cache_images.put(image)
-        curr_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        _, curr_image = cv2.threshold(curr_image, 240, 255, cv2.THRESH_BINARY_INV)
-        curr_average = np.average(curr_image)
-        self.auto_save_cache_averages.put(np.average(curr_average))
-
-        if self.auto_save_cache_images.full():
-            prev_image = self.auto_save_cache_images.get()
-            prev_average = self.auto_save_cache_averages.get()
-            if prev_average / curr_average > 1.5:
-                self.saved_image_dict[str(self.image_counter)] = prev_image
-                self.bus.add_saved_image(prev_image, self.image_counter)
-                self.image_counter += 1
-
     def list_ports(self):
         """
         Test the ports and returns a tuple with the available ports and the ones that are working.
@@ -285,8 +272,7 @@ class Transform:
         self.fgbg = cv2.createBackgroundSubtractorKNN(history=100, dist2Threshold=200, detectShadows=False)
         self.parts = []
         self.final_image = None
-        self.saved_image_dict = {}
-        self.image_counter = 0
+        self.last_removed_foreground = None
 
         # initialize the queue used to store frames read from
         # the video file
@@ -296,6 +282,9 @@ class Transform:
         # intialize thread
         self.thread = Thread(target=self.update, args=())
         self.thread.daemon = True
+
+    def get_last_removed_foreground(self):
+        return self.last_removed_foreground
 
     def set_variable(self, key, value):
         with self.Q_in.mutex:
@@ -348,10 +337,10 @@ class Transform:
         # if frame is read correctly ret is True
         if self.is_remove_foreground_on:
             image = self.remove_foreground(image)
-
+            self.last_removed_foreground = image
         else:
             # then there is still a background picture to use
-            self.remove_foreground(image)
+            self.last_removed_foreground = self.remove_foreground(image)
         if self.zoom != ZOOM_VALUE_FULL:
             image = self.zoom_image(image)
         if self.is_whiteboard_filter_on:
@@ -361,6 +350,17 @@ class Transform:
         return image
 
     def remove_foreground(self, image):
+        # ddepth = cv2.CV_16S
+        # kernel_size = 3
+        # src_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        # # [laplacian]
+        # # Apply Laplace function
+        # dst = cv2.Laplacian(src_gray, ddepth, ksize=kernel_size)
+        # # [laplacian]
+        # # [convert]
+        # # converting back to uint8
+        # abs_dst = cv2.convertScaleAbs(dst)
+        cv2.imshow('lap',image)
         fgmask = self.fgbg.apply(image)
         h, w = image.shape[0:2]
         dist = np.linspace(0, w, NUMBER_OF_PARTS, dtype=int)
@@ -390,3 +390,64 @@ class Transform:
         cropped = image[self.zoom_center_y - height_crop: self.zoom_center_y + height_crop,
                   self.zoom_center_x - width_crop: self.zoom_center_x + width_crop]
         return cv2.resize(cropped, (w, h))
+
+
+class AutoSave:
+    def __init__(self, saved_image_dict, image_counter, bus, queue_size=1):
+        self.bus = bus
+        self.saved_image_dict = saved_image_dict
+        self.image_counter = image_counter
+        self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
+        self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
+        # initialize the queue used to store frames read from
+        # the video file
+        self.Q = Queue(maxsize=queue_size)
+        self.is_on = False
+        self.stopped = False
+        # intialize thread
+        self.thread = Thread(target=self.update, args=())
+        self.thread.daemon = True
+        self.max_ratio = 0
+
+    def start(self):
+        # start a thread to read frames from the file video stream
+        self.thread.start()
+        return self
+
+    def turn_on(self):
+        self.is_on = True
+
+    def put(self, image):
+        if not self.Q.full():
+            self.Q.put(image)
+
+    def update(self):
+        while True:
+            if not self.Q.empty() and self.is_on:
+                self.auto_save(self.Q.get())
+            else:
+                time.sleep(0.1)
+
+    def turn_of(self):
+        self.is_on = False
+
+    def auto_save(self, image):
+        # threshold the image so the pen strikes will be uniform
+        self.auto_save_cache_images.put(image)
+        curr_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        _, curr_image = cv2.threshold(curr_image, 240, 255, cv2.THRESH_BINARY_INV)
+        curr_average = np.average(curr_image)
+        self.auto_save_cache_averages.put(np.average(curr_average))
+
+        if self.auto_save_cache_images.full():
+            prev_image = self.auto_save_cache_images.get()
+            prev_average = self.auto_save_cache_averages.get()
+            ratio = prev_average / curr_average
+            if ratio > self.max_ratio:
+                self.max_ratio = ratio
+                print(self.max_ratio)
+            if ratio > 1.5:
+                self.saved_image_dict[str(self.image_counter)] = prev_image
+                self.bus.add_saved_image(prev_image, self.image_counter)
+                self.image_counter += 1
+
