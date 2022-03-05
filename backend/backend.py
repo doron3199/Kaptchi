@@ -269,10 +269,11 @@ class Transform:
         self.fps = 0
         self.slider_time = 0
         self.is_remove_foreground_on = False
-        self.fgbg = cv2.createBackgroundSubtractorKNN(history=100, dist2Threshold=200, detectShadows=False)
+        self.fgbg = cv2.createBackgroundSubtractorKNN(dist2Threshold=1200, detectShadows=False)
         self.parts = []
         self.final_image = None
         self.last_removed_foreground = None
+        self.wighted_average_image = None
 
         # initialize the queue used to store frames read from
         # the video file
@@ -350,18 +351,12 @@ class Transform:
         return image
 
     def remove_foreground(self, image):
-        # ddepth = cv2.CV_16S
-        # kernel_size = 3
-        # src_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        # # [laplacian]
-        # # Apply Laplace function
-        # dst = cv2.Laplacian(src_gray, ddepth, ksize=kernel_size)
-        # # [laplacian]
-        # # [convert]
-        # # converting back to uint8
-        # abs_dst = cv2.convertScaleAbs(dst)
-        cv2.imshow('lap',image)
-        fgmask = self.fgbg.apply(image)
+        blur = cv2.blur(image, (27, 27))
+        # normalize the luminance
+        v = cv2.cvtColor(blur, cv2.COLOR_BGR2HSV)[:, :, 2]
+        v = cv2.equalizeHist(v)
+        # apply the background subtractor on this luminance
+        fgmask = self.fgbg.apply(v)
         h, w = image.shape[0:2]
         dist = np.linspace(0, w, NUMBER_OF_PARTS, dtype=int)
         if self.final_image is None:
@@ -372,6 +367,7 @@ class Transform:
                 np.multiply(image[:, dist[i]:dist[i + 1]], still) + \
                 np.multiply(self.final_image[:, dist[i]:dist[i + 1]], not still)
         return self.final_image
+
     def on_change_zoom_center(self, x, y):
         self.zoom_center_x += int(x * self.zoom * 9)
         self.zoom_center_y += int(-y * self.zoom * 9)
@@ -450,4 +446,3 @@ class AutoSave:
                 self.saved_image_dict[str(self.image_counter)] = prev_image
                 self.bus.add_saved_image(prev_image, self.image_counter)
                 self.image_counter += 1
-
