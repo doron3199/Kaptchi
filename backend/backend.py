@@ -13,6 +13,7 @@ from backend.image_processing import WhiteboardFilter
 from backend.transfrom import four_point_transform
 from queue import Queue
 from threading import Thread
+from scipy.signal import find_peaks
 import time
 
 HIGH_VALUE = 10000
@@ -393,8 +394,8 @@ class AutoSave:
         self.bus = bus
         self.saved_image_dict = saved_image_dict
         self.image_counter = image_counter
-        self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
-        self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
+        self.auto_save_cache_images = []
+        self.auto_save_cache_averages = []
         # initialize the queue used to store frames read from
         # the video file
         self.Q = Queue(maxsize=queue_size)
@@ -422,27 +423,27 @@ class AutoSave:
             if not self.Q.empty() and self.is_on:
                 self.auto_save(self.Q.get())
             else:
-                time.sleep(0.1)
+                time.sleep(1)
 
     def turn_of(self):
         self.is_on = False
 
     def auto_save(self, image):
         # threshold the image so the pen strikes will be uniform
-        self.auto_save_cache_images.put(image)
+        self.auto_save_cache_images.append(image)
         curr_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         _, curr_image = cv2.threshold(curr_image, 240, 255, cv2.THRESH_BINARY_INV)
-        curr_average = np.average(curr_image)
-        self.auto_save_cache_averages.put(np.average(curr_average))
+        curr_average = np.sum(curr_image)
+        self.auto_save_cache_averages.append(np.average(curr_average))
 
-        if self.auto_save_cache_images.full():
-            prev_image = self.auto_save_cache_images.get()
-            prev_average = self.auto_save_cache_averages.get()
-            ratio = prev_average / curr_average
-            if ratio > self.max_ratio:
-                self.max_ratio = ratio
-                print(self.max_ratio)
-            if ratio > 1.5:
-                self.saved_image_dict[str(self.image_counter)] = prev_image
-                self.bus.add_saved_image(prev_image, self.image_counter)
-                self.image_counter += 1
+    def find_full_boards(self):
+
+        maxi = find_peaks(self.auto_save_cache_averages, width=5,distance=25)[0]
+        full_boards = [self.auto_save_cache_images[x] for x in maxi]
+
+
+
+    def send_to_ui(self, image):
+        self.saved_image_dict[str(self.image_counter)] = image
+        self.bus.add_saved_image(image, self.image_counter)
+        self.image_counter += 1
