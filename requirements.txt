@@ -1,0 +1,9 @@
+# requirements.txt
+
+Kivy==2.3.1
+numpy==2.2.4
+pillow==10.4.0
+pytube==15.0.0
+imutils==0.5.4
+Kivy-Garden==0.1.5
+opencv-python==4.11.0.86

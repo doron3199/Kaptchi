@@ -59,6 +59,9 @@ class Backend(Widget):
         self.start()
 
     def start(self):
+        if len(self.ports) == 0:
+            logging.error("No camera found")
+            return
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
         # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
         self.cap.set(cv.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
@@ -141,6 +144,9 @@ class Backend(Widget):
         return cv.resize(cropped, (w, h))
 
     def on_change_camera_btn_click(self):
+        if not self.ports:
+            logging.error("No camera found")
+            return
         self.final_image = None
         self.port_num = (self.port_num + 1) % len(self.ports)
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
@@ -192,7 +198,8 @@ class Backend(Widget):
         if isinstance(self.cap, FileVideoStream):
             self.cap.stopped = True
         else:
-            self.cap.release()
+            if self.cap is not None:
+                self.cap.release()
 
     def on_whiteboard_filter_btn_click(self):
         self.is_whiteboard_filter_on = not self.is_whiteboard_filter_on
