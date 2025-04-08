@@ -5,18 +5,19 @@ from kivy.clock import Clock
 from kivy.uix.widget import Widget
 import logging
 from pytube import YouTube
+from yt_dlp import YoutubeDL
 import os
 import pathlib
 from PIL import Image as PIL_Image
 from imutils.video import FileVideoStream
-from backend.image_processing import WhiteboardFilter
+from backend.image_processing import ImageProsessing
 from backend.transfrom import four_point_transform
 from queue import Queue
 
 HIGH_VALUE = 10000
+MEDIUM_VALUE = 1000
 ZOOM_VALUE_FULL = 0.5
 GENERAL_FPS = 30.0
-NUMBER_OF_PARTS = 10
 AUTO_SAVE_QUEUE_SIZE = int(GENERAL_FPS * 3)
 
 class Backend(Widget):
@@ -34,7 +35,7 @@ class Backend(Widget):
         self.zoom_center_x = 0
         self.zoom_center_y = 0
         self.is_whiteboard_filter_on = False
-        self.image_processing = WhiteboardFilter()
+        self.image_processing = ImageProsessing()
         self.points_to_cut = []
         self.loop_func = None
         self.second_in_video = 0
@@ -42,10 +43,8 @@ class Backend(Widget):
         self.play = True
         self.slider_time = 0
         self.is_remove_foreground_on = False
-        self.fgbg = cv.createBackgroundSubtractorKNN()
-        self.fgbg.setHistory(300)
         self.parts = []
-        self.final_image = None
+        self.removed_foreground = None
         self.current_frame = None
         self.saved_image_dict = {}
         self.image_counter = 0
@@ -53,6 +52,7 @@ class Backend(Widget):
         self.auto_save_cache_images = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_cache_averages = Queue(maxsize=AUTO_SAVE_QUEUE_SIZE)
         self.auto_save_counter = 0
+        self.frame_counter = 0
 
     def set(self, bus: Bus):
         self.bus = bus
@@ -64,8 +64,7 @@ class Backend(Widget):
             return
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
         # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
-        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
-        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, HIGH_VALUE)
+        self.toggle_cammera_resulotion(medium=True)
         if not self.cap.isOpened():
             logging.error("Cannot open camera")
         self.loop_func = Clock.schedule_interval(self.send_video, 1 / GENERAL_FPS)
@@ -73,6 +72,7 @@ class Backend(Widget):
     def send_video(self, dt):
         """send video to the bus"""
         if self.play:
+            update_bus = True
             # Capture frame-by-frame
             if isinstance(self.cap, FileVideoStream):
                 if not self.cap.more():
@@ -81,45 +81,49 @@ class Backend(Widget):
                 frame = self.cap.read()
                 # you can also just count it, maybe better performance?
                 self.second_in_video = int(self.cap.stream.get(cv.CAP_PROP_POS_MSEC) / 1000)
-                s = self.second_in_video
             else:
                 ret, frame = self.cap.read()
                 if not ret:
                     self.loop_func.cancel()
                     return
-            # if frame is read correctly ret is True
-            if self.is_remove_foreground_on:
-                frame = self.remove_foreground(frame)
-                removed_foreground = frame
-            else:
-                # then there is still a background picture to use
-                removed_foreground = self.remove_foreground(frame)
-            frame = self.zoom_image(frame)
-            if self.is_whiteboard_filter_on:
-                frame = self.image_processing.clean_image(frame)
+                
+            self.frame_counter += 1
             if len(self.points_to_cut) == 4:
                 frame = four_point_transform(frame, self.points_to_cut)
-            self.current_frame = frame
+            
+            # if frame is read correctly ret is True
+            
+            if self.removed_foreground is None:
+                self.removed_foreground = frame.copy()
+            
+            self.removed_foreground = self.image_processing.remove_foreground(frame, self.removed_foreground)
+            if self.is_remove_foreground_on:
+                if self.frame_counter % 3 == 0:
+                    frame = self.removed_foreground
+                else:
+                    update_bus = False
+            
+            
+            if self.is_whiteboard_filter_on:
+                if self.frame_counter % (np.round(self.fps*10)) == 0:
+                    frame = self.image_processing.clean_image(frame)
+                else:
+                    update_bus = False
+
             if self.is_auto_save:
                 if self.is_whiteboard_filter_on:
                     self.auto_save(frame)
                 else:
-                    self.auto_save(self.image_processing.clean_image(removed_foreground))
-            self.bus.update_main_image(frame)
-            self.bus.update_video_slider(self.second_in_video)
+                    self.auto_save(self.image_processing.clean_image(self.removed_foreground))
+            if not update_bus:
+                frame = self.last_frame
+            self.last_frame = frame.copy()
+            frame = self.zoom_image(frame)
 
-    def remove_foreground(self, image):
-        fgmask = self.fgbg.apply(image)
-        h, w = image.shape[0:2]
-        dist = np.linspace(0, w, NUMBER_OF_PARTS, dtype=int)
-        if self.final_image is None:
-            self.final_image = image.copy()
-        for i in range(NUMBER_OF_PARTS - 1):
-            still = not (np.average(fgmask[:, dist[i]:dist[i + 1]]))
-            self.final_image[:, dist[i]:dist[i + 1]] = \
-                np.multiply(image[:, dist[i]:dist[i + 1]], still) + \
-                np.multiply(self.final_image[:, dist[i]:dist[i + 1]], not still)
-        return self.final_image
+            self.current_frame = frame
+            self.bus.update_main_image(frame)
+            
+            self.bus.update_video_slider(self.second_in_video)
 
     def cut_region(self, cut_region):
         self.points_to_cut = np.array(cut_region)
@@ -147,25 +151,38 @@ class Backend(Widget):
         if not self.ports:
             logging.error("No camera found")
             return
-        self.final_image = None
+        self.removed_foreground = None
         self.port_num = (self.port_num + 1) % len(self.ports)
         self.cap = cv.VideoCapture(self.ports[self.port_num], cv.CAP_DSHOW)
-        # HIGH_VALUE set the highest resolution of the camera, even if it not the actual resolution
-        self.cap.set(cv.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
-        self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, HIGH_VALUE)
+        self.toggle_cammera_resulotion(medium=True)
         self.loop_func.cancel()
         self.loop_func = Clock.schedule_interval(self.send_video, 1 / GENERAL_FPS)
 
     def on_video_link_btn_click(self, link):
-        self.final_image = None
+        self.removed_foreground = None
         if 'www.youtube.com' in link:
-            yt = YouTube(link)
-            video = yt.streams.get_highest_resolution()
-            self.cap = FileVideoStream(video.url).start()
+            # yt = YouTube(link)
+            # video = yt.streams.get_highest_resolution()
+            ydl_opts = {
+                'format': 'bestvideo/best',  # Download best video and audio and merge
+                # 'outtmpl': f'{save_path}/%(title)s.%(ext)s',  # Save file format
+                'merge_output_format': 'mp4',  # Merge video and audio into MP4 format
+            }
+            try:
+                with YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(link, download=False)
+                    video_url = info.get('url')  # Use .get() to avoid KeyError
+                    video_length_in_seconds = info.get('duration')  # Use .get() to avoid KeyError
+
+                    if not video_url or not video_length_in_seconds:
+                        raise ValueError("Failed to retrieve video URL or duration.")
+            except Exception as e:
+                logging.error(f"Error processing YouTube link: {e}")
+                return
+            self.cap = FileVideoStream(video_url).start()
             self.loop_func.cancel()
-            self.fps = video.fps
+            self.fps = info.get('fps', GENERAL_FPS)
             self.loop_func = Clock.schedule_interval(self.send_video, 1 / self.fps)
-            video_length_in_seconds = yt.length
             self.bus.set_video_bar(video_length_in_seconds)
         else:
             self.cap = FileVideoStream(link).start()
@@ -279,3 +296,16 @@ class Backend(Widget):
                     available_ports.append(dev_port)
             dev_port += 1
         return working_ports
+
+
+    def toggle_cammera_resulotion(self, medium: bool = False, high: bool = False):
+        """toggle the camera resolution between medium and high"""
+        if medium and high or not medium and not high:
+            logging.error("Please set only one resolution")
+            return
+        if medium:
+            self.cap.set(cv.CAP_PROP_FRAME_WIDTH, MEDIUM_VALUE)
+            self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, MEDIUM_VALUE)
+        elif high:
+            self.cap.set(cv.CAP_PROP_FRAME_WIDTH, HIGH_VALUE)
+            self.cap.set(cv.CAP_PROP_FRAME_HEIGHT, HIGH_VALUE)
