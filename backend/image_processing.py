@@ -48,7 +48,7 @@ class ImageProsessing:
         if final_image is None:
             final_image = image.copy()
         if final_image.shape != image.shape:
-            raise ValueError("final_image and image must have the same dimensions.")
+            final_image = cv.resize(final_image, (image.shape[1], image.shape[0]))
         
         scale = 0.1
         small_frame = cv.resize(image, (0, 0), fx=scale, fy=scale)

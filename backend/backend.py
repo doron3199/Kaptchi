@@ -15,7 +15,7 @@ from backend.transfrom import four_point_transform
 from queue import Queue
 
 HIGH_VALUE = 10000
-MEDIUM_VALUE = 1000
+MEDIUM_VALUE = 1024
 ZOOM_VALUE_FULL = 0.5
 GENERAL_FPS = 30.0
 AUTO_SAVE_QUEUE_SIZE = int(GENERAL_FPS * 3)
@@ -157,6 +157,18 @@ class Backend(Widget):
         self.toggle_cammera_resulotion(medium=True)
         self.loop_func.cancel()
         self.loop_func = Clock.schedule_interval(self.send_video, 1 / GENERAL_FPS)
+
+    def on_camera_quality_btn_click(self):
+        if self.cap is None:
+            logging.error("No camera found")
+            return
+        if self.cap.get(cv.CAP_PROP_FRAME_WIDTH) > MEDIUM_VALUE:
+            self.toggle_cammera_resulotion(medium=True)
+            value = 'medium'
+        else:
+            self.toggle_cammera_resulotion(high=True)
+            value = 'high'
+        return f'{value} quality'
 
     def on_video_link_btn_click(self, link):
         self.removed_foreground = None

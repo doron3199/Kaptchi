@@ -168,12 +168,17 @@ class Frontend(BoxLayout):
     image_width = NumericProperty(0)
     frame_counter = NumericProperty(0)
     video_link_value = StringProperty("")
+    camera_quality_text = StringProperty("medium quality")
     pick_button_disabled = BooleanProperty(True)
     is_video_player = BooleanProperty(False)
     play = BooleanProperty(True)
 
     def set(self, bus: Bus):
         self.bus = bus
+
+    def on_camera_quality_btn_click(self):
+        quality_text = self.bus.on_camera_quality_btn_click()
+        self.camera_quality_text = quality_text
 
     def on_change_camera_btn_click(self):
         self.is_video_player = False

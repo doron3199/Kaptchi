@@ -31,6 +31,9 @@ class Bus:
     def on_change_camera_btn_click(self):
         self._backend.on_change_camera_btn_click()
 
+    def on_camera_quality_btn_click(self):
+        return self._backend.on_camera_quality_btn_click()
+
     def on_zoom_change(self, zoom):
         self._backend.on_zoom_change(zoom)
 

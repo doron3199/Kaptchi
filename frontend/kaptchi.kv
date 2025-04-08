@@ -94,6 +94,12 @@ Frontend:
                 halign: 'center'
                 text_size: None,None
                 on_press: root.on_change_camera_btn_click()
+            Button:
+                text: root.camera_quality_text
+                valign: 'center'
+                halign: 'center'
+                text_size: None,None
+                on_press: root.on_camera_quality_btn_click()
             ToggleButton:
                 text: 'cut region'
                 on_state: root.on_cut_region_btn_click()
