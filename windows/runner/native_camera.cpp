@@ -1,5 +1,6 @@
 #include "native_camera.h"
 #include <iostream>
+#include <cmath>
 
 // Global instance pointer
 NativeCamera* g_native_camera = nullptr;
@@ -24,6 +25,17 @@ NativeCamera::NativeCamera(flutter::TextureRegistrar* texture_registrar)
     flutter_pixel_buffer_->buffer = nullptr;
     flutter_pixel_buffer_->release_callback = nullptr;
     flutter_pixel_buffer_->release_context = nullptr;
+
+    // Initialize Background Subtractor
+    back_sub_ = cv::createBackgroundSubtractorKNN();
+    // Note: setHistory is not directly available on the base class pointer in some versions, 
+    // but createBackgroundSubtractorKNN returns a Ptr to BackgroundSubtractorKNN which has it.
+    // We cast it or just rely on default. Let's try to cast if needed, or just use default.
+    // Default history is usually 500. Python code used 300.
+    auto knn = std::dynamic_pointer_cast<cv::BackgroundSubtractorKNN>(back_sub_);
+    if (knn) {
+        knn->setHistory(300);
+    }
 }
 
 NativeCamera::~NativeCamera() {
@@ -125,16 +137,145 @@ void NativeCamera::ProcessFrame(cv::Mat& frame) {
             // Invert
             cv::bitwise_not(frame, frame);
         } else if (mode == 2) {
-            // Whiteboard
+            // Whiteboard (Legacy)
             cv::Mat gray;
             cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
             cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, 10);
             cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
         } else if (mode == 3) {
-            // Obstacle / Blur
+            // Obstacle / Blur (Legacy)
             cv::GaussianBlur(frame, frame, cv::Size(15, 15), 0);
+        } else if (mode == 4) {
+            // Smart Whiteboard
+            ApplySmartWhiteboard(frame);
+        } else if (mode == 5) {
+            // Smart Obstacle Removal
+            ApplySmartObstacleRemoval(frame);
         }
     }
+}
+
+void NativeCamera::ApplySmartWhiteboard(cv::Mat& frame) {
+    // 1. Create blurred version (Median Blur requires 8-bit input)
+    cv::Mat blurred_8u;
+    cv::medianBlur(frame, blurred_8u, 7);
+
+    // 2. Convert to float for division
+    cv::Mat float_frame;
+    frame.convertTo(float_frame, CV_32F);
+
+    cv::Mat blurred;
+    blurred_8u.convertTo(blurred, CV_32F);
+    cv::GaussianBlur(blurred, blurred, cv::Size(3, 3), 0);
+
+    // 3. Normalize: image / blurred
+    // Avoid division by zero by adding a small epsilon or ensuring blurred is not 0
+    // But for simplicity, we trust the image content.
+    cv::Mat normalized;
+    cv::divide(float_frame, blurred, normalized);
+    
+    // 4. Minimum with 1.0
+    cv::min(normalized, 1.0f, normalized);
+
+    // 5. Enhance: 0.5 - 0.5 * cos(normalized^5 * pi)
+    cv::pow(normalized, 5, normalized);
+    normalized = normalized * CV_PI;
+    
+    // Calculate Cosine
+    cv::Mat cos_val = normalized.clone();
+    int rows = cos_val.rows;
+    int cols = cos_val.cols * cos_val.channels();
+    if (cos_val.isContinuous()) {
+        cols *= rows;
+        rows = 1;
+    }
+    for (int i = 0; i < rows; ++i) {
+        float* ptr = cos_val.ptr<float>(i);
+        for (int j = 0; j < cols; ++j) {
+            ptr[j] = std::cos(ptr[j]);
+        }
+    }
+    
+    cv::Mat enhanced = 0.5f - 0.5f * cos_val;
+
+    // 6. Scale back to 0-255
+    enhanced = enhanced * 255.0f;
+    
+    // 7. Convert back to 8-bit
+    enhanced.convertTo(frame, CV_8U);
+}
+
+void NativeCamera::ApplySmartObstacleRemoval(cv::Mat& frame) {
+    // Initialize accumulated background if needed
+    if (accumulated_background_.empty() || accumulated_background_.size() != frame.size()) {
+        frame.copyTo(accumulated_background_);
+    }
+
+    // 1. Resize for mask calculation (Scale 0.1)
+    cv::Mat small_frame;
+    cv::resize(frame, small_frame, cv::Size(), 0.1, 0.1);
+
+    // 2. Apply Background Subtractor
+    cv::Mat fgmask;
+    back_sub_->apply(small_frame, fgmask);
+
+    // 3. Analyze columns (NUMBER_OF_PARTS = 15)
+    int num_parts = 15;
+    int w = frame.cols;
+    int mask_w = fgmask.cols;
+    
+    std::vector<bool> is_static(num_parts, false);
+    
+    // Calculate column boundaries for the mask
+    std::vector<int> mask_dist(num_parts + 1);
+    double step_mask = static_cast<double>(mask_w) / num_parts;
+    for(int i=0; i<=num_parts; ++i) mask_dist[i] = static_cast<int>(i * step_mask);
+
+    // Check sums
+    for (int i = 0; i < num_parts; ++i) {
+        int start = mask_dist[i];
+        int end = mask_dist[i+1];
+        if (start >= end) continue;
+        
+        cv::Mat roi = fgmask.colRange(start, end);
+        int sum = cv::countNonZero(roi);
+        is_static[i] = (sum == 0);
+    }
+
+    // 4. Create update mask for the full image
+    cv::Mat update_mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+    
+    std::vector<int> dist(num_parts + 1);
+    double step = static_cast<double>(w) / num_parts;
+    for(int i=0; i<=num_parts; ++i) dist[i] = static_cast<int>(i * step);
+
+    for (int i = 0; i < num_parts; ++i) {
+        bool should_update = false;
+        if (i == 0) {
+            should_update = is_static[i] && is_static[i + 1];
+        } else if (i == num_parts - 1) {
+            should_update = is_static[i] && is_static[i - 1];
+        } else {
+            should_update = is_static[i] && is_static[i - 1] && is_static[i + 1];
+        }
+
+        if (should_update) {
+            int start = dist[i];
+            int end = dist[i+1];
+            if (start < end) {
+                // Set this region in the mask to 255 (update)
+                update_mask.colRange(start, end).setTo(255);
+            }
+        }
+    }
+
+    // 5. Update accumulated background
+    // accumulated_background = np.where(mask, image, accumulated_background)
+    // In C++: frame.copyTo(accumulated_background, update_mask)
+    frame.copyTo(accumulated_background_, update_mask);
+
+    // 6. Output is the accumulated background
+    accumulated_background_.copyTo(frame);
 }
 
 const FlutterDesktopPixelBuffer* NativeCamera::CopyPixelBuffer(size_t width, size_t height) {
