@@ -6,6 +6,7 @@ import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as img;
+import 'package:file_picker/file_picker.dart';
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
@@ -35,10 +36,23 @@ class _CameraScreenState extends State<CameraScreen> {
   // Captured images for PDF export
   final List<({Uint8List bytes, int width, int height})> _capturedImages = [];
 
+  // Sidebar state
+  bool _isSidebarOpen = false;
+  final TextEditingController _pdfNameController = TextEditingController();
+  final TextEditingController _pdfPathController = TextEditingController();
+
   @override
   void initState() {
     super.initState();
     _init();
+    _setDefaultPath();
+  }
+
+  Future<void> _setDefaultPath() async {
+    final dir = await getApplicationDocumentsDirectory();
+    setState(() {
+      _pdfPathController.text = dir.path;
+    });
   }
 
   Future<void> _init() async {
@@ -289,12 +303,27 @@ class _CameraScreenState extends State<CameraScreen> {
         );
       }
 
-      final output = await getApplicationDocumentsDirectory();
-      final file = File("${output.path}/capture_${DateTime.now().millisecondsSinceEpoch}.pdf");
+      String fileName = _pdfNameController.text.trim();
+      if (fileName.isEmpty) {
+        final now = DateTime.now();
+        fileName = "Capture_${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}-${now.minute.toString().padLeft(2, '0')}";
+      }
+      if (!fileName.toLowerCase().endsWith('.pdf')) {
+        fileName += '.pdf';
+      }
+
+      String dirPath = _pdfPathController.text.trim();
+      if (dirPath.isEmpty) {
+        final dir = await getApplicationDocumentsDirectory();
+        dirPath = dir.path;
+      }
+
+      final file = File("$dirPath/$fileName");
       await file.writeAsBytes(await pdf.save());
 
       setState(() {
         _capturedImages.clear();
+        _pdfNameController.clear();
       });
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -311,110 +340,256 @@ class _CameraScreenState extends State<CameraScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Camera Mode')),
-      body: Column(
+      appBar: AppBar(
+        title: const Text('Camera Mode'),
+        actions: [
+          IconButton(
+            icon: Icon(_isSidebarOpen ? Icons.chevron_right : Icons.list),
+            onPressed: () {
+              setState(() {
+                _isSidebarOpen = !_isSidebarOpen;
+              });
+            },
+          ),
+        ],
+      ),
+      body: Stack(
         children: [
-          Expanded(
-            child: Stack(
+          // Main Content
+          Positioned.fill(
+            child: Column(
               children: [
-                if (Platform.isWindows)
-                   InteractiveViewer(
-                     transformationController: _transformationController,
-                     minScale: 1.0,
-                     maxScale: 50.0,
-                     child: const NativeCameraView(),
-                   )
-                else if (_isInitialized && _controller != null)
-                  InteractiveViewer(
-                    transformationController: _transformationController,
-                    minScale: 1.0,
-                    maxScale: 50.0,
-                    child: Transform.scale(
-                      scaleX: -1,
-                      alignment: Alignment.center,
-                      child: ValueListenableBuilder<Uint8List?>(
-                        valueListenable: _processedImageNotifier,
-                        builder: (context, processedImage, child) {
-                          if (processedImage != null && _processingMode != ProcessingMode.none) {
-                            return Image.memory(
-                              processedImage,
-                              gaplessPlayback: true,
-                              fit: BoxFit.contain,
-                            );
-                          }
-                          return CameraPreview(_controller!);
-                        },
-                      ),
-                    ),
-                  )
-                else
-                  Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        if (_cameras.isEmpty && !Platform.isWindows)
-                          const Text('No cameras found')
-                        else if (_controller == null && !Platform.isWindows)
-                          const CircularProgressIndicator()
-                        else
-                          Column(
+                Expanded(
+                  child: Stack(
+                    children: [
+                      if (Platform.isWindows)
+                         InteractiveViewer(
+                           transformationController: _transformationController,
+                           minScale: 1.0,
+                           maxScale: 50.0,
+                           child: const NativeCameraView(),
+                         )
+                      else if (_isInitialized && _controller != null)
+                        InteractiveViewer(
+                          transformationController: _transformationController,
+                          minScale: 1.0,
+                          maxScale: 50.0,
+                          child: Transform.scale(
+                            scaleX: -1,
+                            alignment: Alignment.center,
+                            child: ValueListenableBuilder<Uint8List?>(
+                              valueListenable: _processedImageNotifier,
+                              builder: (context, processedImage, child) {
+                                if (processedImage != null && _processingMode != ProcessingMode.none) {
+                                  return Image.memory(
+                                    processedImage,
+                                    gaplessPlayback: true,
+                                    fit: BoxFit.contain,
+                                  );
+                                }
+                                return CameraPreview(_controller!);
+                              },
+                            ),
+                          ),
+                        )
+                      else
+                        Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              const Icon(Icons.error_outline, size: 48, color: Colors.red),
-                              const SizedBox(height: 16),
-                              const Text('Camera failed to initialize'),
-                              if (!Platform.isWindows)
-                                TextButton(
-                                  onPressed: _switchCamera,
-                                  child: const Text('Try Next Camera'),
+                              if (_cameras.isEmpty && !Platform.isWindows)
+                                const Text('No cameras found')
+                              else if (_controller == null && !Platform.isWindows)
+                                const CircularProgressIndicator()
+                              else
+                                Column(
+                                  children: [
+                                    const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                                    const SizedBox(height: 16),
+                                    const Text('Camera failed to initialize'),
+                                    if (!Platform.isWindows)
+                                      TextButton(
+                                        onPressed: _switchCamera,
+                                        child: const Text('Try Next Camera'),
+                                      ),
+                                  ],
                                 ),
                             ],
                           ),
-                      ],
-                    ),
-                  ),
-                  
-                Positioned(
-                  bottom: 20,
-                  left: 0,
-                  right: 0,
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                    children: [
-                      FloatingActionButton(
-                        heroTag: 'switch_camera',
-                        onPressed: _switchCamera,
-                        backgroundColor: Colors.black54,
-                        child: const Icon(Icons.switch_camera, color: Colors.white),
-                      ),
-                      FloatingActionButton(
-                        heroTag: 'filters',
-                        onPressed: _cycleProcessingMode,
-                        backgroundColor: _processingMode != ProcessingMode.none ? Colors.orange : Colors.black54,
-                        child: const Icon(Icons.filter_b_and_w, color: Colors.white),
-                      ),
-                      FloatingActionButton(
-                        heroTag: 'max_quality',
-                        onPressed: _toggleQuality,
-                        backgroundColor: _isHighQuality ? Colors.blue : Colors.black54,
-                        child: const Icon(Icons.high_quality, color: Colors.white),
-                      ),
-                      FloatingActionButton(
-                        heroTag: 'capture_frame',
-                        onPressed: _captureFrame,
-                        backgroundColor: Colors.red,
-                        child: const Icon(Icons.camera_alt, color: Colors.white),
-                      ),
-                      if (_capturedImages.isNotEmpty)
-                        FloatingActionButton(
-                          heroTag: 'export_pdf',
-                          onPressed: _exportPdf,
-                          backgroundColor: Colors.green,
-                          child: const Icon(Icons.picture_as_pdf, color: Colors.white),
                         ),
+                        
+                      Positioned(
+                        bottom: 20,
+                        left: 0,
+                        right: 0,
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            FloatingActionButton(
+                              heroTag: 'switch_camera',
+                              onPressed: _switchCamera,
+                              backgroundColor: Colors.black54,
+                              child: const Icon(Icons.switch_camera, color: Colors.white),
+                            ),
+                            FloatingActionButton(
+                              heroTag: 'filters',
+                              onPressed: _cycleProcessingMode,
+                              backgroundColor: _processingMode != ProcessingMode.none ? Colors.orange : Colors.black54,
+                              child: const Icon(Icons.filter_b_and_w, color: Colors.white),
+                            ),
+                            FloatingActionButton(
+                              heroTag: 'max_quality',
+                              onPressed: _toggleQuality,
+                              backgroundColor: _isHighQuality ? Colors.blue : Colors.black54,
+                              child: const Icon(Icons.high_quality, color: Colors.white),
+                            ),
+                            FloatingActionButton(
+                              heroTag: 'capture_frame',
+                              onPressed: _captureFrame,
+                              backgroundColor: Colors.red,
+                              child: const Icon(Icons.camera_alt, color: Colors.white),
+                            ),
+                            // Export button moved to sidebar, but keeping here as shortcut if sidebar is closed?
+                            // User asked for "2 bottoms, one take a picture... combine all the pictures to a one pdf document"
+                            // I'll keep it here for now, but maybe hide it if sidebar is open?
+                            // Actually, let's keep it.
+                            if (_capturedImages.isNotEmpty)
+                              FloatingActionButton(
+                                heroTag: 'export_pdf_fab',
+                                onPressed: _exportPdf,
+                                backgroundColor: Colors.green,
+                                child: const Icon(Icons.picture_as_pdf, color: Colors.white),
+                              ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 ),
               ],
+            ),
+          ),
+
+          // Sidebar
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            top: 0,
+            bottom: 0,
+            right: _isSidebarOpen ? 0 : -350,
+            width: 350,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.black,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.5),
+                    blurRadius: 5,
+                    offset: const Offset(-2, 0),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Captured Images', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => setState(() => _isSidebarOpen = false),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: _capturedImages.isEmpty
+                        ? const Center(child: Text('No images captured', style: TextStyle(color: Colors.white70)))
+                        : ListView.builder(
+                            itemCount: _capturedImages.length,
+                            itemBuilder: (context, index) {
+                              final item = _capturedImages[index];
+                              return Card(
+                                color: Colors.blue[900],
+                                margin: const EdgeInsets.only(bottom: 8),
+                                child: ListTile(
+                                  contentPadding: const EdgeInsets.all(8),
+                                  leading: Image.memory(
+                                    item.bytes,
+                                    width: 60,
+                                    height: 60,
+                                    fit: BoxFit.cover,
+                                  ),
+                                  title: Text('Image ${index + 1}', style: const TextStyle(color: Colors.white)),
+                                  trailing: IconButton(
+                                    icon: const Icon(Icons.delete, color: Colors.redAccent),
+                                    onPressed: () {
+                                      setState(() {
+                                        _capturedImages.removeAt(index);
+                                      });
+                                    },
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
+                  ),
+                  const Divider(thickness: 1, color: Colors.white24),
+                  const Text('PDF Settings', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _pdfNameController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: const InputDecoration(
+                      labelText: 'File Name',
+                      labelStyle: TextStyle(color: Colors.white70),
+                      hintText: 'Default: Capture_YYYY-MM-DD_HH-MM',
+                      hintStyle: TextStyle(color: Colors.white30),
+                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
+                      focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.blue)),
+                      isDense: true,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _pdfPathController,
+                    style: const TextStyle(color: Colors.white),
+                    decoration: InputDecoration(
+                      labelText: 'Save Directory',
+                      labelStyle: const TextStyle(color: Colors.white70),
+                      enabledBorder: const OutlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
+                      focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: Colors.blue)),
+                      isDense: true,
+                      suffixIcon: IconButton(
+                        icon: const Icon(Icons.more_horiz, color: Colors.white),
+                        onPressed: () async {
+                          String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
+                          if (selectedDirectory != null) {
+                            setState(() {
+                              _pdfPathController.text = selectedDirectory;
+                            });
+                          }
+                        },
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  SizedBox(
+                    width: double.infinity,
+                    height: 50,
+                    child: ElevatedButton.icon(
+                      onPressed: _capturedImages.isNotEmpty ? _exportPdf : null,
+                      icon: const Icon(Icons.save_alt),
+                      label: const Text('Export PDF'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        foregroundColor: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
             ),
           ),
         ],

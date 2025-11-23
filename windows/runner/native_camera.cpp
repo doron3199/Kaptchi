@@ -34,8 +34,14 @@ NativeCamera::~NativeCamera() {
 void NativeCamera::Start() {
     if (is_running_) return;
     
-    // Open default camera (0)
-    capture_.open(0, cv::CAP_MSMF); 
+    // Try opening with DirectShow first (often more stable for webcams)
+    capture_.open(0, cv::CAP_DSHOW); 
+    if (!capture_.isOpened()) {
+        // Fallback to MSMF
+        std::cout << "DirectShow failed, trying MSMF..." << std::endl;
+        capture_.open(0, cv::CAP_MSMF);
+    }
+
     if (!capture_.isOpened()) {
         std::cerr << "Failed to open camera" << std::endl;
         return;
