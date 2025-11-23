@@ -1,5 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:ffi/ffi.dart';
 
 typedef GetTextureIdFunc = Int64 Function();
 typedef GetTextureId = int Function();
@@ -13,6 +15,15 @@ typedef StopCamera = void Function();
 typedef SetCameraFilterFunc = Void Function(Int32 mode);
 typedef SetCameraFilter = void Function(int mode);
 
+typedef GetFrameDataFunc = Void Function(Pointer<Uint8> buffer, Int32 size);
+typedef GetFrameData = void Function(Pointer<Uint8> buffer, int size);
+
+typedef GetFrameWidthFunc = Int32 Function();
+typedef GetFrameWidth = int Function();
+
+typedef GetFrameHeightFunc = Int32 Function();
+typedef GetFrameHeight = int Function();
+
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
   factory NativeCameraService() => _instance;
@@ -23,6 +34,9 @@ class NativeCameraService {
   late StartCamera _startCamera;
   late StopCamera _stopCamera;
   late SetCameraFilter _setCameraFilter;
+  late GetFrameData _getFrameData;
+  late GetFrameWidth _getFrameWidth;
+  late GetFrameHeight _getFrameHeight;
 
   bool _isInitialized = false;
 
@@ -49,6 +63,16 @@ class NativeCameraService {
         .lookup<NativeFunction<SetCameraFilterFunc>>('SetCameraFilter')
         .asFunction();
 
+    _getFrameData = _nativeLib
+        .lookup<NativeFunction<GetFrameDataFunc>>('GetFrameData')
+        .asFunction();
+    _getFrameWidth = _nativeLib
+        .lookup<NativeFunction<GetFrameWidthFunc>>('GetFrameWidth')
+        .asFunction();
+    _getFrameHeight = _nativeLib
+        .lookup<NativeFunction<GetFrameHeightFunc>>('GetFrameHeight')
+        .asFunction();
+
     _isInitialized = true;
   }
 
@@ -70,5 +94,31 @@ class NativeCameraService {
   void setFilter(int mode) {
     initialize();
     _setCameraFilter(mode);
+  }
+
+  int getFrameWidth() {
+    initialize();
+    return _getFrameWidth();
+  }
+
+  int getFrameHeight() {
+    initialize();
+    return _getFrameHeight();
+  }
+
+  Uint8List? getFrameData() {
+    initialize();
+    final width = _getFrameWidth();
+    final height = _getFrameHeight();
+    if (width == 0 || height == 0) return null;
+
+    final size = width * height * 4;
+    final ptr = malloc.allocate<Uint8>(size);
+    try {
+      _getFrameData(ptr, size);
+      return Uint8List.fromList(ptr.asTypedList(size));
+    } finally {
+      malloc.free(ptr);
+    }
   }
 }

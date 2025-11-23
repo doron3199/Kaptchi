@@ -2,6 +2,10 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:pdf/pdf.dart';
+import 'package:pdf/widgets.dart' as pw;
+import 'package:path_provider/path_provider.dart';
+import 'package:image/image.dart' as img;
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
@@ -177,6 +181,158 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _savePdf() async {
+    if (!Platform.isWindows) return;
+
+    try {
+      // 1. Get full frame data
+      final service = NativeCameraService();
+      final width = service.getFrameWidth();
+      final height = service.getFrameHeight();
+      final bytes = service.getFrameData();
+
+      if (bytes == null || width == 0 || height == 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Failed to capture frame')),
+        );
+        return;
+      }
+
+      // 2. Decode image
+      // Note: bytes are RGBA
+      final image = img.Image.fromBytes(
+        width: width,
+        height: height,
+        bytes: bytes.buffer,
+        numChannels: 4,
+        order: img.ChannelOrder.rgba,
+      );
+
+      // 3. Calculate crop rect based on transformation
+      final matrix = _transformationController.value;
+      final scale = matrix.getMaxScaleOnAxis();
+      final translation = matrix.getTranslation();
+      
+      // Viewport size (screen size available for camera)
+      // We assume the camera view takes up the full available space in the stack
+      // For simplicity, we'll use the context size, but ideally we'd use LayoutBuilder
+      final viewportSize = MediaQuery.of(context).size;
+      // Adjust for AppBar height if needed, but Stack is in body
+      // The Stack is Expanded, so it takes remaining height.
+      // Let's assume the viewport is roughly the screen size minus app bar.
+      // A better way is to use a GlobalKey on the InteractiveViewer, but let's approximate for now
+      // or just use the image aspect ratio logic.
+      
+      // The InteractiveViewer child (NativeCameraView) tries to be 16:9.
+      // If it fits width, height is width * 9/16.
+      // If it fits height, width is height * 16/9.
+      
+      // Let's assume "contain" fit.
+      double renderWidth = viewportSize.width;
+      double renderHeight = viewportSize.width * 9 / 16;
+      
+      if (renderHeight > viewportSize.height) {
+        renderHeight = viewportSize.height;
+        renderWidth = renderHeight * 16 / 9;
+      }
+      
+      // Visible rect in "render" coordinates
+      // x_visible = -translation.x / scale
+      // y_visible = -translation.y / scale
+      // w_visible = viewportSize.width / scale
+      // h_visible = viewportSize.height / scale
+      
+      // But we need it relative to the image (renderWidth/Height)
+      // The image is centered if it's smaller than viewport? No, InteractiveViewer aligns top-left by default?
+      // Actually InteractiveViewer with "aligned" child usually centers.
+      // But let's assume the image fills the "render" size calculated above.
+      
+      // Wait, InteractiveViewer pans the child.
+      // If scale is 1.0, translation is 0,0.
+      
+      double visibleX = -translation.x / scale;
+      double visibleY = -translation.y / scale;
+      double visibleW = viewportSize.width / scale;
+      double visibleH = viewportSize.height / scale;
+      
+      // Map to image coordinates
+      // imageX = visibleX * (imageWidth / renderWidth)
+      
+      // Offset if the image is centered in the viewport (letterboxing)
+      // double offsetX = (viewportSize.width - renderWidth) / 2;
+      // double offsetY = (viewportSize.height - renderHeight) / 2;
+      
+      // If offset is positive, the image is smaller than viewport (at scale 1).
+      // InteractiveViewer handles the content.
+      // If we are zoomed in, the content is larger.
+      
+      // Let's simplify: The "content" coordinate system is 0..renderWidth, 0..renderHeight.
+      // We need to map visibleX..visibleX+visibleW to 0..renderWidth.
+      
+      // Actually, we should map visible rect to 0..1 (normalized) then to image size.
+      // Normalized X = (visibleX - offsetX) / renderWidth
+      
+      // However, InteractiveViewer coordinate system is the child's coordinate system.
+      // If the child is centered, there might be an offset.
+      // But NativeCameraView is the child.
+      
+      // Let's assume the child (NativeCameraView) is 0,0 at the top-left of the scrollable area.
+      // So visibleX is relative to the child's origin.
+      
+      // We just need to map child coordinates to image pixels.
+      // Child Width = renderWidth.
+      // Image Width = width.
+      
+      int cropX = (visibleX * (width / renderWidth)).round();
+      int cropY = (visibleY * (height / renderHeight)).round();
+      int cropW = (visibleW * (width / renderWidth)).round();
+      int cropH = (visibleH * (height / renderHeight)).round();
+      
+      // Clamp
+      cropX = cropX.clamp(0, width);
+      cropY = cropY.clamp(0, height);
+      if (cropX + cropW > width) cropW = width - cropX;
+      if (cropY + cropH > height) cropH = height - cropY;
+      
+      if (cropW <= 0 || cropH <= 0) {
+         // Fallback to full image if calculation fails
+         cropX = 0; cropY = 0; cropW = width; cropH = height;
+      }
+
+      final croppedImage = img.copyCrop(image, x: cropX, y: cropY, width: cropW, height: cropH);
+      final pngBytes = img.encodePng(croppedImage);
+
+      // 4. Create PDF
+      final pdf = pw.Document();
+      final pdfImage = pw.MemoryImage(pngBytes);
+
+      pdf.addPage(
+        pw.Page(
+          build: (pw.Context context) {
+            return pw.Center(
+              child: pw.Image(pdfImage),
+            );
+          },
+        ),
+      );
+
+      // 5. Save file
+      final output = await getApplicationDocumentsDirectory();
+      final file = File("${output.path}/capture_${DateTime.now().millisecondsSinceEpoch}.pdf");
+      await file.writeAsBytes(await pdf.save());
+
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Saved PDF to ${file.path}')),
+      );
+      
+    } catch (e) {
+      print('Error saving PDF: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error saving PDF: $e')),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -266,6 +422,12 @@ class _CameraScreenState extends State<CameraScreen> {
                         onPressed: _toggleQuality,
                         backgroundColor: _isHighQuality ? Colors.blue : Colors.black54,
                         child: const Icon(Icons.high_quality, color: Colors.white),
+                      ),
+                      FloatingActionButton(
+                        heroTag: 'save_pdf',
+                        onPressed: _savePdf,
+                        backgroundColor: Colors.red,
+                        child: const Icon(Icons.picture_as_pdf, color: Colors.white),
                       ),
                     ],
                   ),
