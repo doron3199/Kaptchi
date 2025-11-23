@@ -47,21 +47,21 @@ void NativeCamera::Start() {
     if (is_running_) return;
     
     // Try opening with DirectShow first (often more stable for webcams)
-    capture_.open(0, cv::CAP_DSHOW); 
+    capture_.open(camera_index_, cv::CAP_DSHOW); 
     if (!capture_.isOpened()) {
         // Fallback to MSMF
         std::cout << "DirectShow failed, trying MSMF..." << std::endl;
-        capture_.open(0, cv::CAP_MSMF);
+        capture_.open(camera_index_, cv::CAP_MSMF);
     }
 
     if (!capture_.isOpened()) {
-        std::cerr << "Failed to open camera" << std::endl;
+        std::cerr << "Failed to open camera " << camera_index_ << std::endl;
         return;
     }
 
-    // Set resolution to 1280x720
-    capture_.set(cv::CAP_PROP_FRAME_WIDTH, 1280);
-    capture_.set(cv::CAP_PROP_FRAME_HEIGHT, 720);
+    // Set resolution
+    capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
+    capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
 
     is_running_ = true;
     capture_thread_ = std::thread(&NativeCamera::CaptureLoop, this);
@@ -74,6 +74,59 @@ void NativeCamera::Stop() {
     }
     if (capture_.isOpened()) {
         capture_.release();
+    }
+}
+
+void NativeCamera::SwitchCamera() {
+    Stop();
+    
+    // Try next index
+    camera_index_++;
+    
+    // Try to open
+    capture_.open(camera_index_, cv::CAP_DSHOW);
+    if (!capture_.isOpened()) {
+        capture_.open(camera_index_, cv::CAP_MSMF);
+    }
+    
+    if (!capture_.isOpened()) {
+        // If failed, loop back to 0
+        std::cout << "Camera " << camera_index_ << " not found, looping back to 0" << std::endl;
+        camera_index_ = 0;
+        capture_.open(camera_index_, cv::CAP_DSHOW);
+        if (!capture_.isOpened()) {
+            capture_.open(camera_index_, cv::CAP_MSMF);
+        }
+    }
+    
+    if (capture_.isOpened()) {
+        capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
+        capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
+        
+        is_running_ = true;
+        capture_thread_ = std::thread(&NativeCamera::CaptureLoop, this);
+    } else {
+        std::cerr << "Failed to open any camera" << std::endl;
+    }
+}
+
+void NativeCamera::SetResolution(int width, int height) {
+    target_width_ = width;
+    target_height_ = height;
+    
+    if (capture_.isOpened()) {
+        // If camera is already running, try to update on the fly
+        // Note: Some backends might require a restart, but let's try setting first.
+        // If the resolution change requires a restart, we might need to Stop() and Start() here.
+        // For safety and consistency, let's restart the capture if it's running.
+        bool was_running = is_running_;
+        if (was_running) {
+            Stop();
+            Start();
+        } else {
+             capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
+             capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
+        }
     }
 }
 
@@ -310,6 +363,14 @@ extern "C" {
 
     __declspec(dllexport) void StopCamera() {
         if (g_native_camera) g_native_camera->Stop();
+    }
+
+    __declspec(dllexport) void SwitchCamera() {
+        if (g_native_camera) g_native_camera->SwitchCamera();
+    }
+
+    __declspec(dllexport) void SetResolution(int width, int height) {
+        if (g_native_camera) g_native_camera->SetResolution(width, height);
     }
 
     __declspec(dllexport) void SetFilterSequence(int* filters, int count) {

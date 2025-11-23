@@ -19,6 +19,8 @@ public:
 
     void Start();
     void Stop();
+    void SwitchCamera();
+    void SetResolution(int width, int height);
     void SetFilterSequence(int* filters, int count);
     
     void GetFrameData(uint8_t* buffer, int32_t size);
@@ -46,6 +48,11 @@ private:
     cv::Ptr<cv::BackgroundSubtractor> back_sub_;
     cv::Mat accumulated_background_;
     bool reset_background_ = true;
+
+    // Resolution settings
+    int target_width_ = 1280;
+    int target_height_ = 720;
+    int camera_index_ = 0;
 
     void CaptureLoop();
     void ProcessFrame(cv::Mat& frame);

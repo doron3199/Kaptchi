@@ -99,7 +99,10 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _switchCamera() async {
-    if (Platform.isWindows) return; // TODO: Implement camera switching for Windows native
+    if (Platform.isWindows) {
+      NativeCameraService().switchCamera();
+      return;
+    }
 
     if (_cameras.isEmpty) return;
     
@@ -110,12 +113,20 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _toggleQuality() async {
-    if (Platform.isWindows) return; // TODO: Implement quality toggle for Windows native
-
     setState(() {
       _isHighQuality = !_isHighQuality;
     });
-    await _startLocalCamera();
+
+    if (Platform.isWindows) {
+      // Toggle between 1080p and 4K
+      if (_isHighQuality) {
+        NativeCameraService().setResolution(4096 , 2160);
+      } else {
+        NativeCameraService().setResolution(1920, 1080);
+      }
+    } else {
+      await _startLocalCamera();
+    }
   }
 
   void _processCameraImage(CameraImage image) async {
