@@ -3,6 +3,10 @@
 #include <optional>
 
 #include "flutter/generated_plugin_registrant.h"
+#include <flutter/plugin_registrar_windows.h>
+#include <flutter/plugin_registrar.h>
+#include <flutter_windows.h>
+#include "native_camera.h"
 
 FlutterWindow::FlutterWindow(const flutter::DartProject& project)
     : project_(project) {}
@@ -25,6 +29,13 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+  
+  // Initialize Native Camera
+  auto registrar_ref = flutter_controller_->engine()->GetRegistrarForPlugin("NativeCamera");
+  auto registrar = flutter::PluginRegistrarManager::GetInstance()
+      ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar_ref);
+  InitGlobalNativeCamera(registrar->texture_registrar());
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {

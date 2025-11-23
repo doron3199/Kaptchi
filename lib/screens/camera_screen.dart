@@ -3,6 +3,8 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import '../services/image_processing_service.dart';
+import '../widgets/native_camera_view.dart';
+import '../services/native_camera_service.dart';
 
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
@@ -33,9 +35,12 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _init() async {
-    // If we are on Windows, we want to enable local processing capabilities
+    // If we are on Windows, we use the native C++ implementation
     if (Platform.isWindows) {
-      await ImageProcessingService.instance.initialize();
+      setState(() {
+        _isInitialized = true;
+      });
+      return;
     }
     
     await _loadCameras();
@@ -55,6 +60,8 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _switchCamera() async {
+    if (Platform.isWindows) return; // TODO: Implement camera switching for Windows native
+
     if (_cameras.isEmpty) return;
     
     setState(() {
@@ -64,6 +71,8 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _toggleQuality() async {
+    if (Platform.isWindows) return; // TODO: Implement quality toggle for Windows native
+
     setState(() {
       _isHighQuality = !_isHighQuality;
     });
@@ -101,7 +110,12 @@ class _CameraScreenState extends State<CameraScreen> {
       final modes = ProcessingMode.values;
       final nextIndex = (_processingMode.index + 1) % modes.length;
       _processingMode = modes[nextIndex];
-      ImageProcessingService.instance.setProcessingMode(_processingMode);
+      
+      if (Platform.isWindows) {
+        NativeCameraService().setFilter(_processingMode.index);
+      } else {
+        ImageProcessingService.instance.setProcessingMode(_processingMode);
+      }
       
       // Show a snackbar to indicate current mode
       ScaffoldMessenger.of(context).clearSnackBars();
@@ -147,17 +161,7 @@ class _CameraScreenState extends State<CameraScreen> {
       
       // Start image stream for processing
       if (Platform.isWindows && _controller!.value.isInitialized) {
-        try {
-          // Small delay to ensure camera is ready
-          await Future.delayed(const Duration(milliseconds: 500));
-          await _controller!.startImageStream((CameraImage img) {
-            print("Captured frame size: ${img.width}x${img.height}");
-
-            // _processCameraImage);
-          });
-        } catch (e) {
-          print('Warning: Failed to start image stream: $e');
-        }
+        // Native Windows implementation handles streaming internally
       }
       
     } catch (e) {
@@ -179,14 +183,17 @@ class _CameraScreenState extends State<CameraScreen> {
       appBar: AppBar(title: const Text('Camera Mode')),
       body: Column(
         children: [
-          // Note: WebRTC streaming is temporarily disabled in this view 
-          // as we switched to package:camera for better local control.
-          // Streaming logic will need to be adapted to read from CameraController.
-          
           Expanded(
             child: Stack(
               children: [
-                if (_isInitialized && _controller != null)
+                if (Platform.isWindows)
+                   InteractiveViewer(
+                     transformationController: _transformationController,
+                     minScale: 1.0,
+                     maxScale: 50.0,
+                     child: const NativeCameraView(),
+                   )
+                else if (_isInitialized && _controller != null)
                   InteractiveViewer(
                     transformationController: _transformationController,
                     minScale: 1.0,
@@ -214,9 +221,9 @@ class _CameraScreenState extends State<CameraScreen> {
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,
                       children: [
-                        if (_cameras.isEmpty)
+                        if (_cameras.isEmpty && !Platform.isWindows)
                           const Text('No cameras found')
-                        else if (_controller == null)
+                        else if (_controller == null && !Platform.isWindows)
                           const CircularProgressIndicator()
                         else
                           Column(
@@ -224,10 +231,11 @@ class _CameraScreenState extends State<CameraScreen> {
                               const Icon(Icons.error_outline, size: 48, color: Colors.red),
                               const SizedBox(height: 16),
                               const Text('Camera failed to initialize'),
-                              TextButton(
-                                onPressed: _switchCamera,
-                                child: const Text('Try Next Camera'),
-                              ),
+                              if (!Platform.isWindows)
+                                TextButton(
+                                  onPressed: _switchCamera,
+                                  child: const Text('Try Next Camera'),
+                                ),
                             ],
                           ),
                       ],
