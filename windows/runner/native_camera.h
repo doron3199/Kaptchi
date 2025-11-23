@@ -19,7 +19,6 @@ public:
 
     void Start();
     void Stop();
-    void SetFilter(int mode);
     void SetFilterSequence(int* filters, int count);
     
     void GetFrameData(uint8_t* buffer, int32_t size);
