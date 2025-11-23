@@ -52,9 +52,11 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // Filter state
   final List<FilterItem> _filters = [
-    FilterItem(id: 3, name: 'Remove Obstacles', isActive: false),
+    FilterItem(id: 5, name: 'Smart Obstacle Removal', isActive: false),
+    FilterItem(id: 4, name: 'Smart Whiteboard', isActive: false),
+    FilterItem(id: 3, name: 'Blur (Legacy)', isActive: false),
     FilterItem(id: 1, name: 'Invert Colors', isActive: false),
-    FilterItem(id: 2, name: 'Whiteboard', isActive: false),
+    FilterItem(id: 2, name: 'Whiteboard (Legacy)', isActive: false),
   ];
 
   @override

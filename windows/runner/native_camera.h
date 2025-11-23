@@ -42,8 +42,17 @@ private:
     int filter_mode_ = 0; 
     std::vector<int> active_filters_;
 
+    // Smart Obstacle Removal State
+    cv::Ptr<cv::BackgroundSubtractor> back_sub_;
+    cv::Mat accumulated_background_;
+    bool reset_background_ = true;
+
     void CaptureLoop();
     void ProcessFrame(cv::Mat& frame);
+    
+    // New Filter Implementations
+    void ApplySmartWhiteboard(cv::Mat& frame);
+    void ApplySmartObstacleRemoval(cv::Mat& frame);
 };
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);
