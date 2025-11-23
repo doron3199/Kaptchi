@@ -20,6 +20,10 @@ public:
     void Start();
     void Stop();
     void SetFilter(int mode);
+    
+    void GetFrameData(uint8_t* buffer, int32_t size);
+    int32_t GetFrameWidth();
+    int32_t GetFrameHeight();
 
 private:
     flutter::TextureRegistrar* texture_registrar_;

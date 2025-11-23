@@ -63,6 +63,26 @@ void NativeCamera::SetFilter(int mode) {
     filter_mode_ = mode;
 }
 
+void NativeCamera::GetFrameData(uint8_t* buffer, int32_t size) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (current_frame_.empty()) return;
+    
+    int32_t expected_size = static_cast<int32_t>(current_frame_.total() * 4);
+    if (size < expected_size) return;
+    
+    memcpy(buffer, current_frame_.data, expected_size);
+}
+
+int32_t NativeCamera::GetFrameWidth() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_frame_.empty() ? 0 : current_frame_.cols;
+}
+
+int32_t NativeCamera::GetFrameHeight() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_frame_.empty() ? 0 : current_frame_.rows;
+}
+
 void NativeCamera::CaptureLoop() {
     while (is_running_) {
         cv::Mat frame;
@@ -134,5 +154,19 @@ extern "C" {
 
     __declspec(dllexport) void SetCameraFilter(int mode) {
         if (g_native_camera) g_native_camera->SetFilter(mode);
+    }
+
+    __declspec(dllexport) void GetFrameData(uint8_t* buffer, int32_t size) {
+        if (g_native_camera) g_native_camera->GetFrameData(buffer, size);
+    }
+
+    __declspec(dllexport) int32_t GetFrameWidth() {
+        if (!g_native_camera) return 0;
+        return g_native_camera->GetFrameWidth();
+    }
+
+    __declspec(dllexport) int32_t GetFrameHeight() {
+        if (!g_native_camera) return 0;
+        return g_native_camera->GetFrameHeight();
     }
 }
