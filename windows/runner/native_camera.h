@@ -20,6 +20,7 @@ public:
     void Start();
     void Stop();
     void SetFilter(int mode);
+    void SetFilterSequence(int* filters, int count);
     
     void GetFrameData(uint8_t* buffer, int32_t size);
     int32_t GetFrameWidth();
@@ -40,6 +41,7 @@ private:
     std::unique_ptr<FlutterDesktopPixelBuffer> flutter_pixel_buffer_;
     
     int filter_mode_ = 0; 
+    std::vector<int> active_filters_;
 
     void CaptureLoop();
     void ProcessFrame(cv::Mat& frame);

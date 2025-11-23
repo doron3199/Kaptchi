@@ -67,6 +67,20 @@ void NativeCamera::Stop() {
 
 void NativeCamera::SetFilter(int mode) {
     filter_mode_ = mode;
+    // Legacy support: if mode is 0, clear filters. If > 0, set as single filter.
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_filters_.clear();
+    if (mode != 0) {
+        active_filters_.push_back(mode);
+    }
+}
+
+void NativeCamera::SetFilterSequence(int* filters, int count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_filters_.clear();
+    for (int i = 0; i < count; i++) {
+        active_filters_.push_back(filters[i]);
+    }
 }
 
 void NativeCamera::GetFrameData(uint8_t* buffer, int32_t size) {
@@ -110,17 +124,26 @@ void NativeCamera::CaptureLoop() {
 }
 
 void NativeCamera::ProcessFrame(cv::Mat& frame) {
-    if (filter_mode_ == 1) {
-        cv::bitwise_not(frame, frame);
-    } else if (filter_mode_ == 2) {
-        // Whiteboard
-        cv::Mat gray;
-        cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-        cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, 10);
-        cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
-    } else if (filter_mode_ == 3) {
-        // Obstacle / Blur
-        cv::GaussianBlur(frame, frame, cv::Size(15, 15), 0);
+    std::vector<int> filters_copy;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        filters_copy = active_filters_;
+    }
+
+    for (int mode : filters_copy) {
+        if (mode == 1) {
+            // Invert
+            cv::bitwise_not(frame, frame);
+        } else if (mode == 2) {
+            // Whiteboard
+            cv::Mat gray;
+            cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+            cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, 10);
+            cv::cvtColor(gray, frame, cv::COLOR_GRAY2BGR);
+        } else if (mode == 3) {
+            // Obstacle / Blur
+            cv::GaussianBlur(frame, frame, cv::Size(15, 15), 0);
+        }
     }
 }
 
@@ -160,6 +183,10 @@ extern "C" {
 
     __declspec(dllexport) void SetCameraFilter(int mode) {
         if (g_native_camera) g_native_camera->SetFilter(mode);
+    }
+
+    __declspec(dllexport) void SetFilterSequence(int* filters, int count) {
+        if (g_native_camera) g_native_camera->SetFilterSequence(filters, count);
     }
 
     __declspec(dllexport) void GetFrameData(uint8_t* buffer, int32_t size) {

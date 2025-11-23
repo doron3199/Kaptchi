@@ -15,6 +15,9 @@ typedef StopCamera = void Function();
 typedef SetCameraFilterFunc = Void Function(Int32 mode);
 typedef SetCameraFilter = void Function(int mode);
 
+typedef SetFilterSequenceFunc = Void Function(Pointer<Int32> filters, Int32 count);
+typedef SetFilterSequence = void Function(Pointer<Int32> filters, int count);
+
 typedef GetFrameDataFunc = Void Function(Pointer<Uint8> buffer, Int32 size);
 typedef GetFrameData = void Function(Pointer<Uint8> buffer, int size);
 
@@ -34,6 +37,7 @@ class NativeCameraService {
   late StartCamera _startCamera;
   late StopCamera _stopCamera;
   late SetCameraFilter _setCameraFilter;
+  late SetFilterSequence _setFilterSequence;
   late GetFrameData _getFrameData;
   late GetFrameWidth _getFrameWidth;
   late GetFrameHeight _getFrameHeight;
@@ -61,6 +65,9 @@ class NativeCameraService {
         .asFunction();
     _setCameraFilter = _nativeLib
         .lookup<NativeFunction<SetCameraFilterFunc>>('SetCameraFilter')
+        .asFunction();
+    _setFilterSequence = _nativeLib
+        .lookup<NativeFunction<SetFilterSequenceFunc>>('SetFilterSequence')
         .asFunction();
 
     _getFrameData = _nativeLib
@@ -94,6 +101,18 @@ class NativeCameraService {
   void setFilter(int mode) {
     initialize();
     _setCameraFilter(mode);
+  }
+
+  void setFilterSequence(List<int> filters) {
+    initialize();
+    final ptr = malloc.allocate<Int32>(filters.length * 4);
+    try {
+      final list = ptr.asTypedList(filters.length);
+      list.setAll(0, filters);
+      _setFilterSequence(ptr, filters.length);
+    } finally {
+      malloc.free(ptr);
+    }
   }
 
   int getFrameWidth() {

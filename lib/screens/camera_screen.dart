@@ -11,6 +11,14 @@ import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
 
+class FilterItem {
+  final int id;
+  final String name;
+  bool isActive;
+
+  FilterItem({required this.id, required this.name, this.isActive = false});
+}
+
 class CameraScreen extends StatefulWidget {
   const CameraScreen({super.key});
 
@@ -38,8 +46,16 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // Sidebar state
   bool _isSidebarOpen = false;
+  bool _isLeftSidebarOpen = false;
   final TextEditingController _pdfNameController = TextEditingController();
   final TextEditingController _pdfPathController = TextEditingController();
+
+  // Filter state
+  final List<FilterItem> _filters = [
+    FilterItem(id: 3, name: 'Remove Obstacles', isActive: false),
+    FilterItem(id: 1, name: 'Invert Colors', isActive: false),
+    FilterItem(id: 2, name: 'Whiteboard', isActive: false),
+  ];
 
   @override
   void initState() {
@@ -126,27 +142,24 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
-  void _cycleProcessingMode() {
-    setState(() {
-      final modes = ProcessingMode.values;
-      final nextIndex = (_processingMode.index + 1) % modes.length;
-      _processingMode = modes[nextIndex];
-      
-      if (Platform.isWindows) {
-        NativeCameraService().setFilter(_processingMode.index);
+  void _updateFilters() {
+    if (Platform.isWindows) {
+      final activeFilters = _filters
+          .where((f) => f.isActive)
+          .map((f) => f.id)
+          .toList();
+      NativeCameraService().setFilterSequence(activeFilters);
+    } else {
+      // Fallback for non-Windows (not fully implemented for sequence)
+      // Just use the first active one or none
+      final active = _filters.firstWhere((f) => f.isActive, orElse: () => FilterItem(id: 0, name: 'None'));
+      if (active.id == 0) {
+        _processingMode = ProcessingMode.none;
       } else {
-        ImageProcessingService.instance.setProcessingMode(_processingMode);
+        _processingMode = ProcessingMode.values[active.id];
       }
-      
-      // Show a snackbar to indicate current mode
-      ScaffoldMessenger.of(context).clearSnackBars();
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Mode: ${_processingMode.name.toUpperCase()}'),
-          duration: const Duration(milliseconds: 500),
-        ),
-      );
-    });
+      ImageProcessingService.instance.setProcessingMode(_processingMode);
+    }
   }
 
   @override
@@ -342,6 +355,14 @@ class _CameraScreenState extends State<CameraScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Camera Mode'),
+        leading: IconButton(
+          icon: Icon(_isLeftSidebarOpen ? Icons.chevron_left : Icons.tune),
+          onPressed: () {
+            setState(() {
+              _isLeftSidebarOpen = !_isLeftSidebarOpen;
+            });
+          },
+        ),
         actions: [
           IconButton(
             icon: Icon(_isSidebarOpen ? Icons.chevron_right : Icons.list),
@@ -431,12 +452,7 @@ class _CameraScreenState extends State<CameraScreen> {
                               backgroundColor: Colors.black54,
                               child: const Icon(Icons.switch_camera, color: Colors.white),
                             ),
-                            FloatingActionButton(
-                              heroTag: 'filters',
-                              onPressed: _cycleProcessingMode,
-                              backgroundColor: _processingMode != ProcessingMode.none ? Colors.orange : Colors.black54,
-                              child: const Icon(Icons.filter_b_and_w, color: Colors.white),
-                            ),
+                            // Removed filter cycle button
                             FloatingActionButton(
                               heroTag: 'max_quality',
                               onPressed: _toggleQuality,
@@ -449,10 +465,6 @@ class _CameraScreenState extends State<CameraScreen> {
                               backgroundColor: Colors.red,
                               child: const Icon(Icons.camera_alt, color: Colors.white),
                             ),
-                            // Export button moved to sidebar, but keeping here as shortcut if sidebar is closed?
-                            // User asked for "2 bottoms, one take a picture... combine all the pictures to a one pdf document"
-                            // I'll keep it here for now, but maybe hide it if sidebar is open?
-                            // Actually, let's keep it.
                             if (_capturedImages.isNotEmpty)
                               FloatingActionButton(
                                 heroTag: 'export_pdf_fab',
@@ -470,7 +482,82 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
-          // Sidebar
+          // Left Sidebar (Filters)
+          AnimatedPositioned(
+            duration: const Duration(milliseconds: 300),
+            top: 0,
+            bottom: 0,
+            left: _isLeftSidebarOpen ? 0 : -300,
+            width: 300,
+            child: Container(
+              decoration: BoxDecoration(
+                color: Colors.black,
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.5),
+                    blurRadius: 5,
+                    offset: const Offset(2, 0),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text('Filters', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white),
+                        onPressed: () => setState(() => _isLeftSidebarOpen = false),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  const Text(
+                    'Drag to reorder. Top filters apply first.',
+                    style: TextStyle(color: Colors.white54, fontSize: 12),
+                  ),
+                  const SizedBox(height: 10),
+                  Expanded(
+                    child: ReorderableListView(
+                      onReorder: (oldIndex, newIndex) {
+                        setState(() {
+                          if (oldIndex < newIndex) {
+                            newIndex -= 1;
+                          }
+                          final item = _filters.removeAt(oldIndex);
+                          _filters.insert(newIndex, item);
+                          _updateFilters();
+                        });
+                      },
+                      children: [
+                        for (int index = 0; index < _filters.length; index++)
+                          Card(
+                            key: ValueKey(_filters[index].id),
+                            color: Colors.grey[900],
+                            child: SwitchListTile(
+                              title: Text(_filters[index].name, style: const TextStyle(color: Colors.white)),
+                              value: _filters[index].isActive,
+                              onChanged: (bool value) {
+                                setState(() {
+                                  _filters[index].isActive = value;
+                                  _updateFilters();
+                                });
+                              },
+                              secondary: const Icon(Icons.drag_handle, color: Colors.white54),
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // Right Sidebar (Captured Images)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
             top: 0,
