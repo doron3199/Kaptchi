@@ -12,9 +12,6 @@ typedef StartCamera = void Function();
 typedef StopCameraFunc = Void Function();
 typedef StopCamera = void Function();
 
-typedef SetCameraFilterFunc = Void Function(Int32 mode);
-typedef SetCameraFilter = void Function(int mode);
-
 typedef SetFilterSequenceFunc = Void Function(Pointer<Int32> filters, Int32 count);
 typedef SetFilterSequence = void Function(Pointer<Int32> filters, int count);
 
@@ -36,7 +33,6 @@ class NativeCameraService {
   late GetTextureId _getTextureId;
   late StartCamera _startCamera;
   late StopCamera _stopCamera;
-  late SetCameraFilter _setCameraFilter;
   late SetFilterSequence _setFilterSequence;
   late GetFrameData _getFrameData;
   late GetFrameWidth _getFrameWidth;
@@ -62,9 +58,6 @@ class NativeCameraService {
         .asFunction();
     _stopCamera = _nativeLib
         .lookup<NativeFunction<StopCameraFunc>>('StopCamera')
-        .asFunction();
-    _setCameraFilter = _nativeLib
-        .lookup<NativeFunction<SetCameraFilterFunc>>('SetCameraFilter')
         .asFunction();
     _setFilterSequence = _nativeLib
         .lookup<NativeFunction<SetFilterSequenceFunc>>('SetFilterSequence')
@@ -96,11 +89,6 @@ class NativeCameraService {
   void stop() {
     initialize();
     _stopCamera();
-  }
-
-  void setFilter(int mode) {
-    initialize();
-    _setCameraFilter(mode);
   }
 
   void setFilterSequence(List<int> filters) {

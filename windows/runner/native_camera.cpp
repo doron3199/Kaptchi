@@ -65,16 +65,6 @@ void NativeCamera::Stop() {
     }
 }
 
-void NativeCamera::SetFilter(int mode) {
-    filter_mode_ = mode;
-    // Legacy support: if mode is 0, clear filters. If > 0, set as single filter.
-    std::lock_guard<std::mutex> lock(mutex_);
-    active_filters_.clear();
-    if (mode != 0) {
-        active_filters_.push_back(mode);
-    }
-}
-
 void NativeCamera::SetFilterSequence(int* filters, int count) {
     std::lock_guard<std::mutex> lock(mutex_);
     active_filters_.clear();
@@ -179,10 +169,6 @@ extern "C" {
 
     __declspec(dllexport) void StopCamera() {
         if (g_native_camera) g_native_camera->Stop();
-    }
-
-    __declspec(dllexport) void SetCameraFilter(int mode) {
-        if (g_native_camera) g_native_camera->SetFilter(mode);
     }
 
     __declspec(dllexport) void SetFilterSequence(int* filters, int count) {
