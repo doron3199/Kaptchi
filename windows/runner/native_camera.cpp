@@ -204,8 +204,72 @@ void NativeCamera::ProcessFrame(cv::Mat& frame) {
         } else if (mode == 5) {
             // Smart Obstacle Removal
             ApplySmartObstacleRemoval(frame);
+        } else if (mode == 6) {
+            // Moving Average
+            ApplyMovingAverage(frame);
+        } else if (mode == 7) {
+            // CLAHE
+            ApplyCLAHE(frame);
+        } else if (mode == 8) {
+            // Sharpening
+            ApplySharpening(frame);
         }
     }
+}
+
+void NativeCamera::ApplyCLAHE(cv::Mat& frame) {
+    // Convert to LAB color space
+    cv::Mat lab_image;
+    cv::cvtColor(frame, lab_image, cv::COLOR_BGR2Lab);
+
+    // Extract the L channel
+    std::vector<cv::Mat> lab_planes(3);
+    cv::split(lab_image, lab_planes);  // now we have the L image in lab_planes[0]
+
+    // Apply the CLAHE algorithm to the L channel
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
+    clahe->setClipLimit(4);
+    clahe->apply(lab_planes[0], lab_planes[0]);
+
+    // Merge the color planes back into an Lab image
+    cv::merge(lab_planes, lab_image);
+
+    // Convert back to RGB
+    cv::cvtColor(lab_image, frame, cv::COLOR_Lab2BGR);
+}
+
+void NativeCamera::ApplySharpening(cv::Mat& frame) {
+    cv::Mat blurred;
+    cv::GaussianBlur(frame, blurred, cv::Size(0, 0), 3);
+    cv::addWeighted(frame, 1.5, blurred, -0.5, 0, frame);
+}
+
+void NativeCamera::ApplyMovingAverage(cv::Mat& frame) {
+    // Add current frame to history
+    // We need to clone because 'frame' is reused/modified
+    frame_history_.push_back(frame.clone());
+
+    // Maintain history size
+    if (frame_history_.size() > history_size_) {
+        frame_history_.pop_front();
+    }
+
+    // Calculate average
+    if (frame_history_.empty()) return;
+
+    cv::Mat sum = cv::Mat::zeros(frame.size(), CV_32FC3);
+    
+    for (const auto& f : frame_history_) {
+        cv::Mat float_f;
+        f.convertTo(float_f, CV_32F);
+        cv::accumulate(float_f, sum);
+    }
+
+    // Divide by count
+    sum = sum / static_cast<double>(frame_history_.size());
+
+    // Convert back to 8-bit
+    sum.convertTo(frame, CV_8U);
 }
 
 void NativeCamera::ApplySmartWhiteboard(cv::Mat& frame) {

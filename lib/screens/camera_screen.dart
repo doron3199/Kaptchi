@@ -33,7 +33,7 @@ class _CameraScreenState extends State<CameraScreen> {
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
   int _selectedCameraIndex = -1;
-  bool _isHighQuality = false;
+  bool _isHighQuality = true;
   bool _isInitialized = false;
   
   // Image processing state
@@ -52,6 +52,9 @@ class _CameraScreenState extends State<CameraScreen> {
 
   // Filter state
   final List<FilterItem> _filters = [
+    FilterItem(id: 8, name: 'Sharpening', isActive: false),
+    FilterItem(id: 7, name: 'Contrast Boost (CLAHE)', isActive: false),
+    FilterItem(id: 6, name: 'Moving Average', isActive: false),
     FilterItem(id: 5, name: 'Smart Obstacle Removal', isActive: false),
     FilterItem(id: 4, name: 'Smart Whiteboard', isActive: false),
     FilterItem(id: 3, name: 'Blur (Legacy)', isActive: false),
