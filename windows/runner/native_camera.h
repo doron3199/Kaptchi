@@ -7,6 +7,7 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <deque>
 
 class NativeCamera {
 public:
@@ -49,10 +50,14 @@ private:
     cv::Mat accumulated_background_;
     bool reset_background_ = true;
 
+    // Moving Average State
+    std::deque<cv::Mat> frame_history_;
+    const size_t history_size_ = 5;
+
     // Resolution settings
-    int target_width_ = 1280;
-    int target_height_ = 720;
-    int camera_index_ = 0;
+    int target_width_ = 4096;
+    int target_height_ = 2160;
+    int camera_index_ = 1;
 
     void CaptureLoop();
     void ProcessFrame(cv::Mat& frame);
@@ -60,6 +65,9 @@ private:
     // New Filter Implementations
     void ApplySmartWhiteboard(cv::Mat& frame);
     void ApplySmartObstacleRemoval(cv::Mat& frame);
+    void ApplyMovingAverage(cv::Mat& frame);
+    void ApplyCLAHE(cv::Mat& frame);
+    void ApplySharpening(cv::Mat& frame);
 };
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);
