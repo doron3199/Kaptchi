@@ -8,7 +8,17 @@ import 'package:ffi/ffi.dart';
 typedef ProcessFrameC = Void Function(Pointer<Uint8> bytes, Int32 width, Int32 height, Int32 mode);
 typedef ProcessFrameDart = void Function(Pointer<Uint8> bytes, int width, int height, int mode);
 
-enum ProcessingMode { none, invert, whiteboard, removeObstacles }
+enum ProcessingMode {
+  none,               // 0
+  invert,             // 1
+  whiteboardLegacy,   // 2
+  blurLegacy,         // 3
+  smartWhiteboard,    // 4
+  smartObstacle,      // 5
+  movingAverage,      // 6
+  clahe,              // 7
+  sharpening          // 8
+}
 
 class ImageProcessingService {
   static final ImageProcessingService instance = ImageProcessingService._();

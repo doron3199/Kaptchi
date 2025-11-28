@@ -414,6 +414,137 @@ const FlutterDesktopPixelBuffer* NativeCamera::CopyPixelBuffer(size_t width, siz
     return flutter_pixel_buffer_.get();
 }
 
+// Helper functions for external processing (WebRTC stream)
+// These are duplicated from NativeCamera to allow stateless/independent processing
+
+static cv::Ptr<cv::BackgroundSubtractor> g_back_sub;
+static cv::Mat g_accumulated_background;
+static std::deque<cv::Mat> g_frame_history;
+static const size_t g_history_size = 5;
+
+void ExternalApplyCLAHE(cv::Mat& frame) {
+    cv::Mat lab_image;
+    cv::cvtColor(frame, lab_image, cv::COLOR_BGR2Lab);
+    std::vector<cv::Mat> lab_planes(3);
+    cv::split(lab_image, lab_planes);
+    cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE();
+    clahe->setClipLimit(4);
+    clahe->apply(lab_planes[0], lab_planes[0]);
+    cv::merge(lab_planes, lab_image);
+    cv::cvtColor(lab_image, frame, cv::COLOR_Lab2BGR);
+}
+
+void ExternalApplySharpening(cv::Mat& frame) {
+    cv::Mat blurred;
+    cv::GaussianBlur(frame, blurred, cv::Size(0, 0), 3);
+    cv::addWeighted(frame, 1.5, blurred, -0.5, 0, frame);
+}
+
+void ExternalApplyMovingAverage(cv::Mat& frame) {
+    g_frame_history.push_back(frame.clone());
+    if (g_frame_history.size() > g_history_size) {
+        g_frame_history.pop_front();
+    }
+    if (g_frame_history.empty()) return;
+
+    cv::Mat sum = cv::Mat::zeros(frame.size(), CV_32FC3);
+    for (const auto& f : g_frame_history) {
+        cv::Mat float_f;
+        f.convertTo(float_f, CV_32F);
+        cv::accumulate(float_f, sum);
+    }
+    sum = sum / static_cast<double>(g_frame_history.size());
+    sum.convertTo(frame, CV_8U);
+}
+
+void ExternalApplySmartWhiteboard(cv::Mat& frame) {
+    cv::Mat blurred_8u;
+    cv::medianBlur(frame, blurred_8u, 7);
+    cv::Mat float_frame;
+    frame.convertTo(float_frame, CV_32F);
+    cv::Mat blurred;
+    blurred_8u.convertTo(blurred, CV_32F);
+    cv::GaussianBlur(blurred, blurred, cv::Size(3, 3), 0);
+    cv::Mat normalized;
+    cv::divide(float_frame, blurred, normalized);
+    cv::min(normalized, 1.0f, normalized);
+    cv::pow(normalized, 5, normalized);
+    normalized = normalized * CV_PI;
+    
+    cv::Mat cos_val = normalized.clone();
+    int rows = cos_val.rows;
+    int cols = cos_val.cols * cos_val.channels();
+    if (cos_val.isContinuous()) {
+        cols *= rows;
+        rows = 1;
+    }
+    for (int i = 0; i < rows; ++i) {
+        float* ptr = cos_val.ptr<float>(i);
+        for (int j = 0; j < cols; ++j) {
+            ptr[j] = std::cos(ptr[j]);
+        }
+    }
+    
+    cv::Mat enhanced = 0.5f - 0.5f * cos_val;
+    enhanced = enhanced * 255.0f;
+    enhanced.convertTo(frame, CV_8U);
+}
+
+void ExternalApplySmartObstacleRemoval(cv::Mat& frame) {
+    if (g_back_sub.empty()) {
+        g_back_sub = cv::createBackgroundSubtractorKNN();
+        auto knn = std::dynamic_pointer_cast<cv::BackgroundSubtractorKNN>(g_back_sub);
+        if (knn) knn->setHistory(300);
+    }
+
+    if (g_accumulated_background.empty() || g_accumulated_background.size() != frame.size()) {
+        frame.copyTo(g_accumulated_background);
+    }
+
+    cv::Mat small_frame;
+    cv::resize(frame, small_frame, cv::Size(), 0.1, 0.1);
+    cv::Mat fgmask;
+    g_back_sub->apply(small_frame, fgmask);
+
+    int num_parts = 15;
+    int w = frame.cols;
+    int mask_w = fgmask.cols;
+    std::vector<bool> is_static(num_parts, false);
+    std::vector<int> mask_dist(num_parts + 1);
+    double step_mask = static_cast<double>(mask_w) / num_parts;
+    for(int i=0; i<=num_parts; ++i) mask_dist[i] = static_cast<int>(i * step_mask);
+
+    for (int i = 0; i < num_parts; ++i) {
+        int start = mask_dist[i];
+        int end = mask_dist[i+1];
+        if (start >= end) continue;
+        cv::Mat roi = fgmask.colRange(start, end);
+        int sum = cv::countNonZero(roi);
+        is_static[i] = (sum == 0);
+    }
+
+    cv::Mat update_mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+    std::vector<int> dist(num_parts + 1);
+    double step = static_cast<double>(w) / num_parts;
+    for(int i=0; i<=num_parts; ++i) dist[i] = static_cast<int>(i * step);
+
+    for (int i = 0; i < num_parts; ++i) {
+        bool should_update = false;
+        if (i == 0) should_update = is_static[i] && is_static[i + 1];
+        else if (i == num_parts - 1) should_update = is_static[i] && is_static[i - 1];
+        else should_update = is_static[i] && is_static[i - 1] && is_static[i + 1];
+
+        if (should_update) {
+            int start = dist[i];
+            int end = dist[i+1];
+            if (start < end) update_mask.colRange(start, end).setTo(255);
+        }
+    }
+
+    frame.copyTo(g_accumulated_background, update_mask);
+    g_accumulated_background.copyTo(frame);
+}
+
 // FFI Exports
 extern "C" {
     __declspec(dllexport) int64_t GetTextureId() {
@@ -453,5 +584,40 @@ extern "C" {
     __declspec(dllexport) int32_t GetFrameHeight() {
         if (!g_native_camera) return 0;
         return g_native_camera->GetFrameHeight();
+    }
+
+    __declspec(dllexport) void process_frame(uint8_t* bytes, int32_t width, int32_t height, int32_t mode) {
+        if (bytes == nullptr || width <= 0 || height <= 0) return;
+
+        // Wrap bytes in Mat. Assumes BGRA (4 channels)
+        cv::Mat frame(height, width, CV_8UC4, bytes);
+
+        // Convert to BGR for processing
+        cv::Mat bgr;
+        cv::cvtColor(frame, bgr, cv::COLOR_BGRA2BGR);
+
+        if (mode == 1) { // Invert
+            cv::bitwise_not(bgr, bgr);
+        } else if (mode == 2) { // Whiteboard Legacy
+            cv::Mat gray;
+            cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+            cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, 10);
+            cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+        } else if (mode == 3) { // Blur Legacy
+            cv::GaussianBlur(bgr, bgr, cv::Size(15, 15), 0);
+        } else if (mode == 4) { // Smart Whiteboard
+            ExternalApplySmartWhiteboard(bgr);
+        } else if (mode == 5) { // Smart Obstacle
+            ExternalApplySmartObstacleRemoval(bgr);
+        } else if (mode == 6) { // Moving Average
+            ExternalApplyMovingAverage(bgr);
+        } else if (mode == 7) { // CLAHE
+            ExternalApplyCLAHE(bgr);
+        } else if (mode == 8) { // Sharpening
+            ExternalApplySharpening(bgr);
+        }
+
+        // Convert back to BGRA and write to original buffer
+        cv::cvtColor(bgr, frame, cv::COLOR_BGR2BGRA);
     }
 }
