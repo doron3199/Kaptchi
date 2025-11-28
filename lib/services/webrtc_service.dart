@@ -9,6 +9,9 @@ class WebRTCService {
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   OnRemoteStream? onRemoteStream;
+  Function(String)? onError;
+  Function(RTCSignalingState)? onSignalingStateChange;
+  Function(RTCIceConnectionState)? onIceConnectionStateChange;
 
   final Map<String, dynamic> _configuration = {
     'iceServers': [
@@ -16,15 +19,49 @@ class WebRTCService {
     ]
   };
 
-  Future<void> connect(String ipAddress, bool isCaller) async {
+  Future<void> connect(String hostOrUrl, bool isCaller) async {
     try {
-      _socket = WebSocketChannel.connect(Uri.parse('ws://$ipAddress:8080'));
+      String cleanHostOrUrl = hostOrUrl.trim();
+      Uri uri;
+      if (cleanHostOrUrl.startsWith('ws://') || cleanHostOrUrl.startsWith('wss://')) {
+        uri = Uri.parse(cleanHostOrUrl);
+      } else {
+        // Default to port 5000 if not specified
+        if (cleanHostOrUrl.contains(':')) {
+           uri = Uri.parse('ws://$cleanHostOrUrl');
+        } else {
+           uri = Uri.parse('ws://$cleanHostOrUrl:5000');
+        }
+      }
+
+      print('Connecting to WebSocket: $uri');
+      _socket = WebSocketChannel.connect(uri);
       
-      _socket!.stream.listen((message) {
-        _handleMessage(message);
-      });
+      _socket!.stream.listen(
+        (message) {
+          _handleMessage(message);
+        },
+        onError: (error) {
+          print('WebSocket error: $error');
+          onError?.call('WebSocket error: $error');
+        },
+        onDone: () {
+          print('WebSocket closed');
+          onError?.call('WebSocket connection closed');
+        },
+      );
 
       _peerConnection = await createPeerConnection(_configuration);
+
+      _peerConnection!.onSignalingState = (state) {
+        print('Signaling state: $state');
+        onSignalingStateChange?.call(state);
+      };
+
+      _peerConnection!.onIceConnectionState = (state) {
+        print('ICE connection state: $state');
+        onIceConnectionStateChange?.call(state);
+      };
 
       _peerConnection!.onIceCandidate = (candidate) {
         _send('candidate', {
@@ -65,35 +102,48 @@ class WebRTCService {
   }
 
   void _handleMessage(dynamic message) async {
-    Map<String, dynamic> data = jsonDecode(message);
-    String type = data['type'];
-    var payload = data['payload'];
+    try {
+      if (message == null) return;
+      
+      Map<String, dynamic> data = jsonDecode(message);
+      String? type = data['type'];
+      var payload = data['payload'];
 
-    switch (type) {
-      case 'offer':
-        await _peerConnection!.setRemoteDescription(
-          RTCSessionDescription(payload['sdp'], payload['type']),
-        );
-        RTCSessionDescription answer = await _peerConnection!.createAnswer();
-        await _peerConnection!.setLocalDescription(answer);
-        _send('answer', {'sdp': answer.sdp, 'type': answer.type});
-        break;
+      if (type == null) {
+        print('Received message without type');
+        return;
+      }
 
-      case 'answer':
-        await _peerConnection!.setRemoteDescription(
-          RTCSessionDescription(payload['sdp'], payload['type']),
-        );
-        break;
+      switch (type) {
+        case 'offer':
+          await _peerConnection!.setRemoteDescription(
+            RTCSessionDescription(payload['sdp'], payload['type']),
+          );
+          RTCSessionDescription answer = await _peerConnection!.createAnswer();
+          await _peerConnection!.setLocalDescription(answer);
+          _send('answer', {'sdp': answer.sdp, 'type': answer.type});
+          break;
 
-      case 'candidate':
-        await _peerConnection!.addCandidate(
-          RTCIceCandidate(
-            payload['candidate'],
-            payload['sdpMid'],
-            payload['sdpMLineIndex'],
-          ),
-        );
-        break;
+        case 'answer':
+          await _peerConnection!.setRemoteDescription(
+            RTCSessionDescription(payload['sdp'], payload['type']),
+          );
+          break;
+
+        case 'candidate':
+          if (payload != null) {
+            await _peerConnection!.addCandidate(
+              RTCIceCandidate(
+                payload['candidate'],
+                payload['sdpMid'],
+                payload['sdpMLineIndex'],
+              ),
+            );
+          }
+          break;
+      }
+    } catch (e) {
+      print('Error handling message: $e');
     }
   }
 

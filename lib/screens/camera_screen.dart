@@ -2,14 +2,17 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
 import 'package:image/image.dart' as img;
 import 'package:file_picker/file_picker.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
+import '../services/webrtc_service.dart';
 
 class FilterItem {
   final int id;
@@ -29,6 +32,8 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen> {
   final _ipController = TextEditingController();
   final _transformationController = TransformationController();
+  final _webrtcService = WebRTCService();
+  final _localRenderer = RTCVideoRenderer();
   
   CameraController? _controller;
   List<CameraDescription> _cameras = [];
@@ -67,6 +72,7 @@ class _CameraScreenState extends State<CameraScreen> {
     super.initState();
     _init();
     _setDefaultPath();
+    _localRenderer.initialize();
   }
 
   Future<void> _setDefaultPath() async {
@@ -183,6 +189,8 @@ class _CameraScreenState extends State<CameraScreen> {
     _controller?.dispose();
     _ipController.dispose();
     _transformationController.dispose();
+    _webrtcService.disconnect();
+    _localRenderer.dispose();
     super.dispose();
   }
 
@@ -366,6 +374,84 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _scanQrCode() async {
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(title: const Text('Scan QR Code')),
+          body: MobileScanner(
+            onDetect: (capture) {
+              final List<Barcode> barcodes = capture.barcodes;
+              for (final barcode in barcodes) {
+                if (barcode.rawValue != null) {
+                  Navigator.pop(context, barcode.rawValue);
+                  return;
+                }
+              }
+            },
+          ),
+        ),
+      ),
+    );
+
+    if (result != null && result is String) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Connecting to $result...')),
+        );
+      }
+      
+      // Stop the local camera preview to free up the resource for WebRTC
+      if (_controller != null) {
+        await _controller!.dispose();
+        setState(() {
+          _controller = null;
+        });
+      }
+
+      _webrtcService.onError = (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('Connection Error: $error'),
+              backgroundColor: Colors.red,
+              duration: const Duration(seconds: 5),
+            ),
+          );
+        }
+      };
+
+      _webrtcService.onIceConnectionStateChange = (state) {
+        if (mounted) {
+          if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+             ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Connected!'),
+                backgroundColor: Colors.green,
+              ),
+            );
+          } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
+             ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Connection Failed'),
+                backgroundColor: Colors.red,
+              ),
+            );
+          }
+        }
+      };
+
+      await _webrtcService.connect(result, true);
+      
+      if (_webrtcService.localStream != null) {
+        setState(() {
+          _localRenderer.srcObject = _webrtcService.localStream;
+        });
+      }
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -380,6 +466,11 @@ class _CameraScreenState extends State<CameraScreen> {
           },
         ),
         actions: [
+          if (!Platform.isWindows)
+            IconButton(
+              icon: const Icon(Icons.qr_code_scanner),
+              onPressed: _scanQrCode,
+            ),
           IconButton(
             icon: Icon(_isSidebarOpen ? Icons.chevron_right : Icons.list),
             onPressed: () {
@@ -411,24 +502,27 @@ class _CameraScreenState extends State<CameraScreen> {
                           transformationController: _transformationController,
                           minScale: 1.0,
                           maxScale: 50.0,
-                          child: Transform.scale(
-                            scaleX: -1,
-                            alignment: Alignment.center,
-                            child: ValueListenableBuilder<Uint8List?>(
-                              valueListenable: _processedImageNotifier,
-                              builder: (context, processedImage, child) {
-                                if (processedImage != null && _processingMode != ProcessingMode.none) {
-                                  return Image.memory(
-                                    processedImage,
-                                    gaplessPlayback: true,
-                                    fit: BoxFit.contain,
-                                  );
-                                }
-                                return CameraPreview(_controller!);
-                              },
-                            ),
+                          child: ValueListenableBuilder<Uint8List?>(
+                            valueListenable: _processedImageNotifier,
+                            builder: (context, processedImage, child) {
+                              if (processedImage != null && _processingMode != ProcessingMode.none) {
+                                return Image.memory(
+                                  processedImage,
+                                  gaplessPlayback: true,
+                                  fit: BoxFit.contain,
+                                );
+                              }
+                              return CameraPreview(_controller!);
+                            },
                           ),
                         )
+                      else if (_localRenderer.srcObject != null)
+                         InteractiveViewer(
+                           transformationController: _transformationController,
+                           minScale: 1.0,
+                           maxScale: 50.0,
+                           child: RTCVideoView(_localRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain),
+                         )
                       else
                         Center(
                           child: Column(
