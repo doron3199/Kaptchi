@@ -27,7 +27,7 @@ class ImageProcessingService {
   DynamicLibrary? _nativeLib;
   ProcessFrameDart? _processFrameFunc;
   ProcessFrameDart? _processFrameRgbaFunc;
-  ProcessingMode _currentMode = ProcessingMode.none;
+  List<ProcessingMode> _activeModes = [];
 
   Future<void> initialize() async {
     if (Platform.isWindows) {
@@ -54,9 +54,9 @@ class ImageProcessingService {
     }
   }
 
-  void setProcessingMode(ProcessingMode mode) {
-    _currentMode = mode;
-    print('ImageProcessingService: Mode set to $mode');
+  void setProcessingModes(List<ProcessingMode> modes) {
+    _activeModes = modes;
+    print('ImageProcessingService: Modes set to $modes');
   }
 
   // Helper to attach to track (placeholder for WebRTC)
@@ -65,7 +65,7 @@ class ImageProcessingService {
   }
 
   Future<Uint8List?> processRawRgba(Uint8List rgbaData, int width, int height) async {
-    if (_currentMode == ProcessingMode.none) return null;
+    if (_activeModes.isEmpty) return null;
     
     // Use the RGBA specific function if available, otherwise fall back to standard (which might swap colors)
     final func = _processFrameRgbaFunc ?? _processFrameFunc;
@@ -78,8 +78,12 @@ class ImageProcessingService {
       final Uint8List ptrList = ptr.asTypedList(size);
       ptrList.setAll(0, rgbaData);
 
-      // Call C++ function (modifies data in-place)
-      func(ptr, width, height, _currentMode.index);
+      // Call C++ function for each active mode in sequence
+      for (final mode in _activeModes) {
+        if (mode != ProcessingMode.none) {
+          func(ptr, width, height, mode.index);
+        }
+      }
 
       return _addBmpHeader(ptr.asTypedList(size), width, height);
     } catch (e) {
@@ -91,9 +95,8 @@ class ImageProcessingService {
   }
 
   Future<Uint8List?> processImageAndEncode(CameraImage image) async {
-    // If mode is none, return null so the UI shows the raw camera preview
-    // Also check if function is loaded
-    if (_currentMode == ProcessingMode.none) return null;
+    // If no modes active, return null so the UI shows the raw camera preview
+    if (_activeModes.isEmpty) return null;
     
     if (_processFrameFunc == null) {
         print('Warning: Native process_frame function not loaded.');
@@ -118,8 +121,12 @@ class ImageProcessingService {
       final Uint8List ptrList = ptr.asTypedList(size);
       ptrList.setAll(0, bytes);
 
-      // Call C++ function (modifies data in-place)
-      _processFrameFunc!(ptr, width, height, _currentMode.index);
+      // Call C++ function for each active mode in sequence
+      for (final mode in _activeModes) {
+        if (mode != ProcessingMode.none) {
+          _processFrameFunc!(ptr, width, height, mode.index);
+        }
+      }
 
       // Copy back to Dart Uint8List (this is expensive, but necessary for display in Image.memory)
       // Ideally, we would render the texture directly in C++, but for now we encode to BMP/RGBA
