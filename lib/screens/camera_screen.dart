@@ -88,6 +88,7 @@ class _CameraScreenState extends State<CameraScreen> {
   // Sidebar state
   bool _isSidebarOpen = false;
   bool _isLeftSidebarOpen = false;
+  bool _isGalleryFullScreen = false;
   final TextEditingController _pdfNameController = TextEditingController();
   final TextEditingController _pdfPathController = TextEditingController();
 
@@ -557,22 +558,21 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     // 3. Update Image Processing Service (WebRTC / Non-Windows)
-    // Currently ImageProcessingService only supports one mode at a time.
-    // We pick the first active filter, or None.
-    if (activeFilters.isNotEmpty) {
-      // Find the ProcessingMode that matches the first active filter ID
-      final firstId = activeFilters.first;
-      // Ensure ID is within valid range of ProcessingMode
-      if (firstId >= 0 && firstId < ProcessingMode.values.length) {
-        _processingMode = ProcessingMode.values[firstId];
-      } else {
-        _processingMode = ProcessingMode.none;
+    List<ProcessingMode> modes = [];
+    for (var id in activeFilters) {
+      if (id >= 0 && id < ProcessingMode.values.length) {
+        modes.add(ProcessingMode.values[id]);
       }
+    }
+
+    if (modes.isNotEmpty) {
+      // Set to first mode just to indicate "active" for existing checks
+      _processingMode = modes.first;
     } else {
       _processingMode = ProcessingMode.none;
     }
     
-    ImageProcessingService.instance.setProcessingMode(_processingMode);
+    ImageProcessingService.instance.setProcessingModes(modes);
   }
 
   @override
@@ -633,77 +633,116 @@ class _CameraScreenState extends State<CameraScreen> {
     if (!Platform.isWindows) return;
 
     try {
-      // 1. Get full frame data
-      final service = NativeCameraService();
-      final width = service.getFrameWidth();
-      final height = service.getFrameHeight();
-      final bytes = service.getFrameData();
+      Uint8List? finalBytes;
+      int finalWidth = 0;
+      int finalHeight = 0;
 
-      if (bytes == null || width == 0 || height == 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to capture frame')),
+      if (_isWebRTCMode) {
+        // If we have a processed (filtered) image, use it
+        if (_processingMode != ProcessingMode.none && _processedImageNotifier.value != null) {
+          finalBytes = _processedImageNotifier.value;
+          // Decode to get dimensions
+          final decoded = img.decodeImage(finalBytes!);
+          if (decoded != null) {
+            finalWidth = decoded.width;
+            finalHeight = decoded.height;
+          }
+        } else {
+          // Otherwise capture the raw stream from the view
+          final boundary = _videoViewKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+          if (boundary == null) {
+             ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Failed to capture WebRTC frame')),
+            );
+            return;
+          }
+          
+          final image = await boundary.toImage();
+          final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+          
+          if (byteData != null) {
+            finalBytes = byteData.buffer.asUint8List();
+            finalWidth = image.width;
+            finalHeight = image.height;
+          }
+        }
+      } else {
+        // 1. Get full frame data
+        final service = NativeCameraService();
+        final width = service.getFrameWidth();
+        final height = service.getFrameHeight();
+        final bytes = service.getFrameData();
+
+        if (bytes == null || width == 0 || height == 0) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to capture frame')),
+          );
+          return;
+        }
+
+        // 2. Decode image
+        // Note: bytes are RGBA
+        final image = img.Image.fromBytes(
+          width: width,
+          height: height,
+          bytes: bytes.buffer,
+          numChannels: 4,
+          order: img.ChannelOrder.rgba,
         );
-        return;
+
+        // 3. Calculate crop rect based on transformation
+        final matrix = _transformationController.value;
+        final scale = matrix.getMaxScaleOnAxis();
+        final translation = matrix.getTranslation();
+        
+        // Viewport size (screen size available for camera)
+        final viewportSize = MediaQuery.of(context).size;
+        
+        // Let's assume "contain" fit.
+        double renderWidth = viewportSize.width;
+        double renderHeight = viewportSize.width * 9 / 16;
+        
+        if (renderHeight > viewportSize.height) {
+          renderHeight = viewportSize.height;
+          renderWidth = renderHeight * 16 / 9;
+        }
+        
+        double visibleX = -translation.x / scale;
+        double visibleY = -translation.y / scale;
+        double visibleW = viewportSize.width / scale;
+        double visibleH = viewportSize.height / scale;
+        
+        int cropX = (visibleX * (width / renderWidth)).round();
+        int cropY = (visibleY * (height / renderHeight)).round();
+        int cropW = (visibleW * (width / renderWidth)).round();
+        int cropH = (visibleH * (height / renderHeight)).round();
+        
+        // Clamp
+        cropX = cropX.clamp(0, width);
+        cropY = cropY.clamp(0, height);
+        if (cropX + cropW > width) cropW = width - cropX;
+        if (cropY + cropH > height) cropH = height - cropY;
+        
+        if (cropW <= 0 || cropH <= 0) {
+           // Fallback to full image if calculation fails
+           cropX = 0; cropY = 0; cropW = width; cropH = height;
+        }
+
+        final croppedImage = img.copyCrop(image, x: cropX, y: cropY, width: cropW, height: cropH);
+        finalBytes = img.encodePng(croppedImage);
+        finalWidth = cropW;
+        finalHeight = cropH;
       }
 
-      // 2. Decode image
-      // Note: bytes are RGBA
-      final image = img.Image.fromBytes(
-        width: width,
-        height: height,
-        bytes: bytes.buffer,
-        numChannels: 4,
-        order: img.ChannelOrder.rgba,
-      );
+      if (finalBytes != null) {
+        setState(() {
+          _capturedImages.add((bytes: finalBytes!, width: finalWidth, height: finalHeight));
+        });
 
-      // 3. Calculate crop rect based on transformation
-      final matrix = _transformationController.value;
-      final scale = matrix.getMaxScaleOnAxis();
-      final translation = matrix.getTranslation();
-      
-      // Viewport size (screen size available for camera)
-      final viewportSize = MediaQuery.of(context).size;
-      
-      // Let's assume "contain" fit.
-      double renderWidth = viewportSize.width;
-      double renderHeight = viewportSize.width * 9 / 16;
-      
-      if (renderHeight > viewportSize.height) {
-        renderHeight = viewportSize.height;
-        renderWidth = renderHeight * 16 / 9;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Captured image ${_capturedImages.length}')),
+        );
       }
-      
-      double visibleX = -translation.x / scale;
-      double visibleY = -translation.y / scale;
-      double visibleW = viewportSize.width / scale;
-      double visibleH = viewportSize.height / scale;
-      
-      int cropX = (visibleX * (width / renderWidth)).round();
-      int cropY = (visibleY * (height / renderHeight)).round();
-      int cropW = (visibleW * (width / renderWidth)).round();
-      int cropH = (visibleH * (height / renderHeight)).round();
-      
-      // Clamp
-      cropX = cropX.clamp(0, width);
-      cropY = cropY.clamp(0, height);
-      if (cropX + cropW > width) cropW = width - cropX;
-      if (cropY + cropH > height) cropH = height - cropY;
-      
-      if (cropW <= 0 || cropH <= 0) {
-         // Fallback to full image if calculation fails
-         cropX = 0; cropY = 0; cropW = width; cropH = height;
-      }
-
-      final croppedImage = img.copyCrop(image, x: cropX, y: cropY, width: cropW, height: cropH);
-      final pngBytes = img.encodePng(croppedImage);
-
-      setState(() {
-        _capturedImages.add((bytes: pngBytes, width: cropW, height: cropH));
-      });
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Captured image ${_capturedImages.length}')),
-      );
       
     } catch (e) {
       print('Error capturing frame: $e');
@@ -1198,13 +1237,6 @@ class _CameraScreenState extends State<CameraScreen> {
                               backgroundColor: Colors.red,
                               child: const Icon(Icons.camera_alt, color: Colors.white),
                             ),
-                            if (_capturedImages.isNotEmpty)
-                              FloatingActionButton(
-                                heroTag: 'export_pdf_fab',
-                                onPressed: _exportPdf,
-                                backgroundColor: Colors.green,
-                                child: const Icon(Icons.picture_as_pdf, color: Colors.white),
-                              ),
                           ],
                         ),
                       ),
@@ -1215,6 +1247,38 @@ class _CameraScreenState extends State<CameraScreen> {
             ),
           ),
 
+          // Edge Gesture Detectors
+          Positioned(
+            left: 0,
+            top: 0,
+            bottom: 0,
+            width: 120,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragEnd: (details) {
+                if (details.primaryVelocity! > 300) {
+                  setState(() => _isLeftSidebarOpen = true);
+                }
+              },
+              child: Container(color: Colors.transparent),
+            ),
+          ),
+          Positioned(
+            right: 0,
+            top: 0,
+            bottom: 0,
+            width: 120,
+            child: GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onHorizontalDragEnd: (details) {
+                if (details.primaryVelocity! < -300) {
+                  setState(() => _isSidebarOpen = true);
+                }
+              },
+              child: Container(color: Colors.transparent),
+            ),
+          ),
+
           // Left Sidebar (Filters)
           AnimatedPositioned(
             duration: const Duration(milliseconds: 300),
@@ -1222,9 +1286,15 @@ class _CameraScreenState extends State<CameraScreen> {
             bottom: 0,
             left: _isLeftSidebarOpen ? 0 : -300,
             width: 300,
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.black,
+            child: GestureDetector(
+              onHorizontalDragEnd: (details) {
+                if (details.primaryVelocity! < -300) {
+                  setState(() => _isLeftSidebarOpen = false);
+                }
+              },
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black,
                 boxShadow: [
                   BoxShadow(
                     color: Colors.black.withOpacity(0.5),
@@ -1288,6 +1358,7 @@ class _CameraScreenState extends State<CameraScreen> {
                 ],
               ),
             ),
+            ),
           ),
 
           // Right Sidebar (Captured Images)
@@ -1295,42 +1366,86 @@ class _CameraScreenState extends State<CameraScreen> {
             duration: const Duration(milliseconds: 300),
             top: 0,
             bottom: 0,
-            right: _isSidebarOpen ? 0 : -350,
-            width: 350,
-            child: Container(
-              decoration: BoxDecoration(
-                color: Colors.black,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
-                    blurRadius: 5,
-                    offset: const Offset(-2, 0),
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('Captured Images', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
-                      IconButton(
-                        icon: const Icon(Icons.close, color: Colors.white),
-                        onPressed: () => setState(() => _isSidebarOpen = false),
-                      ),
-                    ],
-                  ),
+            right: _isSidebarOpen ? 0 : (_isGalleryFullScreen ? -MediaQuery.of(context).size.width : -350),
+            width: _isGalleryFullScreen ? MediaQuery.of(context).size.width : 350,
+            child: GestureDetector(
+              onHorizontalDragEnd: (details) {
+                if (details.primaryVelocity! < -300) { // Swipe Left
+                  if (!_isGalleryFullScreen) {
+                    setState(() {
+                      _isGalleryFullScreen = true;
+                    });
+                  }
+                } else if (details.primaryVelocity! > 300) { // Swipe Right
+                  if (_isGalleryFullScreen) {
+                    setState(() {
+                      _isGalleryFullScreen = false;
+                    });
+                  } else {
+                    setState(() {
+                      _isSidebarOpen = false;
+                    });
+                  }
+                }
+              },
+              child: Container(
+                decoration: BoxDecoration(
+                  color: Colors.black,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.5),
+                      blurRadius: 5,
+                      offset: const Offset(-2, 0),
+                    ),
+                  ],
+                ),
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text('Captured Images', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
+                        IconButton(
+                          icon: Icon(_isGalleryFullScreen ? Icons.fullscreen_exit : Icons.close, color: Colors.white),
+                          onPressed: () {
+                            if (_isGalleryFullScreen) {
+                              setState(() => _isGalleryFullScreen = false);
+                            } else {
+                              setState(() => _isSidebarOpen = false);
+                            }
+                          },
+                        ),
+                      ],
+                    ),
                   const SizedBox(height: 10),
                   Expanded(
                     child: _capturedImages.isEmpty
                         ? const Center(child: Text('No images captured', style: TextStyle(color: Colors.white70)))
-                        : ListView.builder(
-                            itemCount: _capturedImages.length,
-                            itemBuilder: (context, index) {
-                              final item = _capturedImages[index];
-                              return Card(
+                        : _isGalleryFullScreen
+                            ? PageView.builder(
+                                scrollDirection: Axis.vertical,
+                                itemCount: _capturedImages.length,
+                                itemBuilder: (context, index) {
+                                  final item = _capturedImages[index];
+                                  return InteractiveViewer(
+                                    minScale: 1.0,
+                                    maxScale: 5.0,
+                                    child: Center(
+                                      child: Image.memory(
+                                        item.bytes,
+                                        fit: BoxFit.contain,
+                                      ),
+                                    ),
+                                  );
+                                },
+                              )
+                            : ListView.builder(
+                                itemCount: _capturedImages.length,
+                                itemBuilder: (context, index) {
+                                  final item = _capturedImages[index];
+                                  return Card(
                                 color: Colors.blue[900],
                                 margin: const EdgeInsets.only(bottom: 8),
                                 child: ListTile(
@@ -1355,6 +1470,7 @@ class _CameraScreenState extends State<CameraScreen> {
                             },
                           ),
                   ),
+                  if (!_isGalleryFullScreen) ...[
                   const Divider(thickness: 1, color: Colors.white24),
                   const Text('PDF Settings', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
                   const SizedBox(height: 8),
@@ -1408,9 +1524,11 @@ class _CameraScreenState extends State<CameraScreen> {
                       ),
                     ),
                   ),
+                  ],
                 ],
               ),
             ),
+          ),
           ),
         ],
       ),
