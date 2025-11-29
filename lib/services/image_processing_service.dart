@@ -26,6 +26,7 @@ class ImageProcessingService {
 
   DynamicLibrary? _nativeLib;
   ProcessFrameDart? _processFrameFunc;
+  ProcessFrameDart? _processFrameRgbaFunc;
   ProcessingMode _currentMode = ProcessingMode.none;
 
   Future<void> initialize() async {
@@ -37,6 +38,14 @@ class ImageProcessingService {
         _processFrameFunc = _nativeLib!
             .lookup<NativeFunction<ProcessFrameC>>('process_frame')
             .asFunction<ProcessFrameDart>();
+            
+        try {
+          _processFrameRgbaFunc = _nativeLib!
+              .lookup<NativeFunction<ProcessFrameC>>('process_frame_rgba')
+              .asFunction<ProcessFrameDart>();
+        } catch (e) {
+          print('ImageProcessingService: process_frame_rgba not found (might need rebuild): $e');
+        }
             
         print('ImageProcessingService: Loaded native C++ functions.');
       } catch (e) {
@@ -53,6 +62,32 @@ class ImageProcessingService {
   // Helper to attach to track (placeholder for WebRTC)
   void attachToTrack(dynamic track) {
     print('ImageProcessingService: Attaching to track $track');
+  }
+
+  Future<Uint8List?> processRawRgba(Uint8List rgbaData, int width, int height) async {
+    if (_currentMode == ProcessingMode.none) return null;
+    
+    // Use the RGBA specific function if available, otherwise fall back to standard (which might swap colors)
+    final func = _processFrameRgbaFunc ?? _processFrameFunc;
+    if (func == null) return null;
+
+    final int size = rgbaData.length;
+    final Pointer<Uint8> ptr = malloc.allocate<Uint8>(size);
+    
+    try {
+      final Uint8List ptrList = ptr.asTypedList(size);
+      ptrList.setAll(0, rgbaData);
+
+      // Call C++ function (modifies data in-place)
+      func(ptr, width, height, _currentMode.index);
+
+      return _addBmpHeader(ptr.asTypedList(size), width, height);
+    } catch (e) {
+      print('Error processing raw frame: $e');
+      return null;
+    } finally {
+      malloc.free(ptr);
+    }
   }
 
   Future<Uint8List?> processImageAndEncode(CameraImage image) async {

@@ -1,6 +1,8 @@
 #include "native_camera.h"
 #include <iostream>
 #include <cmath>
+#include <chrono>
+#include <objbase.h>
 
 // Global instance pointer
 NativeCamera* g_native_camera = nullptr;
@@ -45,26 +47,25 @@ NativeCamera::~NativeCamera() {
 
 void NativeCamera::Start() {
     if (is_running_) return;
-    
-    // Try opening with DirectShow first (often more stable for webcams)
-    capture_.open(camera_index_, cv::CAP_DSHOW); 
-    if (!capture_.isOpened()) {
-        // Fallback to MSMF
-        std::cout << "DirectShow failed, trying MSMF..." << std::endl;
-        capture_.open(camera_index_, cv::CAP_MSMF);
-    }
 
-    if (!capture_.isOpened()) {
-        std::cerr << "Failed to open camera " << camera_index_ << std::endl;
-        return;
+    // Clear any stale frame from previous sessions to avoid ghosting
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (target_width_ > 0 && target_height_ > 0) {
+             // Create a black frame (RGBA)
+             current_frame_ = cv::Mat(target_height_, target_width_, CV_8UC4, cv::Scalar(0, 0, 0, 255));
+        } else {
+             current_frame_ = cv::Mat();
+        }
     }
-
-    // Set resolution
-    capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
-    capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
+    // Notify Flutter to redraw (with the black frame)
+    if (texture_id_ != -1) {
+        texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+    }
 
     is_running_ = true;
-    capture_thread_ = std::thread(&NativeCamera::CaptureLoop, this);
+    restart_requested_ = false;
+    capture_thread_ = std::thread(&NativeCamera::CameraThreadLoop, this);
 }
 
 void NativeCamera::Stop() {
@@ -72,41 +73,36 @@ void NativeCamera::Stop() {
     if (capture_thread_.joinable()) {
         capture_thread_.join();
     }
-    if (capture_.isOpened()) {
-        capture_.release();
-    }
+    // capture_.release() is now handled inside the thread loop
 }
 
 void NativeCamera::SwitchCamera() {
-    Stop();
-    
-    // Try next index
-    camera_index_++;
-    
-    // Try to open
-    capture_.open(camera_index_, cv::CAP_DSHOW);
-    if (!capture_.isOpened()) {
-        capture_.open(camera_index_, cv::CAP_MSMF);
-    }
-    
-    if (!capture_.isOpened()) {
-        // If failed, loop back to 0
-        std::cout << "Camera " << camera_index_ << " not found, looping back to 0" << std::endl;
-        camera_index_ = 0;
-        capture_.open(camera_index_, cv::CAP_DSHOW);
-        if (!capture_.isOpened()) {
-            capture_.open(camera_index_, cv::CAP_MSMF);
-        }
-    }
-    
-    if (capture_.isOpened()) {
-        capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
-        capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
-        
-        is_running_ = true;
-        capture_thread_ = std::thread(&NativeCamera::CaptureLoop, this);
+    if (is_running_) {
+        pending_camera_index_ = camera_index_ + 1;
+        restart_requested_ = true;
     } else {
-        std::cerr << "Failed to open any camera" << std::endl;
+        camera_index_++;
+        Start();
+    }
+}
+
+void NativeCamera::SelectCamera(int index) {
+    // Swap indices 0 and 1 to match Flutter's enumeration order with OpenCV's on Windows.
+    // Flutter often lists Integrated as 0, External as 1.
+    // OpenCV often lists External as 0, Integrated as 1 (or vice versa depending on driver load order).
+    // Based on user report, they are swapped.
+    int mapped_index = index;
+    if (index == 0) mapped_index = 1;
+    else if (index == 1) mapped_index = 0;
+
+    if (camera_index_ == mapped_index && is_running_) return;
+    
+    if (is_running_) {
+        pending_camera_index_ = mapped_index;
+        restart_requested_ = true;
+    } else {
+        camera_index_ = mapped_index;
+        Start();
     }
 }
 
@@ -114,19 +110,9 @@ void NativeCamera::SetResolution(int width, int height) {
     target_width_ = width;
     target_height_ = height;
     
-    if (capture_.isOpened()) {
-        // If camera is already running, try to update on the fly
-        // Note: Some backends might require a restart, but let's try setting first.
-        // If the resolution change requires a restart, we might need to Stop() and Start() here.
-        // For safety and consistency, let's restart the capture if it's running.
-        bool was_running = is_running_;
-        if (was_running) {
-            Stop();
-            Start();
-        } else {
-             capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
-             capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
-        }
+    if (is_running_) {
+        pending_camera_index_ = camera_index_;
+        restart_requested_ = true;
     }
 }
 
@@ -158,8 +144,77 @@ int32_t NativeCamera::GetFrameHeight() {
     return current_frame_.empty() ? 0 : current_frame_.rows;
 }
 
-void NativeCamera::CaptureLoop() {
+void NativeCamera::CameraThreadLoop() {
+    // Initialize COM for this thread (Required for MSMF/DirectShow)
+    HRESULT hr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+
+    bool needs_open = true;
+
     while (is_running_) {
+        if (restart_requested_) {
+            if (capture_.isOpened()) {
+                capture_.release();
+            }
+
+            // Clear the frame to black to avoid showing the previous camera's image
+            // while the new camera is initializing.
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                // Create a black frame (RGBA)
+                current_frame_ = cv::Mat(target_height_, target_width_, CV_8UC4, cv::Scalar(0, 0, 0, 255));
+            }
+            texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+
+            camera_index_ = pending_camera_index_.load();
+            restart_requested_ = false;
+            needs_open = true;
+        }
+
+        if (needs_open) {
+            needs_open = false;
+            
+            // Always prioritize DirectShow (DSHOW) for stability.
+            // MSMF (Media Foundation) can cause freezes with some external cameras
+            // and the enumeration order might differ from Flutter's.
+            // DSHOW is generally more robust for hot-plugging and switching.
+            
+            std::cout << "Opening camera " << camera_index_ << " with DirectShow..." << std::endl;
+            capture_.open(camera_index_, cv::CAP_DSHOW);
+
+            if (!capture_.isOpened()) {
+                std::cout << "DirectShow failed for camera " << camera_index_ << ", trying MSMF..." << std::endl;
+                capture_.open(camera_index_, cv::CAP_MSMF); 
+            }
+
+            if (!capture_.isOpened()) {
+                // If failed, try looping back to 0 (legacy behavior for SwitchCamera)
+                if (camera_index_ > 0) {
+                     std::cout << "Camera " << camera_index_ << " failed, trying 0..." << std::endl;
+                     camera_index_ = 0;
+                     capture_.open(camera_index_, cv::CAP_DSHOW);
+                     if (!capture_.isOpened()) {
+                         capture_.open(camera_index_, cv::CAP_MSMF);
+                     }
+                }
+            }
+
+            if (capture_.isOpened()) {
+                // Set resolution
+                capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
+                capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
+            } else {
+                std::cerr << "Failed to open camera " << camera_index_ << std::endl;
+                // Sleep to avoid busy loop if camera fails
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+        }
+
+        if (!capture_.isOpened()) {
+             std::this_thread::sleep_for(std::chrono::milliseconds(100));
+             continue;
+        }
+
         cv::Mat frame;
         if (capture_.read(frame)) {
             if (!frame.empty()) {
@@ -174,7 +229,17 @@ void NativeCamera::CaptureLoop() {
                 // Notify Flutter that a new frame is available
                 texture_registrar_->MarkTextureFrameAvailable(texture_id_);
             }
+        } else {
+             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
+    }
+    
+    if (capture_.isOpened()) {
+        capture_.release();
+    }
+
+    if (SUCCEEDED(hr)) {
+        CoUninitialize();
     }
 }
 
@@ -564,6 +629,10 @@ extern "C" {
         if (g_native_camera) g_native_camera->SwitchCamera();
     }
 
+    __declspec(dllexport) void SelectCamera(int index) {
+        if (g_native_camera) g_native_camera->SelectCamera(index);
+    }
+
     __declspec(dllexport) void SetResolution(int width, int height) {
         if (g_native_camera) g_native_camera->SetResolution(width, height);
     }
@@ -618,6 +687,43 @@ extern "C" {
         }
 
         // Convert back to BGRA and write to original buffer
+        cv::cvtColor(bgr, frame, cv::COLOR_BGR2BGRA);
+    }
+
+    __declspec(dllexport) void process_frame_rgba(uint8_t* bytes, int32_t width, int32_t height, int32_t mode) {
+        if (bytes == nullptr || width <= 0 || height <= 0) return;
+
+        // Wrap bytes in Mat. Assumes RGBA (4 channels)
+        cv::Mat frame(height, width, CV_8UC4, bytes);
+
+        // Convert to BGR for processing
+        // Input is RGBA, so we use RGBA2BGR
+        cv::Mat bgr;
+        cv::cvtColor(frame, bgr, cv::COLOR_RGBA2BGR);
+
+        if (mode == 1) { // Invert
+            cv::bitwise_not(bgr, bgr);
+        } else if (mode == 2) { // Whiteboard Legacy
+            cv::Mat gray;
+            cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+            cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, 10);
+            cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+        } else if (mode == 3) { // Blur Legacy
+            cv::GaussianBlur(bgr, bgr, cv::Size(15, 15), 0);
+        } else if (mode == 4) { // Smart Whiteboard
+            ExternalApplySmartWhiteboard(bgr);
+        } else if (mode == 5) { // Smart Obstacle
+            ExternalApplySmartObstacleRemoval(bgr);
+        } else if (mode == 6) { // Moving Average
+            ExternalApplyMovingAverage(bgr);
+        } else if (mode == 7) { // CLAHE
+            ExternalApplyCLAHE(bgr);
+        } else if (mode == 8) { // Sharpening
+            ExternalApplySharpening(bgr);
+        }
+
+        // Convert back to BGRA (for BMP display) and write to original buffer
+        // We want the output to be BGRA so Image.memory displays it correctly
         cv::cvtColor(bgr, frame, cv::COLOR_BGR2BGRA);
     }
 }

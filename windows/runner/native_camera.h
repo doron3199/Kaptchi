@@ -21,6 +21,7 @@ public:
     void Start();
     void Stop();
     void SwitchCamera();
+    void SelectCamera(int index);
     void SetResolution(int width, int height);
     void SetFilterSequence(int* filters, int count);
     
@@ -36,6 +37,8 @@ private:
     cv::VideoCapture capture_;
     std::thread capture_thread_;
     std::atomic<bool> is_running_ = false;
+    std::atomic<bool> restart_requested_ = false;
+    std::atomic<int> pending_camera_index_ = 0;
     std::mutex mutex_;
     
     cv::Mat current_frame_;
@@ -59,7 +62,7 @@ private:
     int target_height_ = 2160;
     int camera_index_ = 1;
 
-    void CaptureLoop();
+    void CameraThreadLoop();
     void ProcessFrame(cv::Mat& frame);
     
     // New Filter Implementations

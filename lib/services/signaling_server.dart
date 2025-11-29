@@ -5,12 +5,26 @@ import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
 class SignalingServer {
+  static final SignalingServer instance = SignalingServer._internal();
+  
+  factory SignalingServer() {
+    return instance;
+  }
+  
+  SignalingServer._internal();
+
   HttpServer? _server;
   final List<WebSocketChannel> _clients = [];
   
   int get port => _server?.port ?? 5000;
+  bool get isRunning => _server != null;
 
   Future<void> start() async {
+    if (_server != null) {
+      print('Signaling server already running on port ${_server!.port}');
+      return;
+    }
+
     var handler = webSocketHandler((WebSocketChannel webSocket) {
       _clients.add(webSocket);
       print('Client connected. Total clients: ${_clients.length}');
@@ -51,10 +65,23 @@ class SignalingServer {
     throw Exception('Could not bind to any port: $ports. Please close other instances of the app.');
   }
 
-  void stop() {
-    _server?.close();
-    for (var client in _clients) {
-      client.sink.close();
+  Future<void> stop() async {
+    try {
+      await _server?.close(force: true);
+    } catch (e) {
+      print('Error closing server: $e');
+    } finally {
+      _server = null;
+    }
+    
+    // Create a copy to iterate over, because closing might trigger onDone which modifies _clients
+    final clientsCopy = List<WebSocketChannel>.from(_clients);
+    for (var client in clientsCopy) {
+      try {
+        await client.sink.close();
+      } catch (e) {
+        print('Error closing client sink: $e');
+      }
     }
     _clients.clear();
   }
