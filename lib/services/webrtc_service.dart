@@ -8,6 +8,7 @@ class WebRTCService {
   WebSocketChannel? _socket;
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
+  MediaStream? _remoteStream;
   OnRemoteStream? onRemoteStream;
   Function(String)? onError;
   Function(RTCSignalingState)? onSignalingStateChange;
@@ -72,8 +73,11 @@ class WebRTCService {
       };
 
       _peerConnection!.onTrack = (event) {
-        if (event.streams.isNotEmpty && onRemoteStream != null) {
-          onRemoteStream!(event.streams[0]);
+        if (event.streams.isNotEmpty) {
+          _remoteStream = event.streams[0];
+          if (onRemoteStream != null) {
+            onRemoteStream!(_remoteStream!);
+          }
         }
       };
 
@@ -83,8 +87,9 @@ class WebRTCService {
           'audio': false,
           'video': {
             'facingMode': 'environment', // Back camera
-            'width': 1280,
-            'height': 720,
+            'width': 3840,
+            'height': 2160,
+            'frameRate': 30,
           },
         });
         _localStream!.getTracks().forEach((track) {
@@ -141,6 +146,19 @@ class WebRTCService {
             );
           }
           break;
+          
+        case 'control':
+          if (payload != null) {
+            String? command = payload['command'];
+            var data = payload['data'];
+            if (command == 'zoom' && data != null) {
+              double? level = data['level'];
+              if (level != null) {
+                setZoom(level);
+              }
+            }
+          }
+          break;
       }
     } catch (e) {
       print('Error handling message: $e');
@@ -156,11 +174,47 @@ class WebRTCService {
     }
   }
 
+  void sendControlMessage(String command, Map<String, dynamic> data) {
+    _send('control', {
+      'command': command,
+      'data': data,
+    });
+  }
+
   Future<void> disconnect() async {
-    _localStream?.dispose();
-    _peerConnection?.close();
-    _socket?.sink.close();
+    try {
+      await _localStream?.dispose();
+    } catch (e) {
+      print('Error disposing local stream: $e');
+    }
+    _localStream = null;
+    
+    // _remoteStream is managed by the peer connection usually, but we can null it
+    _remoteStream = null;
+    
+    try {
+      if (_peerConnection != null) {
+        await _peerConnection!.close();
+      }
+    } catch (e) {
+      print('Error closing peer connection: $e');
+    }
+    _peerConnection = null;
+    
+    try {
+      _socket?.sink.close();
+    } catch (e) {
+      print('Error closing socket: $e');
+    }
+    _socket = null;
   }
   
   MediaStream? get localStream => _localStream;
+  MediaStream? get remoteStream => _remoteStream;
+
+  Future<void> setZoom(double zoomLevel) async {
+    if (_localStream == null) return;
+    var videoTrack = _localStream!.getVideoTracks().first;
+    await Helper.setZoom(videoTrack, zoomLevel);
+  }
 }

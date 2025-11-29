@@ -15,6 +15,9 @@ typedef StopCamera = void Function();
 typedef SwitchCameraFunc = Void Function();
 typedef SwitchCamera = void Function();
 
+typedef SelectCameraFunc = Void Function(Int32 index);
+typedef SelectCamera = void Function(int index);
+
 typedef SetResolutionFunc = Void Function(Int32 width, Int32 height);
 typedef SetResolution = void Function(int width, int height);
 
@@ -40,6 +43,7 @@ class NativeCameraService {
   late StartCamera _startCamera;
   late StopCamera _stopCamera;
   late SwitchCamera _switchCamera;
+  late SelectCamera _selectCamera;
   late SetResolution _setResolution;
   late SetFilterSequence _setFilterSequence;
   late GetFrameData _getFrameData;
@@ -69,6 +73,9 @@ class NativeCameraService {
         .asFunction();
     _switchCamera = _nativeLib
         .lookup<NativeFunction<SwitchCameraFunc>>('SwitchCamera')
+        .asFunction();
+    _selectCamera = _nativeLib
+        .lookup<NativeFunction<SelectCameraFunc>>('SelectCamera')
         .asFunction();
     _setResolution = _nativeLib
         .lookup<NativeFunction<SetResolutionFunc>>('SetResolution')
@@ -108,6 +115,11 @@ class NativeCameraService {
   void switchCamera() {
     initialize();
     _switchCamera();
+  }
+
+  void selectCamera(int index) {
+    initialize();
+    _selectCamera(index);
   }
 
   void setResolution(int width, int height) {
