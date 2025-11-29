@@ -15,6 +15,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'image_editor_screen.dart';
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
@@ -83,6 +84,7 @@ class _CameraScreenState extends State<CameraScreen> {
   
   // Captured images for PDF export
   final List<({Uint8List bytes, int width, int height})> _capturedImages = [];
+  int _currentGalleryIndex = 0;
 
   // Sidebar state
   bool _isSidebarOpen = false;
@@ -748,6 +750,34 @@ class _CameraScreenState extends State<CameraScreen> {
     }
   }
 
+  Future<void> _openEditor() async {
+    if (_capturedImages.isEmpty) return;
+    if (_currentGalleryIndex >= _capturedImages.length) {
+        _currentGalleryIndex = _capturedImages.length - 1;
+    }
+    
+    final item = _capturedImages[_currentGalleryIndex];
+    final result = await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ImageEditorScreen(imageBytes: item.bytes),
+      ),
+    );
+
+    if (result != null && result is Uint8List) {
+      final decoded = img.decodeImage(result);
+      if (decoded != null) {
+        setState(() {
+          _capturedImages[_currentGalleryIndex] = (
+            bytes: result,
+            width: decoded.width,
+            height: decoded.height,
+          );
+        });
+      }
+    }
+  }
+
   Future<void> _exportPdf() async {
     if (_capturedImages.isEmpty) return;
 
@@ -1405,15 +1435,24 @@ class _CameraScreenState extends State<CameraScreen> {
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
                         const Text('Captured Images', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
-                        IconButton(
-                          icon: Icon(_isGalleryFullScreen ? Icons.fullscreen_exit : Icons.close, color: Colors.white),
-                          onPressed: () {
-                            if (_isGalleryFullScreen) {
-                              setState(() => _isGalleryFullScreen = false);
-                            } else {
-                              setState(() => _isSidebarOpen = false);
-                            }
-                          },
+                        Row(
+                          children: [
+                            if (_isGalleryFullScreen && _capturedImages.isNotEmpty)
+                              IconButton(
+                                icon: const Icon(Icons.edit, color: Colors.white),
+                                onPressed: _openEditor,
+                              ),
+                            IconButton(
+                              icon: Icon(_isGalleryFullScreen ? Icons.fullscreen_exit : Icons.close, color: Colors.white),
+                              onPressed: () {
+                                if (_isGalleryFullScreen) {
+                                  setState(() => _isGalleryFullScreen = false);
+                                } else {
+                                  setState(() => _isSidebarOpen = false);
+                                }
+                              },
+                            ),
+                          ],
                         ),
                       ],
                     ),
@@ -1425,6 +1464,11 @@ class _CameraScreenState extends State<CameraScreen> {
                             ? PageView.builder(
                                 scrollDirection: Axis.vertical,
                                 itemCount: _capturedImages.length,
+                                onPageChanged: (index) {
+                                  setState(() {
+                                    _currentGalleryIndex = index;
+                                  });
+                                },
                                 itemBuilder: (context, index) {
                                   final item = _capturedImages[index];
                                   return InteractiveViewer(
