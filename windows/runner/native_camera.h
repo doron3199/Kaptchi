@@ -45,17 +45,7 @@ private:
     std::vector<uint8_t> pixel_buffer_data_; 
     std::unique_ptr<FlutterDesktopPixelBuffer> flutter_pixel_buffer_;
     
-    int filter_mode_ = 0; 
     std::vector<int> active_filters_;
-
-    // Smart Obstacle Removal State
-    cv::Ptr<cv::BackgroundSubtractor> back_sub_;
-    cv::Mat accumulated_background_;
-    bool reset_background_ = true;
-
-    // Moving Average State
-    std::deque<cv::Mat> frame_history_;
-    const size_t history_size_ = 5;
 
     // Resolution settings
     int target_width_ = 4096;
@@ -64,13 +54,6 @@ private:
 
     void CameraThreadLoop();
     void ProcessFrame(cv::Mat& frame);
-    
-    // New Filter Implementations
-    void ApplySmartWhiteboard(cv::Mat& frame);
-    void ApplySmartObstacleRemoval(cv::Mat& frame);
-    void ApplyMovingAverage(cv::Mat& frame);
-    void ApplyCLAHE(cv::Mat& frame);
-    void ApplySharpening(cv::Mat& frame);
 };
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);

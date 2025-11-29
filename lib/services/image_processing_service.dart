@@ -4,9 +4,8 @@ import 'dart:typed_data';
 import 'package:camera/camera.dart';
 import 'package:ffi/ffi.dart';
 
-// Define the C function signature
-typedef ProcessFrameC = Void Function(Pointer<Uint8> bytes, Int32 width, Int32 height, Int32 mode);
-typedef ProcessFrameDart = void Function(Pointer<Uint8> bytes, int width, int height, int mode);
+typedef ProcessFrameSequenceC = Void Function(Pointer<Uint8> bytes, Int32 width, Int32 height, Pointer<Int32> modes, Int32 count);
+typedef ProcessFrameSequenceDart = void Function(Pointer<Uint8> bytes, int width, int height, Pointer<Int32> modes, int count);
 
 enum ProcessingMode {
   none,               // 0
@@ -25,8 +24,8 @@ class ImageProcessingService {
   ImageProcessingService._();
 
   DynamicLibrary? _nativeLib;
-  ProcessFrameDart? _processFrameFunc;
-  ProcessFrameDart? _processFrameRgbaFunc;
+  ProcessFrameSequenceDart? _processFrameSequenceRgbaFunc;
+  ProcessFrameSequenceDart? _processFrameSequenceBgraFunc;
   List<ProcessingMode> _activeModes = [];
 
   Future<void> initialize() async {
@@ -35,16 +34,20 @@ class ImageProcessingService {
         // On Windows, the functions are compiled into the main executable
         _nativeLib = DynamicLibrary.executable();
         
-        _processFrameFunc = _nativeLib!
-            .lookup<NativeFunction<ProcessFrameC>>('process_frame')
-            .asFunction<ProcessFrameDart>();
-            
         try {
-          _processFrameRgbaFunc = _nativeLib!
-              .lookup<NativeFunction<ProcessFrameC>>('process_frame_rgba')
-              .asFunction<ProcessFrameDart>();
+          _processFrameSequenceRgbaFunc = _nativeLib!
+              .lookup<NativeFunction<ProcessFrameSequenceC>>('process_frame_sequence_rgba')
+              .asFunction<ProcessFrameSequenceDart>();
         } catch (e) {
-          print('ImageProcessingService: process_frame_rgba not found (might need rebuild): $e');
+          print('ImageProcessingService: process_frame_sequence_rgba not found (might need rebuild): $e');
+        }
+
+        try {
+          _processFrameSequenceBgraFunc = _nativeLib!
+              .lookup<NativeFunction<ProcessFrameSequenceC>>('process_frame_sequence_bgra')
+              .asFunction<ProcessFrameSequenceDart>();
+        } catch (e) {
+          print('ImageProcessingService: process_frame_sequence_bgra not found (might need rebuild): $e');
         }
             
         print('ImageProcessingService: Loaded native C++ functions.');
@@ -67,10 +70,6 @@ class ImageProcessingService {
   Future<Uint8List?> processRawRgba(Uint8List rgbaData, int width, int height) async {
     if (_activeModes.isEmpty) return null;
     
-    // Use the RGBA specific function if available, otherwise fall back to standard (which might swap colors)
-    final func = _processFrameRgbaFunc ?? _processFrameFunc;
-    if (func == null) return null;
-
     final int size = rgbaData.length;
     final Pointer<Uint8> ptr = malloc.allocate<Uint8>(size);
     
@@ -78,10 +77,17 @@ class ImageProcessingService {
       final Uint8List ptrList = ptr.asTypedList(size);
       ptrList.setAll(0, rgbaData);
 
-      // Call C++ function for each active mode in sequence
-      for (final mode in _activeModes) {
-        if (mode != ProcessingMode.none) {
-          func(ptr, width, height, mode.index);
+      if (_processFrameSequenceRgbaFunc != null) {
+        // Use the optimized sequence function
+        final modesPtr = malloc.allocate<Int32>(_activeModes.length * 4);
+        try {
+          final modesList = modesPtr.asTypedList(_activeModes.length);
+          for (int i = 0; i < _activeModes.length; i++) {
+            modesList[i] = _activeModes[i].index;
+          }
+          _processFrameSequenceRgbaFunc!(ptr, width, height, modesPtr, _activeModes.length);
+        } finally {
+          malloc.free(modesPtr);
         }
       }
 
@@ -98,11 +104,6 @@ class ImageProcessingService {
     // If no modes active, return null so the UI shows the raw camera preview
     if (_activeModes.isEmpty) return null;
     
-    if (_processFrameFunc == null) {
-        print('Warning: Native process_frame function not loaded.');
-        return null;
-    }
-
     // IMPORTANT: This assumes BGRA format (standard on Windows)
     // We need to copy the plane data to a heap pointer to pass to C++
     final int width = image.width;
@@ -122,9 +123,16 @@ class ImageProcessingService {
       ptrList.setAll(0, bytes);
 
       // Call C++ function for each active mode in sequence
-      for (final mode in _activeModes) {
-        if (mode != ProcessingMode.none) {
-          _processFrameFunc!(ptr, width, height, mode.index);
+      if (_processFrameSequenceBgraFunc != null) {
+        final modesPtr = malloc.allocate<Int32>(_activeModes.length * 4);
+        try {
+          final modesList = modesPtr.asTypedList(_activeModes.length);
+          for (int i = 0; i < _activeModes.length; i++) {
+            modesList[i] = _activeModes[i].index;
+          }
+          _processFrameSequenceBgraFunc!(ptr, width, height, modesPtr, _activeModes.length);
+        } finally {
+          malloc.free(modesPtr);
         }
       }
 
