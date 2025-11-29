@@ -71,7 +71,6 @@ class _CameraScreenState extends State<CameraScreen> {
   // Image processing state
   final ValueNotifier<Uint8List?> _processedImageNotifier = ValueNotifier(null);
   bool _isProcessingFrame = false;
-  ProcessingMode _processingMode = ProcessingMode.none;
   
   // Zoom state
   double _currentZoom = 1.0;
@@ -217,7 +216,10 @@ class _CameraScreenState extends State<CameraScreen> {
     _frameTimer?.cancel();
     // Extract frames at ~15fps (sufficient for processing without killing CPU)
     _frameTimer = Timer.periodic(const Duration(milliseconds: 66), (timer) async {
-      if (_processingMode == ProcessingMode.none) {
+      // Check if any filter is active
+      bool hasActiveFilters = _filters.any((f) => f.isActive);
+      
+      if (!hasActiveFilters) {
         if (_processedImageNotifier.value != null) {
           _processedImageNotifier.value = null;
         }
@@ -505,7 +507,7 @@ class _CameraScreenState extends State<CameraScreen> {
   void _processCameraImage(CameraImage image) async {
     // Always process if mode is not none, regardless of previous frame state
     // This ensures we don't get stuck if a frame drops
-    if (_processingMode == ProcessingMode.none) {
+    if (!_filters.any((f) => f.isActive)) {
       if (_processedImageNotifier.value != null) {
         _processedImageNotifier.value = null;
       }
@@ -563,13 +565,6 @@ class _CameraScreenState extends State<CameraScreen> {
       if (id >= 0 && id < ProcessingMode.values.length) {
         modes.add(ProcessingMode.values[id]);
       }
-    }
-
-    if (modes.isNotEmpty) {
-      // Set to first mode just to indicate "active" for existing checks
-      _processingMode = modes.first;
-    } else {
-      _processingMode = ProcessingMode.none;
     }
     
     ImageProcessingService.instance.setProcessingModes(modes);
@@ -639,7 +634,8 @@ class _CameraScreenState extends State<CameraScreen> {
 
       if (_isWebRTCMode) {
         // If we have a processed (filtered) image, use it
-        if (_processingMode != ProcessingMode.none && _processedImageNotifier.value != null) {
+        bool hasActiveFilters = _filters.any((f) => f.isActive);
+        if (hasActiveFilters && _processedImageNotifier.value != null) {
           finalBytes = _processedImageNotifier.value;
           // Decode to get dimensions
           final decoded = img.decodeImage(finalBytes!);
@@ -1111,7 +1107,8 @@ class _CameraScreenState extends State<CameraScreen> {
                                                  ValueListenableBuilder<Uint8List?>(
                                                    valueListenable: _processedImageNotifier,
                                                    builder: (context, processedImage, child) {
-                                                     if (processedImage != null && _processingMode != ProcessingMode.none) {
+                                                     bool hasActiveFilters = _filters.any((f) => f.isActive);
+                                                     if (processedImage != null && hasActiveFilters) {
                                                        return Opacity(
                                                          opacity: 0.995,
                                                          child: Image.memory(
@@ -1145,7 +1142,8 @@ class _CameraScreenState extends State<CameraScreen> {
                           child: ValueListenableBuilder<Uint8List?>(
                             valueListenable: _processedImageNotifier,
                             builder: (context, processedImage, child) {
-                              if (processedImage != null && _processingMode != ProcessingMode.none) {
+                              bool hasActiveFilters = _filters.any((f) => f.isActive);
+                              if (processedImage != null && hasActiveFilters) {
                                 return Image.memory(
                                   processedImage,
                                   gaplessPlayback: true,
