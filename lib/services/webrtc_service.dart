@@ -45,10 +45,12 @@ class WebRTCService {
         onError: (error) {
           print('WebSocket error: $error');
           onError?.call('WebSocket error: $error');
+          _socket = null;
         },
         onDone: () {
           print('WebSocket closed');
           onError?.call('WebSocket connection closed');
+          _socket = null;
         },
       );
 
@@ -167,10 +169,14 @@ class WebRTCService {
 
   void _send(String type, Map<String, dynamic> payload) {
     if (_socket != null) {
-      _socket!.sink.add(jsonEncode({
-        'type': type,
-        'payload': payload,
-      }));
+      try {
+        _socket!.sink.add(jsonEncode({
+          'type': type,
+          'payload': payload,
+        }));
+      } catch (e) {
+        print('Error sending message: $e');
+      }
     }
   }
 
