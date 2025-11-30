@@ -869,6 +869,9 @@ class _CameraScreenState extends State<CameraScreen> {
         });
       }
 
+      // Add a small delay to ensure camera is released by MobileScanner and Controller
+      await Future.delayed(const Duration(milliseconds: 500));
+
       _webrtcService.onError = (error) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
@@ -905,8 +908,10 @@ class _CameraScreenState extends State<CameraScreen> {
       
       if (_webrtcService.localStream != null) {
         setState(() {
+          _isWebRTCMode = true;
           _localRenderer.srcObject = _webrtcService.localStream;
         });
+        _startFrameExtraction(_webrtcService.localStream!);
       }
     }
   }
