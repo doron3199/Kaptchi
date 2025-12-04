@@ -89,8 +89,8 @@ class WebRTCService {
           'audio': false,
           'video': {
             'facingMode': 'environment', // Back camera
-            'width': 3840,
-            'height': 2160,
+            'width': 1280, // Lowered from 3840 to prevent encoder crash
+            'height': 720, // Lowered from 2160 to prevent encoder crash
             'frameRate': 30,
           },
         });

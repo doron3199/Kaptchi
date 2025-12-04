@@ -25,7 +25,7 @@ class SignalingServer {
       return;
     }
 
-    var handler = webSocketHandler((WebSocketChannel webSocket) {
+    var handler = webSocketHandler((WebSocketChannel webSocket, String? protocol) {
       _clients.add(webSocket);
       print('Client connected. Total clients: ${_clients.length}');
 
