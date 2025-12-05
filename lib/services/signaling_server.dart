@@ -86,6 +86,17 @@ class SignalingServer {
     }
     _clients.clear();
   }
+
+  void broadcast(String message) {
+    debugPrint('SignalingServer: Broadcasting message to ${_clients.length} clients: $message');
+    for (var client in _clients) {
+      try {
+        client.sink.add(message);
+      } catch (e) {
+        debugPrint('Error broadcasting to client: $e');
+      }
+    }
+  }
   
   // Helper to get local IP to show in UI
   Future<List<({String name, String ip})>> getNetworkInterfaces() async {

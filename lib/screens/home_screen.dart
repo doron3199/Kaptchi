@@ -4,7 +4,6 @@ import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:camera/camera.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import 'package:file_picker/file_picker.dart'; // Add this
 import '../services/signaling_server.dart';
 import '../services/webrtc_service.dart';
 import '../models/stream_protocol.dart';
@@ -33,8 +32,7 @@ class _HomeScreenState extends State<HomeScreen> {
   List<({String name, String ip})> _availableInterfaces = [];
   
   // Protocol Selection
-  StreamProtocol _selectedProtocol = StreamProtocol.webrtc;
-  final TextEditingController _customUrlController = TextEditingController(text: 'rtmp://192.168.1.x/live/stream');
+  // StreamProtocol _selectedProtocol = StreamProtocol.rtmp; // Unused
   StreamSubscription? _streamSubscription;
 
   @override
@@ -49,17 +47,11 @@ class _HomeScreenState extends State<HomeScreen> {
       // Listen for RTMP stream start
       _streamSubscription = MediaServerService.instance.onStreamStarted.listen((path) {
         if (!mounted) return;
-        if (_selectedProtocol == StreamProtocol.rtmp) {
-           // Construct the full URL
-           // Assuming standard port 1935 for RTMP
-           // The path from MediaMTX is usually 'live/stream'
-           // But we need to be careful about the IP. 
-           // Since we are the server (Windows), we play from localhost?
-           // Yes, the player is on the same machine as the server.
-           final url = 'rtmp://localhost/$path';
-           
-           _navigateToCamera(StreamProtocol.rtmp, url);
-        }
+        // Always navigate if a stream starts, assuming user wants to see it
+        // Construct the full URL
+        final url = 'rtmp://localhost/$path';
+        
+        _navigateToCamera(StreamProtocol.rtmp, url);
       });
     }
   }
@@ -69,7 +61,6 @@ class _HomeScreenState extends State<HomeScreen> {
     _streamSubscription?.cancel();
     _stopServer();
     MediaServerService.instance.stopServer();
-    _customUrlController.dispose();
     super.dispose();
   }
 
@@ -90,27 +81,10 @@ class _HomeScreenState extends State<HomeScreen> {
          _startServer();
          // Reset to WebRTC when coming back
          setState(() {
-           _selectedProtocol = StreamProtocol.webrtc;
+           // _selectedProtocol = StreamProtocol.webrtc;
          });
        }
      });
-  }
-
-  Future<void> _pickMediaServer() async {
-    FilePickerResult? result = await FilePicker.platform.pickFiles(
-      dialogTitle: 'Select Media Server Executable (mediamtx.exe)',
-      type: FileType.custom,
-      allowedExtensions: ['exe'],
-    );
-
-    if (result != null && result.files.single.path != null) {
-      setState(() {
-        _mediaServerPath = result.files.single.path;
-      });
-      // Restart server with new path
-      MediaServerService.instance.stopServer();
-      await _startMediaServer();
-    }
   }
 
   Future<void> _startMediaServer() async {
@@ -285,10 +259,16 @@ class _HomeScreenState extends State<HomeScreen> {
                                     _webrtcService?.disconnect();
                                     _webrtcService = null;
                                     
+                                    // Fix for swapped cameras when exactly 2 are present
+                                    int targetIndex = index;
+                                    if (_cameras.length == 2) {
+                                       targetIndex = (index == 0) ? 1 : 0;
+                                    }
+
                                     Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) => CameraScreen(initialCameraIndex: index),
+                                        builder: (_) => CameraScreen(initialCameraIndex: targetIndex),
                                       ),
                                     ).then((_) {
                                       if (mounted) {
@@ -353,110 +333,9 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
 
                   // Media Server Controls (Always Visible for configuration)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 16.0),
-                    child: Column(
-                      children: [
-                        if (_isMediaServerRunning)
-                          const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.check_circle, color: Colors.green, size: 16),
-                              SizedBox(width: 8),
-                              Text('Media Server Running', style: TextStyle(color: Colors.green, fontSize: 12)),
-                            ],
-                          )
-                        else
-                          const Text(
-                            'Media Server Stopped (Required for RTMP/RTSP)',
-                            style: TextStyle(color: Colors.grey, fontSize: 12),
-                            textAlign: TextAlign.center,
-                          ),
-                        const SizedBox(height: 8),
-                        SingleChildScrollView(
-                          scrollDirection: Axis.horizontal,
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              TextButton.icon(
-                                onPressed: _pickMediaServer,
-                                icon: const Icon(Icons.folder_open, size: 16),
-                                label: const Text('Locate Server'),
-                                style: TextButton.styleFrom(foregroundColor: Colors.blue),
-                              ),
-                              const SizedBox(width: 16),
-                              TextButton.icon(
-                                onPressed: () async {
-                                  try {
-                                    final socket = await Socket.connect('localhost', 1935, timeout: const Duration(seconds: 2));
-                                    socket.destroy();
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('RTMP Port (1935) is OPEN'), backgroundColor: Colors.green));
-                                    }
-                                  } catch (e) {
-                                    if (context.mounted) {
-                                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('RTMP Port (1935) is CLOSED: $e'), backgroundColor: Colors.red));
-                                    }
-                                  }
-                                },
-                                icon: const Icon(Icons.network_check, size: 16),
-                                label: const Text('Test Connection'),
-                                style: TextButton.styleFrom(foregroundColor: Colors.white),
-                              ),
-                            ],
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
+                  // Removed as per request
                   
-                  // Protocol Selector
-                  Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    decoration: BoxDecoration(
-                      color: Colors.grey[900],
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: DropdownButton<StreamProtocol>(
-                      value: _selectedProtocol,
-                      dropdownColor: Colors.grey[900],
-                      style: const TextStyle(color: Colors.white),
-                      underline: Container(),
-                      items: const [
-                        DropdownMenuItem(value: StreamProtocol.webrtc, child: Text('WebRTC (Low Latency)')),
-                        DropdownMenuItem(value: StreamProtocol.rtmp, child: Text('RTMP (High Quality)')),
-                      ],
-                      onChanged: (val) {
-                        if (val != null) {
-                           setState(() => _selectedProtocol = val);
-                        }
-                      },
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  
-                  if (_selectedProtocol == StreamProtocol.webrtc) ...[
-                    if (_isServerRunning && _serverIp.isNotEmpty) ...[
-                      Container(
-                        color: Colors.white,
-                        padding: const EdgeInsets.all(16),
-                        child: QrImageView(
-                          data: 'ws://$_serverIp:$_serverPort',
-                          version: QrVersions.auto,
-                          size: 250.0,
-                        ),
-                      ),
-                      const SizedBox(height: 16),
-                      Text('Scan with Kaptchi mobile app', style: TextStyle(fontSize: 16, color: Colors.grey[400])),
-                      const SizedBox(height: 8),
-                      Text('ws://$_serverIp:$_serverPort', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
-                    ] else ...[
-                      const CircularProgressIndicator(color: Colors.white),
-                      const SizedBox(height: 16),
-                      const Text('Starting server...', style: TextStyle(color: Colors.white)),
-                    ],
-                  ] else if (_selectedProtocol == StreamProtocol.rtmp) ...[
-                     // RTMP QR Code
+                  // RTMP QR Code
                      if (_serverIp.isNotEmpty) ...[
                         Container(
                         color: Colors.white,
@@ -469,27 +348,28 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text('Scan with Kaptchi mobile app', style: TextStyle(fontSize: 16, color: Colors.grey[400])),
-                      const SizedBox(height: 8),
-                      Text('rtmp://$_serverIp/live/stream', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, color: Colors.white)),
                       const SizedBox(height: 16),
-                      const CircularProgressIndicator(color: Colors.white),
-                      const SizedBox(height: 8),
-                      const Text('Waiting for stream...', style: TextStyle(color: Colors.white)),
-                      const SizedBox(height: 16),
-                      ElevatedButton(
-                        onPressed: () {
-                          // Manual connect
-                          final url = 'rtmp://localhost/live/stream';
-                          _navigateToCamera(StreamProtocol.rtmp, url);
-                        },
-                        child: const Text('Force Connect'),
-                      ),
+                      
+                      if (_isMediaServerRunning)
+                        const Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.check_circle, color: Colors.green, size: 16),
+                            SizedBox(width: 8),
+                            Text('Media Server Running', style: TextStyle(color: Colors.green, fontSize: 12)),
+                          ],
+                        )
+                      else
+                        const Text(
+                          'Media Server Stopped',
+                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                          textAlign: TextAlign.center,
+                        ),
                      ]
                   ],
-                ],
+                ),
               ),
             ),
-          ),
           ),
         ],
       ),

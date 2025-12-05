@@ -17,7 +17,7 @@ rtmpAddress: :1935
 # RTSP
 
 # Enable RTSP
-rtsp: yes
+rtsp: no
 # Port for RTSP (TCP)
 rtspAddress: :8554
 # Port for RTSP (UDP)
@@ -29,7 +29,7 @@ rtcpAddress: :8001
 # HLS
 
 # Enable HLS
-hls: yes
+hls: no
 # Port for HLS
 hlsAddress: :8888
 
@@ -37,7 +37,7 @@ hlsAddress: :8888
 # WebRTC
 
 # Enable WebRTC
-webrtc: yes
+webrtc: no
 # Port for WebRTC
 webrtcAddress: :8002
 

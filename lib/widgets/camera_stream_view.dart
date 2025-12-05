@@ -111,7 +111,7 @@ class CameraStreamView extends StatelessWidget {
       return RTCVideoView(
         localRenderer,
         objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-        mirror: Platform.isAndroid, // Mirror local camera on Android
+        mirror: false, // Do not mirror the back camera
       );
     }
 

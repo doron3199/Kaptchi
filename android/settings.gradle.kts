@@ -24,3 +24,7 @@ plugins {
 }
 
 include(":app")
+include(":haishinkit")
+project(":haishinkit").projectDir = file("../packages/HaishinKit.kt/haishinkit")
+include(":rtmp")
+project(":rtmp").projectDir = file("../packages/HaishinKit.kt/rtmp")
