@@ -1,0 +1,49 @@
+
+###############################################
+# General
+
+# Log level
+logLevel: info
+
+###############################################
+# RTMP
+
+# Enable RTMP
+rtmp: yes
+# Port for RTMP
+rtmpAddress: :1935
+
+###############################################
+# RTSP
+
+# Enable RTSP
+rtsp: yes
+# Port for RTSP (TCP)
+rtspAddress: :8554
+# Port for RTSP (UDP)
+rtpAddress: :8000
+# Port for RTSP (UDP/RTCP)
+rtcpAddress: :8001
+
+###############################################
+# HLS
+
+# Enable HLS
+hls: yes
+# Port for HLS
+hlsAddress: :8888
+
+###############################################
+# WebRTC
+
+# Enable WebRTC
+webrtc: yes
+# Port for WebRTC
+webrtcAddress: :8002
+
+###############################################
+# Paths
+
+paths:
+  all:
+

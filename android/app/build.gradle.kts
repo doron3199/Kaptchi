@@ -30,6 +30,12 @@ android {
         versionName = flutter.versionName
     }
 
+    packaging {
+        resources {
+            excludes += "project.clj"
+        }
+    }
+
     buildTypes {
         release {
             // TODO: Add your own signing config for the release build.

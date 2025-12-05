@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 class StrokePoint {
@@ -240,7 +239,7 @@ class _ImageEditorScreenState extends State<ImageEditorScreen> {
                     onPointerMove: _onPointerMove,
                     onPointerUp: _onPointerUp,
                     onPointerCancel: _onPointerCancel,
-                    child: Container(
+                    child: SizedBox(
                       key: _imageKey,
                       width: double.infinity,
                       height: double.infinity,

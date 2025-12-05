@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
@@ -13,6 +14,7 @@ class WebRTCService {
   Function(String)? onError;
   Function(RTCSignalingState)? onSignalingStateChange;
   Function(RTCIceConnectionState)? onIceConnectionStateChange;
+  Function(String command, Map<String, dynamic> data)? onControlMessage;
 
   final Map<String, dynamic> _configuration = {
     'iceServers': [
@@ -35,7 +37,7 @@ class WebRTCService {
         }
       }
 
-      print('Connecting to WebSocket: $uri');
+      debugPrint('Connecting to WebSocket: $uri');
       _socket = WebSocketChannel.connect(uri);
       
       _socket!.stream.listen(
@@ -43,12 +45,12 @@ class WebRTCService {
           _handleMessage(message);
         },
         onError: (error) {
-          print('WebSocket error: $error');
+          debugPrint('WebSocket error: $error');
           onError?.call('WebSocket error: $error');
           _socket = null;
         },
         onDone: () {
-          print('WebSocket closed');
+          debugPrint('WebSocket closed');
           onError?.call('WebSocket connection closed');
           _socket = null;
         },
@@ -57,12 +59,12 @@ class WebRTCService {
       _peerConnection = await createPeerConnection(_configuration);
 
       _peerConnection!.onSignalingState = (state) {
-        print('Signaling state: $state');
+        debugPrint('Signaling state: $state');
         onSignalingStateChange?.call(state);
       };
 
       _peerConnection!.onIceConnectionState = (state) {
-        print('ICE connection state: $state');
+        debugPrint('ICE connection state: $state');
         onIceConnectionStateChange?.call(state);
       };
 
@@ -85,15 +87,23 @@ class WebRTCService {
 
       // If we are the caller (Android Camera), we need to add our local stream
       if (isCaller) {
-        _localStream = await navigator.mediaDevices.getUserMedia({
-          'audio': false,
-          'video': {
-            'facingMode': 'environment', // Back camera
-            'width': 1280, // Lowered from 3840 to prevent encoder crash
-            'height': 720, // Lowered from 2160 to prevent encoder crash
-            'frameRate': 30,
-          },
-        });
+        debugPrint('Requesting local stream...');
+        try {
+          _localStream = await navigator.mediaDevices.getUserMedia({
+            'audio': false,
+            'video': {
+              'facingMode': 'environment', // Back camera
+              'width': 1280, // Lowered from 3840 to prevent encoder crash
+              'height': 720, // Lowered from 2160 to prevent encoder crash
+              'frameRate': 30,
+            },
+          });
+          debugPrint('Local stream obtained');
+        } catch (e) {
+          debugPrint('Error getting user media: $e');
+          throw e;
+        }
+        
         _localStream!.getTracks().forEach((track) {
           _peerConnection!.addTrack(track, _localStream!);
         });
@@ -104,7 +114,7 @@ class WebRTCService {
         _send('offer', {'sdp': offer.sdp, 'type': offer.type});
       }
     } catch (e) {
-      print('Error connecting: $e');
+      debugPrint('Error connecting: $e');
     }
   }
 
@@ -117,12 +127,18 @@ class WebRTCService {
       var payload = data['payload'];
 
       if (type == null) {
-        print('Received message without type');
+        debugPrint('Received message without type');
+        return;
+      }
+
+      if (_peerConnection == null) {
+        debugPrint('PeerConnection is null, ignoring message type: $type');
         return;
       }
 
       switch (type) {
         case 'offer':
+          debugPrint('Received offer');
           await _peerConnection!.setRemoteDescription(
             RTCSessionDescription(payload['sdp'], payload['type']),
           );
@@ -132,12 +148,14 @@ class WebRTCService {
           break;
 
         case 'answer':
+          debugPrint('Received answer');
           await _peerConnection!.setRemoteDescription(
             RTCSessionDescription(payload['sdp'], payload['type']),
           );
           break;
 
         case 'candidate':
+          debugPrint('Received candidate');
           if (payload != null) {
             await _peerConnection!.addCandidate(
               RTCIceCandidate(
@@ -153,17 +171,22 @@ class WebRTCService {
           if (payload != null) {
             String? command = payload['command'];
             var data = payload['data'];
-            if (command == 'zoom' && data != null) {
-              double? level = data['level'];
-              if (level != null) {
-                setZoom(level);
+            if (command != null && data != null) {
+              // Notify listeners
+              onControlMessage?.call(command, data);
+
+              if (command == 'zoom') {
+                double? level = data['level'];
+                if (level != null) {
+                  setZoom(level);
+                }
               }
             }
           }
           break;
       }
     } catch (e) {
-      print('Error handling message: $e');
+      debugPrint('Error handling message: $e');
     }
   }
 
@@ -175,7 +198,7 @@ class WebRTCService {
           'payload': payload,
         }));
       } catch (e) {
-        print('Error sending message: $e');
+        debugPrint('Error sending message: $e');
       }
     }
   }
@@ -191,7 +214,7 @@ class WebRTCService {
     try {
       await _localStream?.dispose();
     } catch (e) {
-      print('Error disposing local stream: $e');
+      debugPrint('Error disposing local stream: $e');
     }
     _localStream = null;
     
@@ -203,14 +226,14 @@ class WebRTCService {
         await _peerConnection!.close();
       }
     } catch (e) {
-      print('Error closing peer connection: $e');
+      debugPrint('Error closing peer connection: $e');
     }
     _peerConnection = null;
     
     try {
       _socket?.sink.close();
     } catch (e) {
-      print('Error closing socket: $e');
+      debugPrint('Error closing socket: $e');
     }
     _socket = null;
   }
