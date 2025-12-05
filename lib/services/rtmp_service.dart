@@ -5,7 +5,10 @@ import 'package:haishin_kit/audio_source.dart';
 import 'package:haishin_kit/rtmp_connection.dart';
 import 'package:haishin_kit/rtmp_stream.dart';
 import 'package:haishin_kit/video_source.dart';
+import 'package:haishin_kit/video_settings.dart';
 import 'package:permission_handler/permission_handler.dart';
+
+import 'camera_owner_coordinator.dart';
 
 class RtmpService {
   static final RtmpService _instance = RtmpService._internal();
@@ -15,6 +18,7 @@ class RtmpService {
   RtmpStream? _stream;
   final ValueNotifier<bool> isStreamingNotifier = ValueNotifier<bool>(false);
   final ValueNotifier<RtmpStream?> streamNotifier = ValueNotifier<RtmpStream?>(null);
+  bool _cameraLeaseHeld = false;
   
   // Zoom state
   // double _currentZoom = 1.0; // Not supported in this version
@@ -42,13 +46,25 @@ class RtmpService {
     await _stream?.attachAudio(AudioSource());
 
     // Configure Video
-    _stream?.videoSettings.width = 1280;
-    _stream?.videoSettings.height = 720;
-    _stream?.videoSettings.bitrate = 2500 * 1000;
+    _stream?.videoSettings = VideoSettings(
+      width: 1280,
+      height: 720,
+      bitrate: 2500 * 1000,
+    );
     
     // Attach Camera
-    _videoSource = VideoSource(position: CameraPosition.back);
-    await _stream?.attachVideo(_videoSource);
+    await CameraOwnerCoordinator.instance.acquire('rtmp');
+    _cameraLeaseHeld = true;
+    try {
+      _videoSource = VideoSource(position: CameraPosition.back);
+      await _stream?.attachVideo(_videoSource);
+    } catch (e) {
+      if (_cameraLeaseHeld) {
+        CameraOwnerCoordinator.instance.release('rtmp');
+        _cameraLeaseHeld = false;
+      }
+      rethrow;
+    }
 
     streamNotifier.value = _stream;
 
@@ -98,21 +114,33 @@ class RtmpService {
   }
 
   Future<void> stopStream() async {
-    _stream?.close();
-    _connection?.close();
+    try {
+      await _stream?.close();
+      _connection?.close();
+    } catch (e) {
+      debugPrint('Error stopping RTMP stream: $e');
+    }
+    if (_cameraLeaseHeld) {
+      CameraOwnerCoordinator.instance.release('rtmp');
+      _cameraLeaseHeld = false;
+    }
     isStreamingNotifier.value = false;
     streamNotifier.value = null;
     _stream = null;
     _connection = null;
+    _videoSource = null;
   }
 
   void setZoom(double zoom) {
-    // _currentZoom = zoom.clamp(1.0, _maxZoom);
-    // Zoom is not currently supported by the haishin_kit 0.14.3 Dart API
+    _stream?.setZoom(zoom);
   }
   
   void dispose() {
     _stream?.dispose();
     _connection?.dispose();
+    if (_cameraLeaseHeld) {
+      CameraOwnerCoordinator.instance.release('rtmp');
+      _cameraLeaseHeld = false;
+    }
   }
 }

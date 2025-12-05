@@ -3,6 +3,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 
+import 'camera_owner_coordinator.dart';
+
 typedef OnRemoteStream = void Function(MediaStream stream);
 
 class WebRTCService {
@@ -10,6 +12,7 @@ class WebRTCService {
   RTCPeerConnection? _peerConnection;
   MediaStream? _localStream;
   MediaStream? _remoteStream;
+  bool _cameraLeaseHeld = false;
   OnRemoteStream? onRemoteStream;
   Function(String)? onError;
   Function(RTCSignalingState)? onSignalingStateChange;
@@ -22,8 +25,15 @@ class WebRTCService {
     ]
   };
 
-  Future<void> connect(String hostOrUrl, bool isCaller) async {
+  bool _isConnected = false;
+  String? _lastUrl;
+  
+  bool get isConnected => _isConnected;
+
+  Future<void> connect(String hostOrUrl, bool isCaller, {bool useWebRTC = true}) async {
+    debugPrint('WebRTCService: connect called with $hostOrUrl, useWebRTC: $useWebRTC');
     try {
+      _lastUrl = hostOrUrl;
       String cleanHostOrUrl = hostOrUrl.trim();
       Uri uri;
       if (cleanHostOrUrl.startsWith('ws://') || cleanHostOrUrl.startsWith('wss://')) {
@@ -39,6 +49,7 @@ class WebRTCService {
 
       debugPrint('Connecting to WebSocket: $uri');
       _socket = WebSocketChannel.connect(uri);
+      _isConnected = true;
       
       _socket!.stream.listen(
         (message) {
@@ -46,16 +57,24 @@ class WebRTCService {
         },
         onError: (error) {
           debugPrint('WebSocket error: $error');
+          _isConnected = false;
           onError?.call('WebSocket error: $error');
           _socket = null;
         },
         onDone: () {
           debugPrint('WebSocket closed');
+          _isConnected = false;
           onError?.call('WebSocket connection closed');
           _socket = null;
         },
       );
 
+      if (!useWebRTC) {
+        debugPrint('WebRTCService: Skipping PeerConnection creation (Signaling only mode)');
+        return;
+      }
+
+      // Only create peer connection if we intend to use WebRTC media
       _peerConnection = await createPeerConnection(_configuration);
 
       _peerConnection!.onSignalingState = (state) {
@@ -89,6 +108,9 @@ class WebRTCService {
       if (isCaller) {
         debugPrint('Requesting local stream...');
         try {
+          await CameraOwnerCoordinator.instance.acquire('webrtc');
+          _cameraLeaseHeld = true;
+
           _localStream = await navigator.mediaDevices.getUserMedia({
             'audio': false,
             'video': {
@@ -101,6 +123,10 @@ class WebRTCService {
           debugPrint('Local stream obtained');
         } catch (e) {
           debugPrint('Error getting user media: $e');
+          if (_cameraLeaseHeld) {
+            CameraOwnerCoordinator.instance.release('webrtc');
+            _cameraLeaseHeld = false;
+          }
           throw e;
         }
         
@@ -121,6 +147,7 @@ class WebRTCService {
   void _handleMessage(dynamic message) async {
     try {
       if (message == null) return;
+      debugPrint('WebRTCService received: $message');
       
       Map<String, dynamic> data = jsonDecode(message);
       String? type = data['type'];
@@ -132,6 +159,17 @@ class WebRTCService {
       }
 
       if (_peerConnection == null) {
+        // If peer connection is null, we might still want to handle control messages
+        if (type == 'control') {
+           if (payload != null) {
+            String? command = payload['command'];
+            var data = payload['data'];
+            if (command != null && data != null) {
+              onControlMessage?.call(command, data);
+            }
+          }
+          return;
+        }
         debugPrint('PeerConnection is null, ignoring message type: $type');
         return;
       }
@@ -190,16 +228,28 @@ class WebRTCService {
     }
   }
 
-  void _send(String type, Map<String, dynamic> payload) {
+  void _send(String type, Map<String, dynamic> payload) async {
+    if (_socket == null) {
+       debugPrint('WebRTCService: Socket is null. _lastUrl: $_lastUrl');
+       if (_lastUrl != null) {
+         debugPrint('WebRTCService: Attempting to reconnect to $_lastUrl...');
+         await connect(_lastUrl!, false, useWebRTC: false);
+       }
+    }
+
     if (_socket != null) {
       try {
-        _socket!.sink.add(jsonEncode({
+        final msg = jsonEncode({
           'type': type,
           'payload': payload,
-        }));
+        });
+        debugPrint('WebRTCService sending: $msg');
+        _socket!.sink.add(msg);
       } catch (e) {
         debugPrint('Error sending message: $e');
       }
+    } else {
+      debugPrint('WebRTCService: Cannot send message, socket is null');
     }
   }
 
@@ -215,6 +265,10 @@ class WebRTCService {
       await _localStream?.dispose();
     } catch (e) {
       debugPrint('Error disposing local stream: $e');
+    }
+    if (_cameraLeaseHeld) {
+      CameraOwnerCoordinator.instance.release('webrtc');
+      _cameraLeaseHeld = false;
     }
     _localStream = null;
     

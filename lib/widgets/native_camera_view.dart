@@ -15,7 +15,14 @@ class _NativeCameraViewState extends State<NativeCameraView> {
   @override
   void initState() {
     super.initState();
-    _initializeCamera();
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      // Yield to event loop to ensure scheduler is idle before calling native code
+      // which might pump the message loop and trigger re-entrant frames.
+      await Future.delayed(Duration.zero);
+      if (mounted) {
+        _initializeCamera();
+      }
+    });
   }
 
   Future<void> _initializeCamera() async {
@@ -24,10 +31,12 @@ class _NativeCameraViewState extends State<NativeCameraView> {
     
     final textureId = _service.getTextureId();
     if (textureId != -1) {
-      setState(() {
-        _textureId = textureId;
-      });
-      _service.start();
+      if (mounted) {
+        setState(() {
+          _textureId = textureId;
+        });
+        _service.start();
+      }
     } else {
       debugPrint("Failed to get texture ID");
     }

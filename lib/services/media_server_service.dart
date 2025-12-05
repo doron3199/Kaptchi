@@ -15,6 +15,17 @@ class MediaServerService {
   final _streamStartedController = StreamController<String>.broadcast();
   Stream<String> get onStreamStarted => _streamStartedController.stream;
 
+  // Stream controller to notify when a publisher disconnects
+  final _streamStoppedController = StreamController<String>.broadcast();
+  Stream<String> get onStreamStopped => _streamStoppedController.stream;
+
+  // Track active streams
+  final Set<String> _activeStreams = {};
+  // Track publisher connection IDs to paths
+  final Map<String, String> _publisherConnections = {};
+  
+  bool isStreamActive(String path) => _activeStreams.contains(path);
+
   Future<bool> startServer({String? executablePath}) async {
     if (_process != null) return true;
 
@@ -89,14 +100,53 @@ class MediaServerService {
         final message = String.fromCharCodes(data).trim();
         if (message.isNotEmpty) {
           debugPrint('[MediaMTX] $message');
+          
+          // Extract connection ID if present: [conn 127.0.0.1:5555]
+          final connIdMatch = RegExp(r'\[conn ([^\]]+)\]').firstMatch(message);
+          final connId = connIdMatch?.group(1);
+
           // Detect publishing event
-          // Example log: [RTMP] [conn 192.168.1.10:55555] is publishing to path 'live/stream'
-          // Or: [path live/stream] [RTMP source] ready
-          if (message.contains('is publishing to path') || message.contains('ready')) {
-             // Extract path if needed, or just notify
-             // Assuming standard path 'live/stream'
-             // We debounce this slightly to avoid multiple triggers
-             _streamStartedController.add('live/stream');
+          // Example: [RTMP] [conn 192.168.1.10:55555] is publishing to path 'live/stream'
+          if (message.contains('is publishing to path')) {
+             final pathMatch = RegExp(r"path '([^']+)'").firstMatch(message);
+             if (pathMatch != null) {
+               final path = pathMatch.group(1)!;
+               _activeStreams.add(path);
+               if (connId != null) {
+                 _publisherConnections[connId] = path;
+               }
+               _streamStartedController.add(path);
+             }
+          }
+          
+          // Detect stream close via connection close
+          if (message.contains('closed') && connId != null) {
+             if (_publisherConnections.containsKey(connId)) {
+                final path = _publisherConnections[connId];
+                if (path != null) {
+                   _activeStreams.remove(path);
+                   _publisherConnections.remove(connId);
+                   _streamStoppedController.add(path);
+                   debugPrint('[MediaMTX] Publisher disconnected for path: $path');
+                }
+             }
+          }
+
+          // Fallback: Detect explicit destruction
+          // Example: [path live/stream] [RTMP source] destroyed
+          if (message.contains('destroyed') && message.contains('source')) {
+             // Try to extract path
+             final pathMatch = RegExp(r'\[path ([^\]]+)\]').firstMatch(message);
+             if (pathMatch != null) {
+                final path = pathMatch.group(1)!;
+                _activeStreams.remove(path);
+                _streamStoppedController.add(path);
+                // Also clear any connections mapped to this path
+                _publisherConnections.removeWhere((key, value) => value == path);
+             } else if (message.contains('live/stream')) {
+                _activeStreams.remove('live/stream');
+                _streamStoppedController.add('live/stream');
+             }
           }
         }
       });
