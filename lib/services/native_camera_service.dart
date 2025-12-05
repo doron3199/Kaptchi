@@ -9,6 +9,9 @@ typedef GetTextureId = int Function();
 typedef StartCameraFunc = Void Function();
 typedef StartCamera = void Function();
 
+typedef StartStreamFunc = Void Function(Pointer<Utf8> url);
+typedef StartStream = void Function(Pointer<Utf8> url);
+
 typedef StopCameraFunc = Void Function();
 typedef StopCamera = void Function();
 
@@ -41,6 +44,7 @@ class NativeCameraService {
   late DynamicLibrary _nativeLib;
   late GetTextureId _getTextureId;
   late StartCamera _startCamera;
+  late StartStream _startStream;
   late StopCamera _stopCamera;
   late SwitchCamera _switchCamera;
   late SelectCamera _selectCamera;
@@ -67,6 +71,9 @@ class NativeCameraService {
         .asFunction();
     _startCamera = _nativeLib
         .lookup<NativeFunction<StartCameraFunc>>('StartCamera')
+        .asFunction();
+    _startStream = _nativeLib
+        .lookup<NativeFunction<StartStreamFunc>>('StartStream')
         .asFunction();
     _stopCamera = _nativeLib
         .lookup<NativeFunction<StopCameraFunc>>('StopCamera')
@@ -105,6 +112,16 @@ class NativeCameraService {
   void start() {
     initialize();
     _startCamera();
+  }
+
+  void startStream(String url) {
+    initialize();
+    final ptr = url.toNativeUtf8();
+    try {
+      _startStream(ptr);
+    } finally {
+      malloc.free(ptr);
+    }
   }
 
   void stop() {

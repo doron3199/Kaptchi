@@ -1,7 +1,7 @@
 import 'dart:ffi';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:camera/camera.dart';
+import 'package:flutter/foundation.dart';
 import 'package:ffi/ffi.dart';
 
 typedef ProcessFrameSequenceC = Void Function(Pointer<Uint8> bytes, Int32 width, Int32 height, Pointer<Int32> modes, Int32 count);
@@ -39,7 +39,7 @@ class ImageProcessingService {
               .lookup<NativeFunction<ProcessFrameSequenceC>>('process_frame_sequence_rgba')
               .asFunction<ProcessFrameSequenceDart>();
         } catch (e) {
-          print('ImageProcessingService: process_frame_sequence_rgba not found (might need rebuild): $e');
+          debugPrint('ImageProcessingService: process_frame_sequence_rgba not found (might need rebuild): $e');
         }
 
         try {
@@ -47,24 +47,24 @@ class ImageProcessingService {
               .lookup<NativeFunction<ProcessFrameSequenceC>>('process_frame_sequence_bgra')
               .asFunction<ProcessFrameSequenceDart>();
         } catch (e) {
-          print('ImageProcessingService: process_frame_sequence_bgra not found (might need rebuild): $e');
+          debugPrint('ImageProcessingService: process_frame_sequence_bgra not found (might need rebuild): $e');
         }
-            
-        print('ImageProcessingService: Loaded native C++ functions.');
+        
+        debugPrint('ImageProcessingService: Loaded native C++ functions.');
       } catch (e) {
-        print('ImageProcessingService: Failed to load native library: $e');
+        debugPrint('ImageProcessingService: Failed to load native library: $e');
       }
     }
   }
 
   void setProcessingModes(List<ProcessingMode> modes) {
     _activeModes = modes;
-    print('ImageProcessingService: Modes set to $modes');
+    debugPrint('ImageProcessingService: Modes set to $modes');
   }
 
   // Helper to attach to track (placeholder for WebRTC)
   void attachToTrack(dynamic track) {
-    print('ImageProcessingService: Attaching to track $track');
+    debugPrint('ImageProcessingService: Attaching to track $track');
   }
 
   Future<Uint8List?> processRawRgba(Uint8List rgbaData, int width, int height) async {
@@ -93,7 +93,7 @@ class ImageProcessingService {
 
       return _addBmpHeader(ptr.asTypedList(size), width, height);
     } catch (e) {
-      print('Error processing raw frame: $e');
+      debugPrint('Error processing raw frame: $e');
       return null;
     } finally {
       malloc.free(ptr);
@@ -144,7 +144,7 @@ class ImageProcessingService {
       return _addBmpHeader(ptr.asTypedList(size), width, height);
 
     } catch (e) {
-      print('Error processing frame: $e');
+      debugPrint('Error processing frame: $e');
       return null;
     } finally {
       malloc.free(ptr);

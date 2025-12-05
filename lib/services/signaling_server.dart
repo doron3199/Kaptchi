@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_web_socket/shelf_web_socket.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
@@ -21,13 +22,13 @@ class SignalingServer {
 
   Future<void> start() async {
     if (_server != null) {
-      print('Signaling server already running on port ${_server!.port}');
+      debugPrint('Signaling server already running on port ${_server!.port}');
       return;
     }
 
     var handler = webSocketHandler((WebSocketChannel webSocket, String? protocol) {
       _clients.add(webSocket);
-      print('Client connected. Total clients: ${_clients.length}');
+      debugPrint('Client connected. Total clients: ${_clients.length}');
 
       webSocket.stream.listen((message) {
         // Broadcast message to all other clients
@@ -36,13 +37,13 @@ class SignalingServer {
             try {
               client.sink.add(message);
             } catch (e) {
-              print('Error broadcasting to client: $e');
+              debugPrint('Error broadcasting to client: $e');
             }
           }
         }
       }, onDone: () {
         _clients.remove(webSocket);
-        print('Client disconnected. Total clients: ${_clients.length}');
+        debugPrint('Client disconnected. Total clients: ${_clients.length}');
       });
     });
 
@@ -54,10 +55,10 @@ class SignalingServer {
     for (final port in ports) {
       try {
         _server = await shelf_io.serve(handler, InternetAddress.anyIPv4, port);
-        print('Signaling server running on ws://${_server!.address.address}:${_server!.port}');
+        debugPrint('Signaling server running on ws://${_server!.address.address}:${_server!.port}');
         return; // Success
       } catch (e) {
-        print('Port $port busy, trying next...');
+        debugPrint('Port $port busy, trying next...');
       }
     }
     
@@ -69,7 +70,7 @@ class SignalingServer {
     try {
       await _server?.close(force: true);
     } catch (e) {
-      print('Error closing server: $e');
+      debugPrint('Error closing server: $e');
     } finally {
       _server = null;
     }
@@ -80,7 +81,7 @@ class SignalingServer {
       try {
         await client.sink.close();
       } catch (e) {
-        print('Error closing client sink: $e');
+        debugPrint('Error closing client sink: $e');
       }
     }
     _clients.clear();
@@ -90,7 +91,7 @@ class SignalingServer {
   Future<List<({String name, String ip})>> getNetworkInterfaces() async {
     final List<({String name, String ip})> interfacesList = [];
     try {
-      print('DEBUG: Listing network interfaces...');
+      debugPrint('DEBUG: Listing network interfaces...');
       final interfaces = await NetworkInterface.list(
         includeLoopback: true, 
         includeLinkLocal: true,
@@ -98,21 +99,21 @@ class SignalingServer {
       );
 
       for (var interface in interfaces) {
-        print('DEBUG: Found interface: ${interface.name}');
+        debugPrint('DEBUG: Found interface: ${interface.name}');
         for (var addr in interface.addresses) {
-          print('DEBUG:   Address: ${addr.address}');
+          debugPrint('DEBUG:   Address: ${addr.address}');
           if (addr.type == InternetAddressType.IPv4) {
              // Filter out link-local (APIPA) addresses which are usually useless for this
              if (!addr.address.startsWith('169.254')) {
                 interfacesList.add((name: interface.name, ip: addr.address));
              } else {
-                print('DEBUG:   Skipping link-local address: ${addr.address}');
+                debugPrint('DEBUG:   Skipping link-local address: ${addr.address}');
              }
           }
         }
       }
     } catch (e) {
-      print('Error getting IPs: $e');
+      debugPrint('Error getting IPs: $e');
     }
     
     if (interfacesList.isEmpty) {

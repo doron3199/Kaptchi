@@ -19,6 +19,7 @@ public:
     int64_t GetTextureId() const { return texture_id_; }
 
     void Start();
+    void StartStream(const char* url);
     void Stop();
     void SwitchCamera();
     void SelectCamera(int index);
@@ -37,6 +38,8 @@ private:
     cv::VideoCapture capture_;
     std::thread capture_thread_;
     std::atomic<bool> is_running_ = false;
+    std::atomic<bool> is_stream_ = false;
+    std::string stream_url_;
     std::atomic<bool> restart_requested_ = false;
     std::atomic<int> pending_camera_index_ = 0;
     std::mutex mutex_;

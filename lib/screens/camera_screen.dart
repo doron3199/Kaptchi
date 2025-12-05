@@ -5,7 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
-import 'package:camera/camera.dart';
+import 'package:camera/camera.dart' as c;
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
@@ -15,64 +15,67 @@ import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'image_editor_screen.dart';
+import '../services/media_server_service.dart';
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
 import '../services/webrtc_service.dart';
 import '../services/signaling_server.dart';
-
-class FilterItem {
-  final int id;
-  final String name;
-  bool isActive;
-
-  FilterItem({required this.id, required this.name, this.isActive = false});
-}
+import '../services/rtmp_service.dart';
+import '../models/stream_protocol.dart';
+import 'package:vector_math/vector_math_64.dart' as vm;
+import '../widgets/camera_sidebars.dart';
+import '../widgets/camera_stream_view.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
   final int? initialCameraIndex;
   final WebRTCService? preConnectedWebRTCService;
   final SignalingServer? preStartedSignalingServer;
+  final StreamProtocol? initialProtocol;
+  final String? initialStreamUrl;
 
   const CameraScreen({
-    super.key, 
+    super.key,
     this.connectionUrl,
     this.initialCameraIndex,
     this.preConnectedWebRTCService,
     this.preStartedSignalingServer,
+    this.initialProtocol,
+    this.initialStreamUrl,
   });
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
-class _CameraScreenState extends State<CameraScreen> {
-  final _ipController = TextEditingController();
+class _CameraScreenState extends State<CameraScreen>
+    with WidgetsBindingObserver {
   final _transformationController = TransformationController();
   late final WebRTCService _webrtcService;
-  final _localRenderer = RTCVideoRenderer();
+  RTCVideoRenderer _localRenderer = RTCVideoRenderer();
   late final SignalingServer _signalingServer;
-  
-  CameraController? _controller;
-  List<CameraDescription> _cameras = [];
+
+  c.CameraController? _controller;
+  List<c.CameraDescription> _cameras = [];
   int _selectedCameraIndex = -1;
   bool _isHighQuality = true;
   bool _isInitialized = false;
-  
-  // WebRTC / Monitor Mode State
-  bool _isWebRTCMode = false;
+
+  // Remote / Stream Mode State
+  bool _isStreamMode = false;
+  StreamProtocol _selectedProtocol = StreamProtocol.webrtc;
   String _serverIp = '';
   int _serverPort = 5000;
   List<({String name, String ip})> _availableInterfaces = [];
   Timer? _frameTimer;
   final GlobalKey _videoViewKey = GlobalKey();
-  
+
   // Image processing state
   final ValueNotifier<Uint8List?> _processedImageNotifier = ValueNotifier(null);
-  bool _isProcessingFrame = false;
-  
+
   // Zoom state
   double _currentZoom = 1.0;
   final double _phoneMaxZoom = 10.0;
@@ -81,10 +84,13 @@ class _CameraScreenState extends State<CameraScreen> {
   Offset _viewOffset = Offset.zero;
   double _lastScale = 1.0;
   Offset? _lastFocalPoint;
-  
+
   // Captured images for PDF export
   final List<({Uint8List bytes, int width, int height})> _capturedImages = [];
   int _currentGalleryIndex = 0;
+  String? _activeStreamUrl;
+  bool _pendingRtmpResume = false;
+  bool _isRtmpStreaming = false;
 
   // Sidebar state
   bool _isSidebarOpen = false;
@@ -105,12 +111,20 @@ class _CameraScreenState extends State<CameraScreen> {
     FilterItem(id: 2, name: 'Whiteboard (Legacy)', isActive: false),
   ];
 
+  bool _isQrDialogVisible = false;
+
+  double _minAvailableZoom = 1.0;
+  double _maxAvailableZoom = 1.0;
+  double _currentZoomLevel = 1.0;
+
   @override
   void initState() {
     super.initState();
-    
+    WidgetsBinding.instance.addObserver(this);
+
     _webrtcService = widget.preConnectedWebRTCService ?? WebRTCService();
-    _signalingServer = widget.preStartedSignalingServer ?? SignalingServer.instance;
+    _signalingServer =
+        widget.preStartedSignalingServer ?? SignalingServer.instance;
 
     // Enable digital zoom override by default for native cameras (Windows)
     if (Platform.isWindows && widget.preConnectedWebRTCService == null) {
@@ -118,39 +132,49 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     // Handle disconnection on Windows
-    if (Platform.isWindows && widget.preConnectedWebRTCService != null) {
-      _webrtcService.onIceConnectionStateChange = (state) {
-        if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-            state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Connection lost')),
-            );
-            Navigator.pop(context);
+    if (Platform.isWindows) {
+      if (widget.preConnectedWebRTCService != null) {
+        _webrtcService.onIceConnectionStateChange = (state) {
+          if (state ==
+                  RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
+              state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
+              state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
+            if (mounted) {
+              ScaffoldMessenger.of(
+                context,
+              ).showSnackBar(const SnackBar(content: Text('Connection lost')));
+              Navigator.pop(context);
+            }
           }
+        };
+      }
+
+      // Auto-close QR dialog when RTMP stream starts
+      MediaServerService.instance.onStreamStarted.listen((_) {
+        if (mounted && _isQrDialogVisible) {
+          Navigator.of(context).pop();
         }
-      };
+      });
     }
 
     _init();
     _setDefaultPath();
     _localRenderer.initialize().then((_) {
       if (mounted && widget.preConnectedWebRTCService != null) {
-         setState(() {
-             _isWebRTCMode = true;
-             if (_webrtcService.remoteStream != null) {
-                _localRenderer.srcObject = _webrtcService.remoteStream;
-                _startFrameExtraction(_webrtcService.remoteStream!);
-             }
-         });
-         
-         _webrtcService.onRemoteStream = (stream) {
-            setState(() {
-              _localRenderer.srcObject = stream;
-            });
-            _startFrameExtraction(stream);
-         };
+        setState(() {
+          _isStreamMode = true;
+          if (_webrtcService.remoteStream != null) {
+            _localRenderer.srcObject = _webrtcService.remoteStream;
+            _startFrameExtraction(_webrtcService.remoteStream!);
+          }
+        });
+
+        _webrtcService.onRemoteStream = (stream) {
+          setState(() {
+            _localRenderer.srcObject = stream;
+          });
+          _startFrameExtraction(stream);
+        };
       }
     });
 
@@ -159,14 +183,292 @@ class _CameraScreenState extends State<CameraScreen> {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _connectToUrl(widget.connectionUrl!);
       });
+    } else if (widget.initialProtocol != null) {
+      _selectedProtocol = widget.initialProtocol!;
+      if (_selectedProtocol == StreamProtocol.webrtc) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _startWebRTCLogic();
+        });
+      } else if (widget.initialStreamUrl != null) {
+        // Ensure we are in "Remote/Stream" mode so the view renders correctly
+        // This is critical for Windows to show the player instead of the camera
+        _isStreamMode = true;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _connectToStream(widget.initialStreamUrl!);
+        });
+      }
     }
   }
 
-  Future<void> _startWebRTCServer() async {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!Platform.isAndroid && !Platform.isIOS) return;
+
+    if (state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.paused) {
+      unawaited(_suspendRtmpStreamForLifecycle());
+    } else if (state == AppLifecycleState.resumed) {
+      unawaited(_resumeRtmpStreamIfNeeded());
+    }
+  }
+
+  Future<void> _connectToStream(String url) async {
+    WakelockPlus.enable(); // Keep screen on
+    await _releaseLocalCameraResources();
+
+    if (_selectedProtocol == StreamProtocol.rtmp && Platform.isWindows) {
+      NativeCameraService().startStream(url);
+    }
+
+    _showQrCodeDialog(url);
+  }
+
+  Future<void> _releaseLocalCameraResources() async {
+    if (_controller != null) {
+      final controller = _controller!;
+      _controller = null;
+      try {
+        await controller.dispose();
+      } catch (e) {
+        debugPrint('Error disposing CameraController: $e');
+      }
+    }
+    if (mounted) {
+      setState(() {
+        _isInitialized = false;
+      });
+    } else {
+      _isInitialized = false;
+    }
+
+    if (Platform.isWindows) {
+      NativeCameraService().stop();
+    }
+  }
+
+  bool get _supportsMobileRtmp => Platform.isAndroid;
+
+  Future<void> _startMobileRtmpStreaming(String url) async {
+    if (!_supportsMobileRtmp) return;
+
+    // Request permissions explicitly
+    Map<Permission, PermissionStatus> statuses = await [
+      Permission.camera,
+      Permission.microphone,
+    ].request();
+
+    if (statuses[Permission.camera] != PermissionStatus.granted ||
+        statuses[Permission.microphone] != PermissionStatus.granted) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Camera and Microphone permissions are required for streaming',
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Force a frame to ensure the preview is built
+    if (mounted) {
+      setState(() {});
+      await Future.delayed(const Duration(milliseconds: 500));
+    }
+
+    try {
+      debugPrint('Starting RTMP stream to $url');
+
+      // Start the HaishinKit service
+      await RtmpService.instance.startStream(url);
+
+      debugPrint('RTMP stream init initiated');
+
+      if (mounted) {
+        setState(() {
+          _isRtmpStreaming = true;
+          _isStreamMode = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Failed to start RTMP streaming: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Failed to start stream: $e')));
+      }
+    }
+  }
+
+  Future<void> _stopMobileRtmpStreaming({
+    bool resetTracking = true,
+    bool fromDispose = false,
+  }) async {
+    if (resetTracking) {
+      _clearActiveStreamTracking();
+    }
+
+    if (!fromDispose && mounted) {
+      setState(() {
+        _isRtmpStreaming = false;
+      });
+    } else {
+      _isRtmpStreaming = false;
+    }
+  }
+
+  Widget _buildStreamWidget() {
+    return CameraStreamView(
+      selectedProtocol: _selectedProtocol,
+      supportsMobileRtmp: _supportsMobileRtmp,
+      controller: _controller,
+      localRenderer: _localRenderer,
+      connectionUrl: widget.connectionUrl,
+    );
+  }
+
+  Future<void> _suspendRtmpStreamForLifecycle() async {
+    if (_selectedProtocol != StreamProtocol.rtmp) {
+      return;
+    }
+
+    // flutter_rtmp_publisher handles lifecycle internally or we can't control it.
+    if (_supportsMobileRtmp) {
+      return;
+    }
+
+    if (Platform.isWindows && _activeStreamUrl != null && _isStreamMode) {
+      _pendingRtmpResume = true;
+      NativeCameraService().stop();
+      if (mounted) {
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _resumeRtmpStreamIfNeeded() async {
+    if (!_pendingRtmpResume) {
+      return;
+    }
+
+    if (_supportsMobileRtmp) {
+      return;
+    }
+
+    if (_activeStreamUrl != null && Platform.isWindows) {
+      try {
+        WakelockPlus.enable();
+        NativeCameraService().startStream(_activeStreamUrl!);
+        if (mounted) {
+          setState(() {
+            _isStreamMode = true;
+          });
+        }
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Failed to resume stream: $e')),
+          );
+        }
+      } finally {
+        _pendingRtmpResume = false;
+      }
+    }
+  }
+
+  void _clearActiveStreamTracking() {
+    _activeStreamUrl = null;
+    _pendingRtmpResume = false;
+  }
+
+  Future<void> _initializeRemoteSession(StreamProtocol protocol) async {
+    // Set protocol
+    setState(() => _selectedProtocol = protocol);
+
+    if (protocol == StreamProtocol.webrtc) {
+      await _startWebRTCLogic();
+    } else {
+      // Ensure we have network info
+      if (_serverIp.isEmpty) {
+        try {
+          final interfaces = await _signalingServer.getNetworkInterfaces();
+          if (!mounted) return;
+          if (interfaces.isNotEmpty) {
+            setState(() {
+              _availableInterfaces = interfaces;
+              _serverIp = interfaces[0].ip;
+            });
+          }
+        } catch (e) {
+          debugPrint('Error getting interfaces: $e');
+        }
+      }
+
+      // For RTMP/RTSP, we need the URL to play from (Windows) and publish to (Android)
+      String? url;
+      String defaultIp = _serverIp.isNotEmpty ? _serverIp : '192.168.1.x';
+
+      if (protocol == StreamProtocol.rtmp) {
+        // Ask for RTMP Server URL
+        final controller = TextEditingController(
+          text: 'rtmp://$defaultIp/live/stream',
+        );
+        url = await showDialog<String>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: const Text('Enter RTMP Server URL'),
+            content: TextField(controller: controller),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel'),
+              ),
+              TextButton(
+                onPressed: () => Navigator.pop(context, controller.text),
+                child: const Text('OK'),
+              ),
+            ],
+          ),
+        );
+      }
+
+      if (url == null) return;
+
+      // Connect (Play)
+      if (Platform.isWindows && protocol == StreamProtocol.rtmp) {
+        NativeCameraService().startStream(url);
+        if (!mounted) return;
+        setState(() {
+          _isStreamMode = true;
+        });
+      }
+
+      if (!mounted) return;
+
+      // Show QR Code with the URL so Android can publish/connect
+      _showQrCodeDialog(url);
+    }
+  }
+
+  void _switchToRemoteMode(StreamProtocol protocol) {
+    setState(() {
+      _isStreamMode = true;
+      _isDigitalZoomOverride = false; // Disable by default for mobile
+      _currentZoom = 1.0;
+      _viewOffset = Offset.zero;
+      _selectedProtocol = protocol;
+    });
+    unawaited(_releaseLocalCameraResources());
+    _initializeRemoteSession(protocol);
+  }
+
+  Future<void> _startWebRTCLogic() async {
     try {
       await _signalingServer.start();
       final interfaces = await _signalingServer.getNetworkInterfaces();
-      
+      if (!mounted) return;
+
       setState(() {
         _serverPort = _signalingServer.port;
         _availableInterfaces = interfaces;
@@ -177,39 +479,38 @@ class _CameraScreenState extends State<CameraScreen> {
 
       // Connect to our own local server to listen for the camera
       await _webrtcService.connect('localhost:$_serverPort', false);
-      
+
       _webrtcService.onIceConnectionStateChange = (state) {
         if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
             state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
             state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
           if (mounted) {
-             Navigator.pop(context);
+            Navigator.pop(context);
           }
         }
       };
-      
+
       _webrtcService.onRemoteStream = (stream) {
         // Close the QR code dialog if it's open
         if (Navigator.canPop(context)) {
           Navigator.pop(context);
         }
-        
+
         setState(() {
           _localRenderer.srcObject = stream;
         });
-        
+
         // Start pulling frames from the stream for processing
         _startFrameExtraction(stream);
       };
 
       _showQrCodeDialog();
-
     } catch (e) {
-      print('Error starting WebRTC server: $e');
+      debugPrint('Error starting WebRTC server: $e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error starting server: $e')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Error starting server: $e')));
       }
     }
   }
@@ -217,10 +518,12 @@ class _CameraScreenState extends State<CameraScreen> {
   void _startFrameExtraction(MediaStream stream) {
     _frameTimer?.cancel();
     // Extract frames at ~15fps (sufficient for processing without killing CPU)
-    _frameTimer = Timer.periodic(const Duration(milliseconds: 66), (timer) async {
+    _frameTimer = Timer.periodic(const Duration(milliseconds: 66), (
+      timer,
+    ) async {
       // Check if any filter is active
       bool hasActiveFilters = _filters.any((f) => f.isActive);
-      
+
       if (!hasActiveFilters) {
         if (_processedImageNotifier.value != null) {
           _processedImageNotifier.value = null;
@@ -230,47 +533,55 @@ class _CameraScreenState extends State<CameraScreen> {
 
       try {
         // Capture frame from the RepaintBoundary wrapping the RTCVideoView
-        final boundary = _videoViewKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
+        final boundary =
+            _videoViewKey.currentContext?.findRenderObject()
+                as RenderRepaintBoundary?;
         if (boundary == null) return;
 
         // Capture as image
         final image = await boundary.toImage();
-        
+
         // Get byte data (RGBA)
-        final byteData = await image.toByteData(format: ui.ImageByteFormat.rawRgba);
+        final byteData = await image.toByteData(
+          format: ui.ImageByteFormat.rawRgba,
+        );
         if (byteData == null) return;
 
         // Convert to CameraImage-like structure or pass directly to service
         // Our service expects CameraImage, but we can overload or create a helper
         // Actually, ImageProcessingService.processImageAndEncode expects CameraImage.
         // We should add a method to process raw bytes.
-        
+
         // Let's modify ImageProcessingService to accept raw bytes too, or just use the internal logic here.
         // Since we can't easily modify the service interface in this step without reading it again,
         // let's assume we can add a helper or just call the C++ function directly if we exposed it.
         // Wait, ImageProcessingService exposes processImageAndEncode which takes CameraImage.
         // We need to extend ImageProcessingService to handle raw bytes.
-        
+
         // For now, let's use a workaround: Create a fake CameraImage? No, that's hard.
         // Let's add a new method to ImageProcessingService in the next step.
         // Assuming we will add `processRawRgba` to ImageProcessingService.
-        
-        final processedBytes = await ImageProcessingService.instance.processRawRgba(
-          byteData.buffer.asUint8List(), 
-          image.width, 
-          image.height
-        );
-        
+
+        final processedBytes = await ImageProcessingService.instance
+            .processRawRgba(
+              byteData.buffer.asUint8List(),
+              image.width,
+              image.height,
+            );
+
         if (mounted) {
           _processedImageNotifier.value = processedBytes;
         }
       } catch (e) {
-        print('Error extracting frame: $e');
+        debugPrint('Error extracting frame: $e');
       }
     });
   }
 
-  void _showQrCodeDialog() {
+  void _showQrCodeDialog([String? customData]) {
+    final qrData = customData ?? 'ws://$_serverIp:$_serverPort';
+
+    _isQrDialogVisible = true;
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -278,42 +589,46 @@ class _CameraScreenState extends State<CameraScreen> {
         content: SizedBox(
           width: 300,
           height: 400, // Increased height to prevent overflow
-          child: SingleChildScrollView( // Added scroll view to prevent overflow
+          child: SingleChildScrollView(
+            // Added scroll view to prevent overflow
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (_availableInterfaces.isNotEmpty)
-                  Container(
-                    color: Colors.white,
-                    padding: const EdgeInsets.all(16),
-                    child: QrImageView(
-                      data: 'ws://$_serverIp:$_serverPort',
-                      version: QrVersions.auto,
-                      size: 200.0,
-                    ),
+                Container(
+                  color: Colors.white,
+                  padding: const EdgeInsets.all(16),
+                  child: QrImageView(
+                    data: qrData,
+                    version: QrVersions.auto,
+                    size: 200.0,
                   ),
-                const SizedBox(height: 16),
-                Text('Scan with Kaptchi mobile app\nws://$_serverIp:$_serverPort', textAlign: TextAlign.center),
-                const SizedBox(height: 16),
-                DropdownButton<String>(
-                  value: _serverIp,
-                  isExpanded: true,
-                  items: _availableInterfaces.map((i) {
-                    return DropdownMenuItem(
-                      value: i.ip,
-                      child: Text('${i.name} (${i.ip})'),
-                    );
-                  }).toList(),
-                  onChanged: (val) {
-                    if (val != null) {
-                      setState(() {
-                        _serverIp = val;
-                      });
-                      Navigator.pop(context);
-                      _showQrCodeDialog();
-                    }
-                  },
                 ),
+                const SizedBox(height: 16),
+                Text(
+                  'Scan with Kaptchi mobile app\n$qrData',
+                  textAlign: TextAlign.center,
+                ),
+                const SizedBox(height: 16),
+                if (customData == null && _availableInterfaces.isNotEmpty)
+                  DropdownButton<String>(
+                    value: _serverIp,
+                    isExpanded: true,
+                    items: _availableInterfaces.map((i) {
+                      return DropdownMenuItem(
+                        value: i.ip,
+                        child: Text('${i.name} (${i.ip})'),
+                      );
+                    }).toList(),
+                    onChanged: (val) {
+                      if (val != null) {
+                        setState(() {
+                          _serverIp = val;
+                        });
+                        Navigator.pop(context);
+                        _showQrCodeDialog();
+                      }
+                    },
+                  ),
               ],
             ),
           ),
@@ -325,11 +640,49 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
         ],
       ),
-    );
+    ).then((_) => _isQrDialogVisible = false);
   }
 
   Future<void> _connectToUrl(String url) async {
     WakelockPlus.enable();
+    await _releaseLocalCameraResources();
+
+    if (url.startsWith('rtmp://')) {
+      setState(() => _selectedProtocol = StreamProtocol.rtmp);
+      _activeStreamUrl = url;
+      _pendingRtmpResume = false;
+
+      if (Platform.isAndroid) {
+        _connectToWebSocketFromRtmpUrl(url);
+        // Start the stream here, after the screen has loaded
+        await _startMobileRtmpStreaming(url);
+        if (!_isRtmpStreaming && mounted) {
+          // Note: _isRtmpStreaming might be false if connection is still pending,
+          // but we rely on the notifier in the UI.
+          // ScaffoldMessenger.of(context).showSnackBar(
+          //   const SnackBar(content: Text('Failed to start RTMP streaming.')),
+          // );
+        }
+      } else if (Platform.isWindows) {
+        NativeCameraService().startStream(url);
+        if (!mounted) return;
+        setState(() {
+          _isStreamMode = true;
+        });
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('RTMP not supported on this platform'),
+            ),
+          );
+        }
+      }
+      return;
+    }
+
+    setState(() => _selectedProtocol = StreamProtocol.webrtc);
+
     _webrtcService.onError = (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -363,10 +716,20 @@ class _CameraScreenState extends State<CameraScreen> {
     };
 
     await _webrtcService.connect(url, true);
+    if (!mounted) return;
+
+    if (_webrtcService.localStream != null) {
+      setState(() {
+        _isStreamMode = true;
+        _localRenderer.srcObject = _webrtcService.localStream;
+      });
+      _startFrameExtraction(_webrtcService.localStream!);
+    }
   }
 
   Future<void> _setDefaultPath() async {
     final dir = await getApplicationDocumentsDirectory();
+    if (!mounted) return;
     setState(() {
       _pdfPathController.text = dir.path;
     });
@@ -388,11 +751,20 @@ class _CameraScreenState extends State<CameraScreen> {
       return;
     }
 
-    if (widget.connectionUrl != null) return;
-    
+    // On Android, if we have a connectionUrl, we still need to init the camera
+    // because we want to show the preview (even if not transmitting).
+    // if (widget.connectionUrl != null) return;
+
+    // If we are streaming via RTMP on Android, we should NOT initialize the local camera plugin
+    // because HaishinKit will handle the camera.
+    if (Platform.isAndroid &&
+        widget.connectionUrl != null &&
+        widget.connectionUrl!.startsWith('rtmp://')) {
+      return;
+    }
+
     await _loadCameras();
     if (_cameras.isNotEmpty) {
-      // Default to the first camera (usually integrated)
       _selectedCameraIndex = 0;
       await _startLocalCamera();
     }
@@ -400,81 +772,110 @@ class _CameraScreenState extends State<CameraScreen> {
 
   Future<void> _loadCameras() async {
     try {
-      _cameras = await availableCameras();
+      _cameras = await c.availableCameras();
     } catch (e) {
-      print('Error loading cameras: $e');
+      debugPrint('Error loading cameras: $e');
     }
   }
 
   Future<void> _switchCamera() async {
     if (Platform.isWindows) {
       // Fetch available cameras for the dropdown
-      List<CameraDescription> cameras = [];
+      List<c.CameraDescription> cameras = [];
       try {
-        cameras = await availableCameras();
+        cameras = await c.availableCameras();
       } catch (e) {
-        print('Error getting cameras: $e');
+        debugPrint('Error getting cameras: $e');
       }
+
+      if (!mounted) return;
 
       showModalBottomSheet(
         context: context,
         builder: (context) => Container(
           padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              const Text('Select Video Source', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              
-              // Local Cameras
-              if (cameras.isNotEmpty) ...[
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Select Video Source',
+                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 16),
+
+                // Local Cameras
+                if (cameras.isNotEmpty) ...[
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      'Local Cameras',
+                      style: TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: Colors.grey,
+                      ),
+                    ),
+                  ),
+                  ...cameras.asMap().entries.map((entry) {
+                    final index = entry.key;
+                    final camera = entry.value;
+                    // Clean up camera name by removing ID part in angle brackets <...>
+                    final cleanName = camera.name
+                        .replaceAll(RegExp(r'<[^>]*>'), '')
+                        .trim();
+
+                    return ListTile(
+                      leading: const Icon(Icons.camera),
+                      title: Text(cleanName),
+                      onTap: () async {
+                        Navigator.pop(context);
+                        setState(() {
+                          _isStreamMode = false;
+                          _isDigitalZoomOverride =
+                              true; // Enable by default for local cameras
+                          _lockedPhoneZoom = 1.0;
+                          _currentZoom = 1.0;
+                          _viewOffset = Offset.zero;
+                        });
+                        _webrtcService.disconnect();
+                        await _signalingServer.stop();
+                        NativeCameraService().selectCamera(index);
+                      },
+                    );
+                  }),
+                  const Divider(),
+                ],
+
                 const Align(
                   alignment: Alignment.centerLeft,
-                  child: Text('Local Cameras', style: TextStyle(fontWeight: FontWeight.bold, color: Colors.grey)),
+                  child: Text(
+                    'Remote Streams',
+                    style: TextStyle(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.grey,
+                    ),
+                  ),
                 ),
-                ...cameras.asMap().entries.map((entry) {
-                  final index = entry.key;
-                  final camera = entry.value;
-                  // Clean up camera name by removing ID part in angle brackets <...>
-                  final cleanName = camera.name.replaceAll(RegExp(r'<[^>]*>'), '').trim();
-                  
-                  return ListTile(
-                    leading: const Icon(Icons.camera),
-                    title: Text(cleanName),
-                    onTap: () async {
-                      Navigator.pop(context);
-                      setState(() {
-                        _isWebRTCMode = false;
-                        _isDigitalZoomOverride = true; // Enable by default for local cameras
-                        _lockedPhoneZoom = 1.0;
-                        _currentZoom = 1.0;
-                        _viewOffset = Offset.zero;
-                      });
-                      _webrtcService.disconnect();
-                      await _signalingServer.stop();
-                      NativeCameraService().selectCamera(index);
-                    },
-                  );
-                }),
-                const Divider(),
+                ListTile(
+                  leading: const Icon(Icons.wifi_tethering),
+                  title: const Text('WebRTC (Low Latency)'),
+                  subtitle: const Text('Best for real-time interaction'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _switchToRemoteMode(StreamProtocol.webrtc);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.live_tv),
+                  title: const Text('RTMP (High Quality)'),
+                  subtitle: const Text('Best for stable streaming'),
+                  onTap: () {
+                    Navigator.pop(context);
+                    _switchToRemoteMode(StreamProtocol.rtmp);
+                  },
+                ),
               ],
-
-              ListTile(
-                leading: const Icon(Icons.wifi_tethering),
-                title: const Text('WebRTC Stream (Mobile Camera)'),
-                onTap: () {
-                  Navigator.pop(context);
-                  setState(() {
-                    _isWebRTCMode = true;
-                    _isDigitalZoomOverride = false; // Disable by default for mobile
-                    _currentZoom = 1.0;
-                    _viewOffset = Offset.zero;
-                  });
-                  NativeCameraService().stop();
-                  _startWebRTCServer();
-                },
-              ),
-            ],
+            ),
           ),
         ),
       );
@@ -482,7 +883,7 @@ class _CameraScreenState extends State<CameraScreen> {
     }
 
     if (_cameras.isEmpty) return;
-    
+
     setState(() {
       _selectedCameraIndex = (_selectedCameraIndex + 1) % _cameras.length;
     });
@@ -497,38 +898,12 @@ class _CameraScreenState extends State<CameraScreen> {
     if (Platform.isWindows) {
       // Toggle between 1080p and 4K
       if (_isHighQuality) {
-        NativeCameraService().setResolution(4096 , 2160);
+        NativeCameraService().setResolution(4096, 2160);
       } else {
         NativeCameraService().setResolution(1920, 1080);
       }
     } else {
       await _startLocalCamera();
-    }
-  }
-
-  void _processCameraImage(CameraImage image) async {
-    // Always process if mode is not none, regardless of previous frame state
-    // This ensures we don't get stuck if a frame drops
-    if (!_filters.any((f) => f.isActive)) {
-      if (_processedImageNotifier.value != null) {
-        _processedImageNotifier.value = null;
-      }
-      return;
-    }
-
-    if (_isProcessingFrame) return;
-    _isProcessingFrame = true;
-
-    try {
-      // Note: processImageAndEncode now returns Future<Uint8List?>
-      final bytes = await ImageProcessingService.instance.processImageAndEncode(image);
-      if (mounted) {
-         _processedImageNotifier.value = bytes;
-      }
-    } catch (e) {
-      print('Error processing frame: $e');
-    } finally {
-      _isProcessingFrame = false;
     }
   }
 
@@ -540,11 +915,11 @@ class _CameraScreenState extends State<CameraScreen> {
     // However, the signaling server broadcasts to *other* clients.
     // If we are the receiver (Windows), we are a client. The sender (Android) is also a client.
     // So sending to the signaling server should reach the Android device.
-    
+
     // We need to access the socket in WebRTCService or SignalingServer to send.
     // WebRTCService has _send but it wraps in a specific format.
     // Let's add a generic send method to WebRTCService or expose the socket.
-    
+
     // Better approach: Add a method to WebRTCService to send a control message.
     _webrtcService.sendControlMessage('zoom', {'level': zoom});
   }
@@ -568,17 +943,19 @@ class _CameraScreenState extends State<CameraScreen> {
         modes.add(ProcessingMode.values[id]);
       }
     }
-    
+
     ImageProcessingService.instance.setProcessingModes(modes);
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
     _controller?.dispose();
-    _ipController.dispose();
+    unawaited(_stopMobileRtmpStreaming(fromDispose: true));
     _transformationController.dispose();
     _webrtcService.disconnect();
+    _clearActiveStreamTracking();
     // _signalingServer.stop(); // NEVER STOP THE SERVER
     _frameTimer?.cancel();
     _localRenderer.dispose();
@@ -586,42 +963,86 @@ class _CameraScreenState extends State<CameraScreen> {
   }
 
   Future<void> _startLocalCamera() async {
-    if (_controller != null) {
-      await _controller!.dispose();
-    }
-
-    if (_selectedCameraIndex < 0 || _selectedCameraIndex >= _cameras.length) return;
-
-    final camera = _cameras[_selectedCameraIndex];
-    final resolution = _isHighQuality ? ResolutionPreset.max : ResolutionPreset.medium;
-
-    _controller = CameraController(
-      camera,
-      resolution,
-      enableAudio: false,
-      imageFormatGroup: Platform.isWindows ? ImageFormatGroup.bgra8888 : ImageFormatGroup.yuv420,
-    );
-
-    try {
-      await _controller!.initialize();
-      setState(() {
-        _isInitialized = true;
-      });
-      
-      // Start image stream for processing
-      if (Platform.isWindows && _controller!.value.isInitialized) {
-        // Native Windows implementation handles streaming internally
+    if (Platform.isWindows) {
+      if (_controller != null) {
+        await _controller!.dispose();
       }
-      
-    } catch (e) {
-      print('Error starting camera: $e');
-      setState(() {
-        _isInitialized = false;
-      });
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Error starting camera: $e')),
-        );
+      if (_selectedCameraIndex < 0 || _selectedCameraIndex >= _cameras.length)
+        return;
+      final camera = _cameras[_selectedCameraIndex];
+      final resolution = _isHighQuality
+          ? c.ResolutionPreset.max
+          : c.ResolutionPreset.medium;
+      _controller = c.CameraController(
+        camera,
+        resolution,
+        enableAudio: false,
+        imageFormatGroup: c.ImageFormatGroup.bgra8888,
+      );
+      try {
+        await _controller!.initialize();
+        if (!mounted) return;
+        setState(() {
+          _isInitialized = true;
+        });
+      } catch (e) {
+        debugPrint('Error starting camera: $e');
+        if (mounted) {
+          setState(() {
+            _isInitialized = false;
+          });
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Error starting camera: $e')));
+        }
+      }
+    } else {
+      // Android / iOS
+      if (_controller != null) {
+        await _controller!.dispose();
+      }
+      if (_cameras.isEmpty) return;
+
+      if (_selectedCameraIndex < 0 || _selectedCameraIndex >= _cameras.length) {
+        _selectedCameraIndex = 0;
+      }
+
+      final camera = _cameras[_selectedCameraIndex];
+      final resolution = _isHighQuality
+          ? c.ResolutionPreset.max
+          : c.ResolutionPreset.medium;
+
+      _controller = c.CameraController(
+        camera,
+        resolution,
+        enableAudio: false,
+        imageFormatGroup: Platform.isAndroid
+            ? c.ImageFormatGroup.jpeg
+            : c.ImageFormatGroup.bgra8888,
+      );
+
+      try {
+        await _controller!.initialize();
+
+        // Get zoom levels
+        _minAvailableZoom = await _controller!.getMinZoomLevel();
+        _maxAvailableZoom = await _controller!.getMaxZoomLevel();
+        _currentZoomLevel = _minAvailableZoom;
+
+        if (!mounted) return;
+        setState(() {
+          _isInitialized = true;
+        });
+      } catch (e) {
+        debugPrint('Error starting camera: $e');
+        if (mounted) {
+          setState(() {
+            _isInitialized = false;
+          });
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('Error starting camera: $e')));
+        }
       }
     }
   }
@@ -634,34 +1055,60 @@ class _CameraScreenState extends State<CameraScreen> {
       int finalWidth = 0;
       int finalHeight = 0;
 
-      if (_isWebRTCMode) {
-        // If we have a processed (filtered) image, use it
-        bool hasActiveFilters = _filters.any((f) => f.isActive);
-        if (hasActiveFilters && _processedImageNotifier.value != null) {
-          finalBytes = _processedImageNotifier.value;
-          // Decode to get dimensions
-          final decoded = img.decodeImage(finalBytes!);
-          if (decoded != null) {
-            finalWidth = decoded.width;
-            finalHeight = decoded.height;
+      if (_isStreamMode) {
+        // Check protocol
+        if (_selectedProtocol == StreamProtocol.rtmp) {
+          // Use NativeCameraService for Windows RTMP capture
+          final service = NativeCameraService();
+          final width = service.getFrameWidth();
+          final height = service.getFrameHeight();
+          final bytes = service.getFrameData();
+
+          if (bytes != null && width > 0 && height > 0) {
+            final image = img.Image.fromBytes(
+              width: width,
+              height: height,
+              bytes: bytes.buffer,
+              numChannels: 4,
+              order: img.ChannelOrder.rgba,
+            );
+            finalBytes = img.encodePng(image);
+            finalWidth = width;
+            finalHeight = height;
           }
         } else {
-          // Otherwise capture the raw stream from the view
-          final boundary = _videoViewKey.currentContext?.findRenderObject() as RenderRepaintBoundary?;
-          if (boundary == null) {
-             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Failed to capture WebRTC frame')),
+          // If we have a processed (filtered) image, use it
+          bool hasActiveFilters = _filters.any((f) => f.isActive);
+          if (hasActiveFilters && _processedImageNotifier.value != null) {
+            finalBytes = _processedImageNotifier.value;
+            // Decode to get dimensions
+            final decoded = img.decodeImage(finalBytes!);
+            if (decoded != null) {
+              finalWidth = decoded.width;
+              finalHeight = decoded.height;
+            }
+          } else {
+            // Otherwise capture the raw stream from the view
+            final boundary =
+                _videoViewKey.currentContext?.findRenderObject()
+                    as RenderRepaintBoundary?;
+            if (boundary == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Failed to capture WebRTC frame')),
+              );
+              return;
+            }
+
+            final image = await boundary.toImage();
+            final byteData = await image.toByteData(
+              format: ui.ImageByteFormat.png,
             );
-            return;
-          }
-          
-          final image = await boundary.toImage();
-          final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-          
-          if (byteData != null) {
-            finalBytes = byteData.buffer.asUint8List();
-            finalWidth = image.width;
-            finalHeight = image.height;
+
+            if (byteData != null) {
+              finalBytes = byteData.buffer.asUint8List();
+              finalWidth = image.width;
+              finalHeight = image.height;
+            }
           }
         }
       } else {
@@ -692,70 +1139,85 @@ class _CameraScreenState extends State<CameraScreen> {
         final matrix = _transformationController.value;
         final scale = matrix.getMaxScaleOnAxis();
         final translation = matrix.getTranslation();
-        
+
         // Viewport size (screen size available for camera)
         final viewportSize = MediaQuery.of(context).size;
-        
+
         // Let's assume "contain" fit.
         double renderWidth = viewportSize.width;
         double renderHeight = viewportSize.width * 9 / 16;
-        
+
         if (renderHeight > viewportSize.height) {
           renderHeight = viewportSize.height;
           renderWidth = renderHeight * 16 / 9;
         }
-        
+
         double visibleX = -translation.x / scale;
         double visibleY = -translation.y / scale;
         double visibleW = viewportSize.width / scale;
         double visibleH = viewportSize.height / scale;
-        
+
         int cropX = (visibleX * (width / renderWidth)).round();
         int cropY = (visibleY * (height / renderHeight)).round();
         int cropW = (visibleW * (width / renderWidth)).round();
         int cropH = (visibleH * (height / renderHeight)).round();
-        
+
         // Clamp
         cropX = cropX.clamp(0, width);
         cropY = cropY.clamp(0, height);
         if (cropX + cropW > width) cropW = width - cropX;
         if (cropY + cropH > height) cropH = height - cropY;
-        
+
         if (cropW <= 0 || cropH <= 0) {
-           // Fallback to full image if calculation fails
-           cropX = 0; cropY = 0; cropW = width; cropH = height;
+          // Fallback to full image if calculation fails
+          cropX = 0;
+          cropY = 0;
+          cropW = width;
+          cropH = height;
         }
 
-        final croppedImage = img.copyCrop(image, x: cropX, y: cropY, width: cropW, height: cropH);
+        final croppedImage = img.copyCrop(
+          image,
+          x: cropX,
+          y: cropY,
+          width: cropW,
+          height: cropH,
+        );
         finalBytes = img.encodePng(croppedImage);
         finalWidth = cropW;
         finalHeight = cropH;
       }
 
       if (finalBytes != null) {
+        if (!mounted) return;
         setState(() {
-          _capturedImages.add((bytes: finalBytes!, width: finalWidth, height: finalHeight));
+          _capturedImages.add((
+            bytes: finalBytes!,
+            width: finalWidth,
+            height: finalHeight,
+          ));
         });
 
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Captured image ${_capturedImages.length}')),
         );
       }
-      
     } catch (e) {
-      print('Error capturing frame: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error capturing frame: $e')),
-      );
+      debugPrint('Error capturing frame: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error capturing frame: $e')));
     }
   }
 
   Future<void> _openEditor() async {
     if (_capturedImages.isEmpty) return;
     if (_currentGalleryIndex >= _capturedImages.length) {
-        _currentGalleryIndex = _capturedImages.length - 1;
+      _currentGalleryIndex = _capturedImages.length - 1;
     }
-    
+
     final item = _capturedImages[_currentGalleryIndex];
     final result = await Navigator.push(
       context,
@@ -786,11 +1248,14 @@ class _CameraScreenState extends State<CameraScreen> {
 
       for (final item in _capturedImages) {
         final image = pw.MemoryImage(item.bytes);
-        
+
         // Create a page with the exact dimensions of the image
         pdf.addPage(
           pw.Page(
-            pageFormat: PdfPageFormat(item.width.toDouble(), item.height.toDouble()),
+            pageFormat: PdfPageFormat(
+              item.width.toDouble(),
+              item.height.toDouble(),
+            ),
             margin: pw.EdgeInsets.zero,
             build: (pw.Context context) {
               return pw.Image(image, fit: pw.BoxFit.cover);
@@ -802,7 +1267,8 @@ class _CameraScreenState extends State<CameraScreen> {
       String fileName = _pdfNameController.text.trim();
       if (fileName.isEmpty) {
         final now = DateTime.now();
-        fileName = "Capture_${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}-${now.minute.toString().padLeft(2, '0')}";
+        fileName =
+            "Capture_${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}-${now.minute.toString().padLeft(2, '0')}";
       }
       if (!fileName.toLowerCase().endsWith('.pdf')) {
         fileName += '.pdf';
@@ -817,23 +1283,70 @@ class _CameraScreenState extends State<CameraScreen> {
       final file = File("$dirPath/$fileName");
       await file.writeAsBytes(await pdf.save());
 
+      if (!mounted) return;
       setState(() {
         _capturedImages.clear();
         _pdfNameController.clear();
       });
 
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Saved PDF to ${file.path}')),
-      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Saved PDF to ${file.path}')));
     } catch (e) {
-      print('Error exporting PDF: $e');
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error exporting PDF: $e')),
-      );
+      debugPrint('Error exporting PDF: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error exporting PDF: $e')));
     }
   }
 
+  void _connectToWebSocketFromRtmpUrl(String rtmpUrl) {
+    try {
+      final uri = Uri.parse(rtmpUrl);
+      final ip = uri.host;
+      // Assuming default port 5000 for signaling
+      final wsUrl = 'ws://$ip:5000';
+
+      debugPrint('Connecting to Signaling Server for RTMP control: $wsUrl');
+
+      _webrtcService.onControlMessage = (command, data) {
+        if (command == 'zoom') {
+          double? level = data['level'];
+          if (level != null && _controller != null) {
+            try {
+              _controller!.setZoomLevel(level);
+            } catch (e) {
+              debugPrint('Error setting zoom: $e');
+            }
+          }
+        }
+      };
+
+      _webrtcService.connect(wsUrl, false); // isCaller = false, just listen
+    } catch (e) {
+      debugPrint('Error connecting to WebSocket from RTMP URL: $e');
+    }
+  }
+
+  Future<void> _reinitializeRenderer() async {
+    await _localRenderer.dispose();
+    _localRenderer = RTCVideoRenderer();
+    await _localRenderer.initialize();
+  }
+
   Future<void> _scanQrCode() async {
+    // Dispose local camera before scanning to avoid conflicts
+    if (_controller != null) {
+      await _controller!.dispose();
+      _controller = null;
+    }
+    if (!mounted) return;
+    setState(() {
+      _isInitialized = false;
+    });
+
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
@@ -854,64 +1367,137 @@ class _CameraScreenState extends State<CameraScreen> {
       ),
     );
 
+    if (!mounted) return;
+
     if (result != null && result is String) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Connecting to $result...')),
-        );
-      }
-      
-      // Stop the local camera preview to free up the resource for WebRTC
-      if (_controller != null) {
-        await _controller!.dispose();
-        setState(() {
-          _controller = null;
-        });
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('Connecting to $result...')));
       }
 
-      // Add a small delay to ensure camera is released by MobileScanner and Controller
-      await Future.delayed(const Duration(milliseconds: 500));
+      // Ensure local controller is definitely cleared
+      if (!mounted) return;
+      setState(() {
+        _controller = null;
+        _isInitialized = false;
+      });
 
-      _webrtcService.onError = (error) {
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('Connection Error: $error'),
-              backgroundColor: Colors.red,
-              duration: const Duration(seconds: 5),
-            ),
-          );
-        }
-      };
+      // Add a longer delay to ensure camera is released by MobileScanner
+      // "BufferQueue has been abandoned" errors often mean the previous surface
+      // was destroyed while the camera was still active.
+      await Future.delayed(const Duration(milliseconds: 5000));
 
-      _webrtcService.onIceConnectionStateChange = (state) {
-        if (mounted) {
-          if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
-             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Connected!'),
-                backgroundColor: Colors.green,
+      if (!mounted) return;
+
+      // Enable Wakelock to prevent screen from turning off during streaming
+      WakelockPlus.enable();
+
+      if (result.startsWith('ws://') || result.startsWith('wss://')) {
+        setState(() => _selectedProtocol = StreamProtocol.webrtc);
+
+        // Re-initialize renderer to ensure fresh surface
+        await _reinitializeRenderer();
+
+        _webrtcService.onError = (error) {
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Connection Error: $error'),
+                backgroundColor: Colors.red,
+                duration: const Duration(seconds: 5),
               ),
             );
-          } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed) {
-             ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('Connection Failed'),
+          }
+        };
+
+        _webrtcService.onIceConnectionStateChange = (state) {
+          if (mounted) {
+            if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Connected!'),
+                  backgroundColor: Colors.green,
+                ),
+              );
+            } else if (state ==
+                RTCIceConnectionState.RTCIceConnectionStateFailed) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Connection Failed'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+            }
+          }
+        };
+
+        try {
+          await _webrtcService.connect(result, true);
+
+          if (_webrtcService.localStream != null) {
+            setState(() {
+              _isStreamMode = true;
+              _localRenderer.srcObject = _webrtcService.localStream;
+            });
+            _startFrameExtraction(_webrtcService.localStream!);
+          }
+        } catch (e) {
+          debugPrint('WebRTC Connect Error: $e');
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('WebRTC Error: $e'),
                 backgroundColor: Colors.red,
               ),
             );
           }
         }
-      };
+      } else if (result.startsWith('rtmp://')) {
+        setState(() => _selectedProtocol = StreamProtocol.rtmp);
+        _activeStreamUrl = result;
+        _pendingRtmpResume = false;
 
-      await _webrtcService.connect(result, true);
-      
-      if (_webrtcService.localStream != null) {
-        setState(() {
-          _isWebRTCMode = true;
-          _localRenderer.srcObject = _webrtcService.localStream;
-        });
-        _startFrameExtraction(_webrtcService.localStream!);
+        if (Platform.isAndroid) {
+          // Dispose local camera to free resources before starting HaishinKit
+          if (_controller != null) {
+            await _controller!.dispose();
+            _controller = null;
+          }
+
+          // Wait for camera resources to be fully released by the OS
+          await Future.delayed(const Duration(milliseconds: 500));
+
+          if (!mounted) return;
+
+          // Navigate to the "Transmitting" screen using pushReplacement to avoid keeping the scanner in stack
+          // The new screen will handle starting the RTMP stream in its initialization
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => CameraScreen(connectionUrl: result),
+            ),
+          );
+          return;
+        }
+
+        if (Platform.isWindows) {
+          NativeCameraService().startStream(result);
+          if (mounted) {
+            setState(() {
+              _isStreamMode = true;
+            });
+          }
+          return;
+        }
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('RTMP not supported on this platform'),
+            ),
+          );
+        }
       }
     }
   }
@@ -921,29 +1507,101 @@ class _CameraScreenState extends State<CameraScreen> {
     if (widget.connectionUrl != null) {
       return Scaffold(
         appBar: AppBar(title: const Text('Transmitting')),
-        body: Center(
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              const Text('Transmitting Video...', style: TextStyle(fontSize: 20)),
-              const SizedBox(height: 40),
-              
-              ElevatedButton.icon(
-                onPressed: () {
-                  WakelockPlus.disable();
-                  _webrtcService.disconnect();
-                  Navigator.pop(context);
-                },
-                icon: const Icon(Icons.stop),
-                label: const Text('Stop Transmission'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 32, vertical: 16),
+        body: Stack(
+          children: [
+            // Video Preview
+            Positioned.fill(child: _buildStreamWidget()),
+
+            // Overlay Controls
+            Positioned(
+              bottom: 40,
+              left: 0,
+              right: 0,
+              child: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (Platform.isAndroid &&
+                        !(widget.connectionUrl != null &&
+                            widget.connectionUrl!.startsWith('rtmp://'))) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 20.0),
+                        child: Row(
+                          children: [
+                            const Icon(Icons.zoom_out, color: Colors.white),
+                            Expanded(
+                              child: Slider(
+                                value: _currentZoomLevel,
+                                min: _minAvailableZoom,
+                                max: _maxAvailableZoom,
+                                onChanged: (value) async {
+                                  setState(() {
+                                    _currentZoomLevel = value;
+                                  });
+                                  if (_controller != null) {
+                                    await _controller!.setZoomLevel(value);
+                                  }
+                                  // Also update RTMP zoom if streaming
+                                  if (RtmpService.instance.isStreaming) {
+                                    RtmpService.instance.setZoom(value);
+                                  }
+                                },
+                              ),
+                            ),
+                            const Icon(Icons.zoom_in, color: Colors.white),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                    ],
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 8,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.black54,
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        _selectedProtocol == StreamProtocol.rtmp
+                            ? 'Transmitting via RTMP'
+                            : 'Transmitting via WebRTC',
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+                    ElevatedButton.icon(
+                      onPressed: () async {
+                        WakelockPlus.disable();
+                        await _stopMobileRtmpStreaming();
+                        if (Platform.isAndroid) {
+                          await RtmpService.instance.stopStream();
+                        }
+                        _webrtcService.disconnect();
+                        _clearActiveStreamTracking();
+                        if (!context.mounted) return;
+                        Navigator.pop(context);
+                      },
+                      icon: const Icon(Icons.stop),
+                      label: const Text('Stop Transmission'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.red,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 32,
+                          vertical: 16,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       );
     }
@@ -960,6 +1618,17 @@ class _CameraScreenState extends State<CameraScreen> {
           },
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.home),
+            tooltip: 'Back to Home',
+            onPressed: () async {
+              await _stopMobileRtmpStreaming();
+              _webrtcService.disconnect();
+              _clearActiveStreamTracking();
+              if (!context.mounted) return;
+              Navigator.pop(context);
+            },
+          ),
           if (!Platform.isWindows)
             IconButton(
               icon: const Icon(Icons.qr_code_scanner),
@@ -993,53 +1662,86 @@ class _CameraScreenState extends State<CameraScreen> {
                                   // Calculate new zoom based on scroll direction
                                   // Scroll down (positive) -> Zoom out
                                   // Scroll up (negative) -> Zoom in
-                                  double scaleFactor = event.scrollDelta.dy > 0 ? 0.9 : 1.1;
-                                  
+                                  double scaleFactor = event.scrollDelta.dy > 0
+                                      ? 0.9
+                                      : 1.1;
+
                                   // Calculate min zoom: 1.0 normally, or locked zoom if override is on
-                                  double minZoom = _isDigitalZoomOverride ? _lockedPhoneZoom : 1.0;
-                                  double newTotalZoom = (_currentZoom * scaleFactor).clamp(minZoom, 100.0);
-                                  
+                                  double minZoom = _isDigitalZoomOverride
+                                      ? _lockedPhoneZoom
+                                      : 1.0;
+                                  double newTotalZoom =
+                                      (_currentZoom * scaleFactor).clamp(
+                                        minZoom,
+                                        100.0,
+                                      );
+
                                   // Calculate visual scales for offset adjustment
                                   double oldVisualZoom;
                                   double newVisualZoom;
-                                  
+
                                   if (_isDigitalZoomOverride) {
-                                    oldVisualZoom = _currentZoom / _lockedPhoneZoom;
-                                    newVisualZoom = newTotalZoom / _lockedPhoneZoom;
+                                    oldVisualZoom =
+                                        _currentZoom / _lockedPhoneZoom;
+                                    newVisualZoom =
+                                        newTotalZoom / _lockedPhoneZoom;
                                   } else {
-                                    oldVisualZoom = _currentZoom > _phoneMaxZoom ? _currentZoom / _phoneMaxZoom : 1.0;
-                                    newVisualZoom = newTotalZoom > _phoneMaxZoom ? newTotalZoom / _phoneMaxZoom : 1.0;
+                                    oldVisualZoom = _currentZoom > _phoneMaxZoom
+                                        ? _currentZoom / _phoneMaxZoom
+                                        : 1.0;
+                                    newVisualZoom = newTotalZoom > _phoneMaxZoom
+                                        ? newTotalZoom / _phoneMaxZoom
+                                        : 1.0;
                                   }
-                                  
-                                  double visualScaleDelta = newVisualZoom / oldVisualZoom;
+
+                                  double visualScaleDelta =
+                                      newVisualZoom / oldVisualZoom;
 
                                   setState(() {
                                     _currentZoom = newTotalZoom;
-                                    
+
                                     if (newVisualZoom <= 1.0) {
                                       _viewOffset = Offset.zero;
                                     } else {
                                       // Apply Zoom around cursor position
                                       // Convert cursor position to be relative to center
-                                      Offset center = Offset(constraints.maxWidth / 2, constraints.maxHeight / 2);
-                                      Offset focalPointFromCenter = event.localPosition - center;
-                                      
+                                      Offset center = Offset(
+                                        constraints.maxWidth / 2,
+                                        constraints.maxHeight / 2,
+                                      );
+                                      Offset focalPointFromCenter =
+                                          event.localPosition - center;
+
                                       // Adjust offset to keep focal point stable during zoom
-                                      _viewOffset -= (focalPointFromCenter - _viewOffset) * (visualScaleDelta - 1);
-                                      
+                                      _viewOffset -=
+                                          (focalPointFromCenter - _viewOffset) *
+                                          (visualScaleDelta - 1);
+
                                       // Clamp Offset
-                                      double maxDx = (constraints.maxWidth * newVisualZoom - constraints.maxWidth) / 2;
-                                      double maxDy = (constraints.maxHeight * newVisualZoom - constraints.maxHeight) / 2;
+                                      double maxDx =
+                                          (constraints.maxWidth *
+                                                  newVisualZoom -
+                                              constraints.maxWidth) /
+                                          2;
+                                      double maxDy =
+                                          (constraints.maxHeight *
+                                                  newVisualZoom -
+                                              constraints.maxHeight) /
+                                          2;
                                       _viewOffset = Offset(
                                         _viewOffset.dx.clamp(-maxDx, maxDx),
                                         _viewOffset.dy.clamp(-maxDy, maxDy),
                                       );
                                     }
-                                    
+
                                     // Send command to phone (clamped)
-                                    if (!_isDigitalZoomOverride && _isWebRTCMode) {
-                                      _sendZoomCommand(_currentZoom.clamp(1.0, _phoneMaxZoom));
-                                    } else if (_isDigitalZoomOverride && _isWebRTCMode) {
+                                    if (!_isDigitalZoomOverride &&
+                                        _isStreamMode) {
+                                      _sendZoomCommand(
+                                        _currentZoom.clamp(1.0, _phoneMaxZoom),
+                                      );
+                                    } else if (_isDigitalZoomOverride &&
+                                        _isStreamMode) {
                                       // Keep phone locked at the override level
                                       _sendZoomCommand(_lockedPhoneZoom);
                                     }
@@ -1055,61 +1757,95 @@ class _CameraScreenState extends State<CameraScreen> {
                                   if (_lastFocalPoint == null) return;
 
                                   // 1. Calculate Zoom
-                                  double scaleDelta = details.scale / _lastScale;
+                                  double scaleDelta =
+                                      details.scale / _lastScale;
                                   _lastScale = details.scale;
-                                  
+
                                   // Calculate min zoom: 1.0 normally, or locked zoom if override is on
-                                  double minZoom = _isDigitalZoomOverride ? _lockedPhoneZoom : 1.0;
-                                  double newTotalZoom = (_currentZoom * scaleDelta).clamp(minZoom, 100.0);
-                                  
+                                  double minZoom = _isDigitalZoomOverride
+                                      ? _lockedPhoneZoom
+                                      : 1.0;
+                                  double newTotalZoom =
+                                      (_currentZoom * scaleDelta).clamp(
+                                        minZoom,
+                                        100.0,
+                                      );
+
                                   // Calculate visual scales for offset adjustment
                                   double oldVisualZoom;
                                   double newVisualZoom;
-                                  
+
                                   if (_isDigitalZoomOverride) {
-                                    oldVisualZoom = _currentZoom / _lockedPhoneZoom;
-                                    newVisualZoom = newTotalZoom / _lockedPhoneZoom;
+                                    oldVisualZoom =
+                                        _currentZoom / _lockedPhoneZoom;
+                                    newVisualZoom =
+                                        newTotalZoom / _lockedPhoneZoom;
                                   } else {
-                                    oldVisualZoom = _currentZoom > _phoneMaxZoom ? _currentZoom / _phoneMaxZoom : 1.0;
-                                    newVisualZoom = newTotalZoom > _phoneMaxZoom ? newTotalZoom / _phoneMaxZoom : 1.0;
+                                    oldVisualZoom = _currentZoom > _phoneMaxZoom
+                                        ? _currentZoom / _phoneMaxZoom
+                                        : 1.0;
+                                    newVisualZoom = newTotalZoom > _phoneMaxZoom
+                                        ? newTotalZoom / _phoneMaxZoom
+                                        : 1.0;
                                   }
-                                  
-                                  double visualScaleDelta = newVisualZoom / oldVisualZoom;
+
+                                  double visualScaleDelta =
+                                      newVisualZoom / oldVisualZoom;
 
                                   // 2. Calculate Pan
-                                  Offset focalPointDelta = details.localFocalPoint - _lastFocalPoint!;
+                                  Offset focalPointDelta =
+                                      details.localFocalPoint -
+                                      _lastFocalPoint!;
                                   _lastFocalPoint = details.localFocalPoint;
 
                                   setState(() {
                                     _currentZoom = newTotalZoom;
-                                    
+
                                     if (newVisualZoom <= 1.0) {
                                       _viewOffset = Offset.zero;
                                     } else {
                                       // Apply Pan
                                       _viewOffset += focalPointDelta;
-                                      
+
                                       // Apply Zoom around focal point
                                       // Convert focal point to be relative to center
-                                      Offset center = Offset(constraints.maxWidth / 2, constraints.maxHeight / 2);
-                                      Offset focalPointFromCenter = details.localFocalPoint - center;
-                                      
+                                      Offset center = Offset(
+                                        constraints.maxWidth / 2,
+                                        constraints.maxHeight / 2,
+                                      );
+                                      Offset focalPointFromCenter =
+                                          details.localFocalPoint - center;
+
                                       // Adjust offset to keep focal point stable during zoom
-                                      _viewOffset -= (focalPointFromCenter - _viewOffset) * (visualScaleDelta - 1);
-                                      
+                                      _viewOffset -=
+                                          (focalPointFromCenter - _viewOffset) *
+                                          (visualScaleDelta - 1);
+
                                       // Clamp Offset
-                                      double maxDx = (constraints.maxWidth * newVisualZoom - constraints.maxWidth) / 2;
-                                      double maxDy = (constraints.maxHeight * newVisualZoom - constraints.maxHeight) / 2;
+                                      double maxDx =
+                                          (constraints.maxWidth *
+                                                  newVisualZoom -
+                                              constraints.maxWidth) /
+                                          2;
+                                      double maxDy =
+                                          (constraints.maxHeight *
+                                                  newVisualZoom -
+                                              constraints.maxHeight) /
+                                          2;
                                       _viewOffset = Offset(
                                         _viewOffset.dx.clamp(-maxDx, maxDx),
                                         _viewOffset.dy.clamp(-maxDy, maxDy),
                                       );
                                     }
-                                    
+
                                     // Send command to phone (clamped)
-                                    if (!_isDigitalZoomOverride && _isWebRTCMode) {
-                                      _sendZoomCommand(_currentZoom.clamp(1.0, _phoneMaxZoom));
-                                    } else if (_isDigitalZoomOverride && _isWebRTCMode) {
+                                    if (!_isDigitalZoomOverride &&
+                                        _isStreamMode) {
+                                      _sendZoomCommand(
+                                        _currentZoom.clamp(1.0, _phoneMaxZoom),
+                                      );
+                                    } else if (_isDigitalZoomOverride &&
+                                        _isStreamMode) {
                                       // Keep phone locked at the override level
                                       _sendZoomCommand(_lockedPhoneZoom);
                                     }
@@ -1119,57 +1855,96 @@ class _CameraScreenState extends State<CameraScreen> {
                                   child: LayoutBuilder(
                                     builder: (context, _) {
                                       // Calculate effective zooms based on override mode
-                                      double effectivePhoneZoom = _isDigitalZoomOverride ? _lockedPhoneZoom : _currentZoom.clamp(1.0, _phoneMaxZoom);
-                                      double effectiveVisualZoom = _currentZoom / effectivePhoneZoom;
+                                      double effectivePhoneZoom =
+                                          _isDigitalZoomOverride
+                                          ? _lockedPhoneZoom
+                                          : _currentZoom.clamp(
+                                              1.0,
+                                              _phoneMaxZoom,
+                                            );
+                                      double effectiveVisualZoom =
+                                          _currentZoom / effectivePhoneZoom;
 
                                       return Transform(
                                         transform: Matrix4.identity()
-                                          ..translate(_viewOffset.dx, _viewOffset.dy)
-                                          ..scale(effectiveVisualZoom),
+                                          ..translateByVector3(
+                                            vm.Vector3(
+                                              _viewOffset.dx,
+                                              _viewOffset.dy,
+                                              0,
+                                            ),
+                                          )
+                                          ..scaleByVector3(
+                                            vm.Vector3(
+                                              effectiveVisualZoom,
+                                              effectiveVisualZoom,
+                                              1,
+                                            ),
+                                          ),
                                         alignment: Alignment.center,
-                                        child: _isWebRTCMode 
-                                           ? Stack(
-                                               children: [
-                                                 // Hidden RepaintBoundary for capture
-                                                 Opacity(
-                                                   opacity: 1.0, 
-                                                   child: RepaintBoundary(
-                                                     key: _videoViewKey,
-                                                     child: RTCVideoView(_localRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain),
-                                                   ),
-                                                 ),
-                                                 // Processed overlay
-                                                 ValueListenableBuilder<Uint8List?>(
-                                                   valueListenable: _processedImageNotifier,
-                                                   builder: (context, processedImage, child) {
-                                                     bool hasActiveFilters = _filters.any((f) => f.isActive);
-                                                     if (processedImage != null && hasActiveFilters) {
-                                                       return Opacity(
-                                                         opacity: 0.995,
-                                                         child: Image.memory(
-                                                           processedImage,
-                                                           gaplessPlayback: true,
-                                                           fit: BoxFit.contain,
-                                                           width: double.infinity,
-                                                           height: double.infinity,
-                                                         ),
-                                                       );
-                                                     }
-                                                     return const SizedBox.shrink();
-                                                   },
-                                                 ),
-                                               ],
-                                             )
-                                           : const NativeCameraView(),
+                                        child: _isStreamMode
+                                            ? Stack(
+                                                children: [
+                                                  // Hidden RepaintBoundary for capture
+                                                  Opacity(
+                                                    opacity: 1.0,
+                                                    child: RepaintBoundary(
+                                                      key: _videoViewKey,
+                                                      child:
+                                                          _buildStreamWidget(),
+                                                    ),
+                                                  ),
+                                                  // Processed overlay
+                                                  ValueListenableBuilder<
+                                                    Uint8List?
+                                                  >(
+                                                    valueListenable:
+                                                        _processedImageNotifier,
+                                                    builder:
+                                                        (
+                                                          context,
+                                                          processedImage,
+                                                          child,
+                                                        ) {
+                                                          bool
+                                                          hasActiveFilters =
+                                                              _filters.any(
+                                                                (f) =>
+                                                                    f.isActive,
+                                                              );
+                                                          if (processedImage !=
+                                                                  null &&
+                                                              hasActiveFilters) {
+                                                            return Opacity(
+                                                              opacity: 0.995,
+                                                              child: Image.memory(
+                                                                processedImage,
+                                                                gaplessPlayback:
+                                                                    true,
+                                                                fit: BoxFit
+                                                                    .contain,
+                                                                width: double
+                                                                    .infinity,
+                                                                height: double
+                                                                    .infinity,
+                                                              ),
+                                                            );
+                                                          }
+                                                          return const SizedBox.shrink();
+                                                        },
+                                                  ),
+                                                ],
+                                              )
+                                            : const NativeCameraView(),
                                       );
-                                    }
+                                    },
                                   ),
                                 ),
                               ),
                             );
-                          }
+                          },
                         )
-                      else if (_isInitialized && _controller != null)
+                      else if (_isInitialized)
                         InteractiveViewer(
                           transformationController: _transformationController,
                           minScale: 1.0,
@@ -1177,7 +1952,9 @@ class _CameraScreenState extends State<CameraScreen> {
                           child: ValueListenableBuilder<Uint8List?>(
                             valueListenable: _processedImageNotifier,
                             builder: (context, processedImage, child) {
-                              bool hasActiveFilters = _filters.any((f) => f.isActive);
+                              bool hasActiveFilters = _filters.any(
+                                (f) => f.isActive,
+                              );
                               if (processedImage != null && hasActiveFilters) {
                                 return Image.memory(
                                   processedImage,
@@ -1185,17 +1962,20 @@ class _CameraScreenState extends State<CameraScreen> {
                                   fit: BoxFit.contain,
                                 );
                               }
-                              return CameraPreview(_controller!);
+                              if (Platform.isWindows && _controller != null) {
+                                return c.CameraPreview(_controller!);
+                              }
+                              return const SizedBox.shrink();
                             },
                           ),
                         )
-                      else if (_localRenderer.srcObject != null)
-                         InteractiveViewer(
-                           transformationController: _transformationController,
-                           minScale: 1.0,
-                           maxScale: 50.0,
-                           child: RTCVideoView(_localRenderer, objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain),
-                         )
+                      else if (_isStreamMode)
+                        InteractiveViewer(
+                          transformationController: _transformationController,
+                          minScale: 1.0,
+                          maxScale: 50.0,
+                          child: _buildStreamWidget(),
+                        )
                       else
                         Center(
                           child: Column(
@@ -1203,12 +1983,17 @@ class _CameraScreenState extends State<CameraScreen> {
                             children: [
                               if (_cameras.isEmpty && !Platform.isWindows)
                                 const Text('No cameras found')
-                              else if (_controller == null && !Platform.isWindows)
+                              else if (_controller == null &&
+                                  !Platform.isWindows)
                                 const CircularProgressIndicator()
                               else
                                 Column(
                                   children: [
-                                    const Icon(Icons.error_outline, size: 48, color: Colors.red),
+                                    const Icon(
+                                      Icons.error_outline,
+                                      size: 48,
+                                      color: Colors.red,
+                                    ),
                                     const SizedBox(height: 16),
                                     const Text('Camera failed to initialize'),
                                     if (!Platform.isWindows)
@@ -1221,7 +2006,7 @@ class _CameraScreenState extends State<CameraScreen> {
                             ],
                           ),
                         ),
-                        
+
                       Positioned(
                         bottom: 20,
                         left: 0,
@@ -1233,42 +2018,66 @@ class _CameraScreenState extends State<CameraScreen> {
                               heroTag: 'switch_camera',
                               onPressed: _switchCamera,
                               backgroundColor: Colors.black54,
-                              child: const Icon(Icons.switch_camera, color: Colors.white),
+                              child: const Icon(
+                                Icons.switch_camera,
+                                color: Colors.white,
+                              ),
                             ),
                             // Add the Pan/Digital Zoom Override Button
-                            if (_isWebRTCMode)
+                            if (_isStreamMode)
                               FloatingActionButton(
                                 heroTag: 'pan_mode',
                                 onPressed: () {
                                   setState(() {
-                                    _isDigitalZoomOverride = !_isDigitalZoomOverride;
+                                    _isDigitalZoomOverride =
+                                        !_isDigitalZoomOverride;
                                     if (_isDigitalZoomOverride) {
                                       // Lock the phone zoom at the current level
-                                      _lockedPhoneZoom = _currentZoom.clamp(1.0, _phoneMaxZoom);
+                                      _lockedPhoneZoom = _currentZoom.clamp(
+                                        1.0,
+                                        _phoneMaxZoom,
+                                      );
                                       // We don't reset _currentZoom, we just continue from here
                                       // Ensure we send the lock command once
                                       _sendZoomCommand(_lockedPhoneZoom);
                                     } else {
                                       // Restore phone zoom control
-                                      _sendZoomCommand(_currentZoom.clamp(1.0, _phoneMaxZoom));
+                                      _sendZoomCommand(
+                                        _currentZoom.clamp(1.0, _phoneMaxZoom),
+                                      );
                                     }
                                   });
                                 },
-                                backgroundColor: _isDigitalZoomOverride ? Colors.blue : Colors.black54,
-                                child: Icon(_isDigitalZoomOverride ? Icons.lock : Icons.lock_open, color: Colors.white),
+                                backgroundColor: _isDigitalZoomOverride
+                                    ? Colors.blue
+                                    : Colors.black54,
+                                child: Icon(
+                                  _isDigitalZoomOverride
+                                      ? Icons.lock
+                                      : Icons.lock_open,
+                                  color: Colors.white,
+                                ),
                               ),
                             // Removed filter cycle button
                             FloatingActionButton(
                               heroTag: 'max_quality',
                               onPressed: _toggleQuality,
-                              backgroundColor: _isHighQuality ? Colors.blue : Colors.black54,
-                              child: const Icon(Icons.high_quality, color: Colors.white),
+                              backgroundColor: _isHighQuality
+                                  ? Colors.blue
+                                  : Colors.black54,
+                              child: const Icon(
+                                Icons.high_quality,
+                                color: Colors.white,
+                              ),
                             ),
                             FloatingActionButton(
                               heroTag: 'capture_frame',
                               onPressed: _captureFrame,
                               backgroundColor: Colors.red,
-                              child: const Icon(Icons.camera_alt, color: Colors.white),
+                              child: const Icon(
+                                Icons.camera_alt,
+                                color: Colors.white,
+                              ),
                             ),
                           ],
                         ),
@@ -1313,269 +2122,59 @@ class _CameraScreenState extends State<CameraScreen> {
           ),
 
           // Left Sidebar (Filters)
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            top: 0,
-            bottom: 0,
-            left: _isLeftSidebarOpen ? 0 : -300,
-            width: 300,
-            child: GestureDetector(
-              onHorizontalDragEnd: (details) {
-                if (details.primaryVelocity! < -300) {
-                  setState(() => _isLeftSidebarOpen = false);
+          FilterSidebar(
+            isOpen: _isLeftSidebarOpen,
+            onClose: () => setState(() => _isLeftSidebarOpen = false),
+            filters: _filters,
+            onReorder: (oldIndex, newIndex) {
+              setState(() {
+                if (oldIndex < newIndex) {
+                  newIndex -= 1;
                 }
-              },
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.5),
-                    blurRadius: 5,
-                    offset: const Offset(2, 0),
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      const Text('Filters', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
-                      IconButton(
-                        icon: const Icon(Icons.close, color: Colors.white),
-                        onPressed: () => setState(() => _isLeftSidebarOpen = false),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 10),
-                  const Text(
-                    'Drag to reorder. Top filters apply first.',
-                    style: TextStyle(color: Colors.white54, fontSize: 12),
-                  ),
-                  const SizedBox(height: 10),
-                  Expanded(
-                    child: ReorderableListView(
-                      onReorder: (oldIndex, newIndex) {
-                        setState(() {
-                          if (oldIndex < newIndex) {
-                            newIndex -= 1;
-                          }
-                          final item = _filters.removeAt(oldIndex);
-                          _filters.insert(newIndex, item);
-                          _updateFilters();
-                        });
-                      },
-                      children: [
-                        for (int index = 0; index < _filters.length; index++)
-                          Card(
-                            key: ValueKey(_filters[index].id),
-                            color: Colors.grey[900],
-                            child: SwitchListTile(
-                              title: Text(_filters[index].name, style: const TextStyle(color: Colors.white)),
-                              value: _filters[index].isActive,
-                              onChanged: (bool value) {
-                                setState(() {
-                                  _filters[index].isActive = value;
-                                  _updateFilters();
-                                });
-                              },
-                              secondary: const Icon(Icons.drag_handle, color: Colors.white54),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            ),
+                final item = _filters.removeAt(oldIndex);
+                _filters.insert(newIndex, item);
+                _updateFilters();
+              });
+            },
+            onFilterToggle: (index, value) {
+              setState(() {
+                _filters[index].isActive = value;
+                _updateFilters();
+              });
+            },
           ),
 
           // Right Sidebar (Captured Images)
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 300),
-            top: 0,
-            bottom: 0,
-            right: _isSidebarOpen ? 0 : (_isGalleryFullScreen ? -MediaQuery.of(context).size.width : -350),
-            width: _isGalleryFullScreen ? MediaQuery.of(context).size.width : 350,
-            child: GestureDetector(
-              onHorizontalDragEnd: (details) {
-                if (details.primaryVelocity! < -300) { // Swipe Left
-                  if (!_isGalleryFullScreen) {
-                    setState(() {
-                      _isGalleryFullScreen = true;
-                    });
-                  }
-                } else if (details.primaryVelocity! > 300) { // Swipe Right
-                  if (_isGalleryFullScreen) {
-                    setState(() {
-                      _isGalleryFullScreen = false;
-                    });
-                  } else {
-                    setState(() {
-                      _isSidebarOpen = false;
-                    });
-                  }
-                }
-              },
-              child: Container(
-                decoration: BoxDecoration(
-                  color: Colors.black,
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.5),
-                      blurRadius: 5,
-                      offset: const Offset(-2, 0),
-                    ),
-                  ],
-                ),
-                padding: const EdgeInsets.all(16),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Text('Captured Images', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.white)),
-                        Row(
-                          children: [
-                            if (_isGalleryFullScreen && _capturedImages.isNotEmpty)
-                              IconButton(
-                                icon: const Icon(Icons.edit, color: Colors.white),
-                                onPressed: _openEditor,
-                              ),
-                            IconButton(
-                              icon: Icon(_isGalleryFullScreen ? Icons.fullscreen_exit : Icons.close, color: Colors.white),
-                              onPressed: () {
-                                if (_isGalleryFullScreen) {
-                                  setState(() => _isGalleryFullScreen = false);
-                                } else {
-                                  setState(() => _isSidebarOpen = false);
-                                }
-                              },
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                  const SizedBox(height: 10),
-                  Expanded(
-                    child: _capturedImages.isEmpty
-                        ? const Center(child: Text('No images captured', style: TextStyle(color: Colors.white70)))
-                        : _isGalleryFullScreen
-                            ? PageView.builder(
-                                scrollDirection: Axis.vertical,
-                                itemCount: _capturedImages.length,
-                                onPageChanged: (index) {
-                                  setState(() {
-                                    _currentGalleryIndex = index;
-                                  });
-                                },
-                                itemBuilder: (context, index) {
-                                  final item = _capturedImages[index];
-                                  return InteractiveViewer(
-                                    minScale: 1.0,
-                                    maxScale: 5.0,
-                                    child: Center(
-                                      child: Image.memory(
-                                        item.bytes,
-                                        fit: BoxFit.contain,
-                                      ),
-                                    ),
-                                  );
-                                },
-                              )
-                            : ListView.builder(
-                                itemCount: _capturedImages.length,
-                                itemBuilder: (context, index) {
-                                  final item = _capturedImages[index];
-                                  return Card(
-                                color: Colors.blue[900],
-                                margin: const EdgeInsets.only(bottom: 8),
-                                child: ListTile(
-                                  contentPadding: const EdgeInsets.all(8),
-                                  leading: Image.memory(
-                                    item.bytes,
-                                    width: 60,
-                                    height: 60,
-                                    fit: BoxFit.cover,
-                                  ),
-                                  title: Text('Image ${index + 1}', style: const TextStyle(color: Colors.white)),
-                                  trailing: IconButton(
-                                    icon: const Icon(Icons.delete, color: Colors.redAccent),
-                                    onPressed: () {
-                                      setState(() {
-                                        _capturedImages.removeAt(index);
-                                      });
-                                    },
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
-                  ),
-                  if (!_isGalleryFullScreen) ...[
-                  const Divider(thickness: 1, color: Colors.white24),
-                  const Text('PDF Settings', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: Colors.white)),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _pdfNameController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: const InputDecoration(
-                      labelText: 'File Name',
-                      labelStyle: TextStyle(color: Colors.white70),
-                      hintText: 'Default: Capture_YYYY-MM-DD_HH-MM',
-                      hintStyle: TextStyle(color: Colors.white30),
-                      enabledBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
-                      focusedBorder: OutlineInputBorder(borderSide: BorderSide(color: Colors.blue)),
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: _pdfPathController,
-                    style: const TextStyle(color: Colors.white),
-                    decoration: InputDecoration(
-                      labelText: 'Save Directory',
-                      labelStyle: const TextStyle(color: Colors.white70),
-                      enabledBorder: const OutlineInputBorder(borderSide: BorderSide(color: Colors.white30)),
-                      focusedBorder: const OutlineInputBorder(borderSide: BorderSide(color: Colors.blue)),
-                      isDense: true,
-                      suffixIcon: IconButton(
-                        icon: const Icon(Icons.more_horiz, color: Colors.white),
-                        onPressed: () async {
-                          String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
-                          if (selectedDirectory != null) {
-                            setState(() {
-                              _pdfPathController.text = selectedDirectory;
-                            });
-                          }
-                        },
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  SizedBox(
-                    width: double.infinity,
-                    height: 50,
-                    child: ElevatedButton.icon(
-                      onPressed: _capturedImages.isNotEmpty ? _exportPdf : null,
-                      icon: const Icon(Icons.save_alt),
-                      label: const Text('Export PDF'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        foregroundColor: Colors.white,
-                      ),
-                    ),
-                  ),
-                  ],
-                ],
-              ),
-            ),
-          ),
+          GallerySidebar(
+            isOpen: _isSidebarOpen,
+            isFullScreen: _isGalleryFullScreen,
+            capturedImages: _capturedImages,
+            onClose: () => setState(() => _isSidebarOpen = false),
+            onToggleFullScreen: () =>
+                setState(() => _isGalleryFullScreen = !_isGalleryFullScreen),
+            onOpenEditor: _openEditor,
+            onDeleteImage: (index) {
+              setState(() {
+                _capturedImages.removeAt(index);
+              });
+            },
+            onPageChanged: (index) {
+              setState(() {
+                _currentGalleryIndex = index;
+              });
+            },
+            pdfNameController: _pdfNameController,
+            pdfPathController: _pdfPathController,
+            onExportPdf: _exportPdf,
+            onSelectDirectory: () async {
+              String? selectedDirectory = await FilePicker.platform
+                  .getDirectoryPath();
+              if (selectedDirectory != null) {
+                setState(() {
+                  _pdfPathController.text = selectedDirectory;
+                });
+              }
+            },
           ),
         ],
       ),

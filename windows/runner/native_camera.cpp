@@ -24,6 +24,7 @@ NativeCamera::NativeCamera(flutter::TextureRegistrar* texture_registrar)
         }));
 
     texture_id_ = texture_registrar_->RegisterTexture(texture_variant_.get());
+    std::cout << "NativeCamera initialized. Texture ID: " << texture_id_ << std::endl;
     flutter_pixel_buffer_ = std::make_unique<FlutterDesktopPixelBuffer>();
     flutter_pixel_buffer_->width = 0;
     flutter_pixel_buffer_->height = 0;
@@ -38,7 +39,7 @@ NativeCamera::~NativeCamera() {
 }
 
 void NativeCamera::Start() {
-    if (is_running_) return;
+    if (is_running_ && !is_stream_) return;
 
     // Clear any stale frame from previous sessions to avoid ghosting
     {
@@ -56,6 +57,21 @@ void NativeCamera::Start() {
     }
 
     is_running_ = true;
+    is_stream_ = false;
+    restart_requested_ = false;
+    capture_thread_ = std::thread(&NativeCamera::CameraThreadLoop, this);
+}
+
+void NativeCamera::StartStream(const char* url) {
+    if (is_running_ && is_stream_ && stream_url_ == url) return;
+
+    std::cout << "StartStream requested. URL: " << url << std::endl;
+
+    Stop(); // Stop existing if any
+
+    stream_url_ = url;
+    is_running_ = true;
+    is_stream_ = true;
     restart_requested_ = false;
     capture_thread_ = std::thread(&NativeCamera::CameraThreadLoop, this);
 }
@@ -165,37 +181,49 @@ void NativeCamera::CameraThreadLoop() {
         if (needs_open) {
             needs_open = false;
             
-            // Always prioritize DirectShow (DSHOW) for stability.
-            // MSMF (Media Foundation) can cause freezes with some external cameras
-            // and the enumeration order might differ from Flutter's.
-            // DSHOW is generally more robust for hot-plugging and switching.
-            
-            std::cout << "Opening camera " << camera_index_ << " with DirectShow..." << std::endl;
-            capture_.open(camera_index_, cv::CAP_DSHOW);
+            if (is_stream_) {
+                std::cout << "Opening stream " << stream_url_ << "..." << std::endl;
+                capture_.open(stream_url_);
+                if (capture_.isOpened()) {
+                    std::cout << "Stream opened successfully." << std::endl;
+                } else {
+                    std::cerr << "Failed to open stream: " << stream_url_ << std::endl;
+                }
+            } else {
+                // Always prioritize DirectShow (DSHOW) for stability.
+                // MSMF (Media Foundation) can cause freezes with some external cameras
+                // and the enumeration order might differ from Flutter's.
+                // DSHOW is generally more robust for hot-plugging and switching.
+                
+                std::cout << "Opening camera " << camera_index_ << " with DirectShow..." << std::endl;
+                capture_.open(camera_index_, cv::CAP_DSHOW);
 
-            if (!capture_.isOpened()) {
-                std::cout << "DirectShow failed for camera " << camera_index_ << ", trying MSMF..." << std::endl;
-                capture_.open(camera_index_, cv::CAP_MSMF); 
-            }
+                if (!capture_.isOpened()) {
+                    std::cout << "DirectShow failed for camera " << camera_index_ << ", trying MSMF..." << std::endl;
+                    capture_.open(camera_index_, cv::CAP_MSMF); 
+                }
 
-            if (!capture_.isOpened()) {
-                // If failed, try looping back to 0 (legacy behavior for SwitchCamera)
-                if (camera_index_ > 0) {
-                     std::cout << "Camera " << camera_index_ << " failed, trying 0..." << std::endl;
-                     camera_index_ = 0;
-                     capture_.open(camera_index_, cv::CAP_DSHOW);
-                     if (!capture_.isOpened()) {
-                         capture_.open(camera_index_, cv::CAP_MSMF);
-                     }
+                if (!capture_.isOpened()) {
+                    // If failed, try looping back to 0 (legacy behavior for SwitchCamera)
+                    if (camera_index_ > 0) {
+                        std::cout << "Camera " << camera_index_ << " failed, trying 0..." << std::endl;
+                        camera_index_ = 0;
+                        capture_.open(camera_index_, cv::CAP_DSHOW);
+                        if (!capture_.isOpened()) {
+                            capture_.open(camera_index_, cv::CAP_MSMF);
+                        }
+                    }
+                }
+
+                if (capture_.isOpened()) {
+                    // Set resolution
+                    capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
+                    capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
                 }
             }
 
-            if (capture_.isOpened()) {
-                // Set resolution
-                capture_.set(cv::CAP_PROP_FRAME_WIDTH, target_width_);
-                capture_.set(cv::CAP_PROP_FRAME_HEIGHT, target_height_);
-            } else {
-                std::cerr << "Failed to open camera " << camera_index_ << std::endl;
+            if (!capture_.isOpened()) {
+                std::cerr << "Failed to open " << (is_stream_ ? "stream" : "camera") << std::endl;
                 // Sleep to avoid busy loop if camera fails
                 std::this_thread::sleep_for(std::chrono::milliseconds(100));
                 continue;
@@ -210,6 +238,14 @@ void NativeCamera::CameraThreadLoop() {
         cv::Mat frame;
         if (capture_.read(frame)) {
             if (!frame.empty()) {
+                // Rotate if vertical (portrait) to make it horizontal (landscape)
+                if (is_stream_ && frame.rows > frame.cols) {
+                    // std::cout << "Rotating frame..." << std::endl;
+                    cv::Mat rotated;
+                    cv::rotate(frame, rotated, cv::ROTATE_90_CLOCKWISE);
+                    frame = rotated;
+                }
+
                 ProcessFrame(frame);
 
                 {
@@ -220,8 +256,11 @@ void NativeCamera::CameraThreadLoop() {
                 
                 // Notify Flutter that a new frame is available
                 texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+            } else {
+                 std::cerr << "Captured empty frame." << std::endl;
             }
         } else {
+             // std::cerr << "Failed to read frame." << std::endl;
              std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
@@ -257,7 +296,10 @@ const FlutterDesktopPixelBuffer* NativeCamera::CopyPixelBuffer(size_t width, siz
         pixel_buffer_data_.resize(current_frame_.total() * 4);
     }
     
-    memcpy(pixel_buffer_data_.data(), current_frame_.data, pixel_buffer_data_.size());
+    // Use cv::Mat to handle potential stride/padding issues during copy
+    // This ensures we copy row-by-row correctly even if the source is not continuous
+    cv::Mat wrapper(current_frame_.rows, current_frame_.cols, CV_8UC4, pixel_buffer_data_.data());
+    current_frame_.copyTo(wrapper);
 
     flutter_pixel_buffer_->buffer = pixel_buffer_data_.data();
     flutter_pixel_buffer_->width = current_frame_.cols;
@@ -432,6 +474,10 @@ extern "C" {
 
     __declspec(dllexport) void StartCamera() {
         if (g_native_camera) g_native_camera->Start();
+    }
+
+    __declspec(dllexport) void StartStream(const char* url) {
+        if (g_native_camera) g_native_camera->StartStream(url);
     }
 
     __declspec(dllexport) void StopCamera() {

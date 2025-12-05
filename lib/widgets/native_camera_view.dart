@@ -29,7 +29,7 @@ class _NativeCameraViewState extends State<NativeCameraView> {
       });
       _service.start();
     } else {
-      print("Failed to get texture ID");
+      debugPrint("Failed to get texture ID");
     }
   }
 
