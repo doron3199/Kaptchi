@@ -60,6 +60,7 @@ void NativeCamera::Start() {
     is_stream_ = false;
     restart_requested_ = false;
     capture_thread_ = std::thread(&NativeCamera::CameraThreadLoop, this);
+    processing_thread_ = std::thread(&NativeCamera::ProcessingThreadLoop, this);
 }
 
 void NativeCamera::StartStream(const char* url) {
@@ -74,12 +75,24 @@ void NativeCamera::StartStream(const char* url) {
     is_stream_ = true;
     restart_requested_ = false;
     capture_thread_ = std::thread(&NativeCamera::CameraThreadLoop, this);
+    processing_thread_ = std::thread(&NativeCamera::ProcessingThreadLoop, this);
 }
 
 void NativeCamera::Stop() {
     is_running_ = false;
+    
+    // Wake up processing thread so it can exit
+    {
+        std::lock_guard<std::mutex> lock(processing_mutex_);
+        has_new_frame_ = true; // Force wake
+    }
+    processing_cv_.notify_all();
+
     if (capture_thread_.joinable()) {
         capture_thread_.join();
+    }
+    if (processing_thread_.joinable()) {
+        processing_thread_.join();
     }
     // capture_.release() is now handled inside the thread loop
 }
@@ -246,16 +259,12 @@ void NativeCamera::CameraThreadLoop() {
                     frame = rotated;
                 }
 
-                ProcessFrame(frame);
-
                 {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    // Convert BGR to RGBA (Flutter expects RGBA on Windows)
-                    cv::cvtColor(frame, current_frame_, cv::COLOR_BGR2RGBA);
+                    std::lock_guard<std::mutex> lock(processing_mutex_);
+                    frame.copyTo(pending_frame_);
+                    has_new_frame_ = true;
                 }
-                
-                // Notify Flutter that a new frame is available
-                texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+                processing_cv_.notify_one();
             } else {
                  std::cerr << "Captured empty frame." << std::endl;
             }
@@ -284,6 +293,36 @@ void NativeCamera::ProcessFrame(cv::Mat& frame) {
     if (filters_copy.empty()) return;
 
     ApplyFilterSequenceInternal(frame, filters_copy.data(), static_cast<int32_t>(filters_copy.size()));
+}
+
+void NativeCamera::ProcessingThreadLoop() {
+    while (is_running_) {
+        cv::Mat frame;
+        {
+            std::unique_lock<std::mutex> lock(processing_mutex_);
+            processing_cv_.wait(lock, [this] { return has_new_frame_ || !is_running_; });
+            
+            if (!is_running_) break;
+            
+            if (pending_frame_.empty()) {
+                has_new_frame_ = false;
+                continue;
+            }
+
+            pending_frame_.copyTo(frame);
+            has_new_frame_ = false;
+        }
+
+        ProcessFrame(frame);
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            // Convert BGR to RGBA (Flutter expects RGBA on Windows)
+            cv::cvtColor(frame, current_frame_, cv::COLOR_BGR2RGBA);
+        }
+        
+        texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+    }
 }
 
 const FlutterDesktopPixelBuffer* NativeCamera::CopyPixelBuffer(size_t width, size_t height) {

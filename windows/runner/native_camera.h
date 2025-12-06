@@ -57,6 +57,14 @@ private:
 
     void CameraThreadLoop();
     void ProcessFrame(cv::Mat& frame);
+
+    // Async processing members
+    std::thread processing_thread_;
+    std::mutex processing_mutex_;
+    std::condition_variable processing_cv_;
+    cv::Mat pending_frame_;
+    std::atomic<bool> has_new_frame_ = false;
+    void ProcessingThreadLoop();
 };
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);
