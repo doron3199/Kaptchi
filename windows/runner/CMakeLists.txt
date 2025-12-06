@@ -45,6 +45,13 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   "$<TARGET_FILE_DIR:${BINARY_NAME}>"
 )
 
+# Copy models directory
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+  "${CMAKE_CURRENT_SOURCE_DIR}/models"
+  "$<TARGET_FILE_DIR:${BINARY_NAME}>/models"
+)
+
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})

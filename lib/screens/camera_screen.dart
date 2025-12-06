@@ -108,6 +108,7 @@ class _CameraScreenState extends State<CameraScreen>
     FilterItem(id: 6, name: 'Moving Average', isActive: false),
     FilterItem(id: 5, name: 'Smart Obstacle Removal', isActive: false),
     FilterItem(id: 4, name: 'Smart Whiteboard', isActive: false),
+    FilterItem(id: 11, name: 'Person Removal (AI)', isActive: false),
     FilterItem(id: 3, name: 'Blur (Legacy)', isActive: false),
     FilterItem(id: 1, name: 'Invert Colors', isActive: false),
     FilterItem(id: 2, name: 'Whiteboard (Legacy)', isActive: false),

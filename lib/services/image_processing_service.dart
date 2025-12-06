@@ -16,7 +16,10 @@ enum ProcessingMode {
   smartObstacle,      // 5
   movingAverage,      // 6
   clahe,              // 7
-  sharpening          // 8
+  sharpening,         // 8
+  ppHumanSeg,         // 9
+  mediaPipeSelfie,    // 10
+  yolo11PersonDetection // 11
 }
 
 class ImageProcessingService {

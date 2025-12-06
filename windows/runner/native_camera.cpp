@@ -3,9 +3,25 @@
 #include <cmath>
 #include <chrono>
 #include <objbase.h>
+#include <opencv2/dnn.hpp>
+#include <windows.h> // For GetModuleFileName
 
 // Forward declaration
 void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count);
+
+// Helper to get absolute path to models
+std::string GetModelPath(const std::string& modelName) {
+    char buffer[MAX_PATH];
+    GetModuleFileNameA(NULL, buffer, MAX_PATH);
+    std::string::size_type pos = std::string(buffer).find_last_of("\\/");
+    std::string dir = std::string(buffer).substr(0, pos);
+    std::string fullPath = dir + "\\models\\" + modelName;
+    
+    std::cout << "[NativeCamera] Executable Dir: " << dir << std::endl;
+    std::cout << "[NativeCamera] Looking for model at: " << fullPath << std::endl;
+    
+    return fullPath;
+}
 
 // Global instance pointer
 NativeCamera* g_native_camera = nullptr;
@@ -478,6 +494,196 @@ static void ApplySmartObstacleRemoval(cv::Mat& frame) {
     g_accumulated_background.copyTo(frame);
 }
 
+// --- YOLOv11 Person Detection Helpers ---
+
+static cv::dnn::Net g_yolo11_net;
+static bool g_yolo11_initialized = false;
+static bool g_yolo11_failed = false;
+
+// Background modeling for person removal
+static cv::Mat g_bg_model_float;
+static cv::Mat g_bg_model_8u;
+
+static void ApplyYOLO11Detection(cv::Mat& frame) {
+    if (g_yolo11_failed) return;
+    if (!g_yolo11_initialized) {
+        try {
+            std::string modelPath = GetModelPath("yolo11n.onnx");
+            g_yolo11_net = cv::dnn::readNetFromONNX(modelPath);
+            g_yolo11_net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+            g_yolo11_net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+            g_yolo11_initialized = !g_yolo11_net.empty();
+        } catch (const cv::Exception& e) {
+            std::cerr << "Failed to load YOLOv11 model: " << e.what() << std::endl;
+            g_yolo11_failed = true;
+            return;
+        } catch (...) {
+            std::cerr << "Failed to load YOLOv11 model (Unknown error)." << std::endl;
+            g_yolo11_failed = true;
+            return;
+        }
+    }
+
+    if (!g_yolo11_initialized) return;
+
+    try {
+        // Ensure OpenCV uses all available threads
+        cv::setNumThreads(cv::getNumberOfCPUs());
+
+        // YOLOv11n standard input size is 640x640
+        const int input_w = 640;
+        const int input_h = 640;
+
+        auto start_preprocess = std::chrono::high_resolution_clock::now();
+
+        // Preprocessing: Resize and Normalize
+        cv::Mat blob = cv::dnn::blobFromImage(frame, 1.0 / 255.0, cv::Size(input_w, input_h), cv::Scalar(), true, false);
+        
+        g_yolo11_net.setInput(blob);
+
+        auto end_preprocess = std::chrono::high_resolution_clock::now();
+        
+        // Measure inference time
+        auto start_inference = std::chrono::high_resolution_clock::now();
+
+        std::vector<cv::Mat> outputs;
+        g_yolo11_net.forward(outputs, g_yolo11_net.getUnconnectedOutLayersNames());
+
+        auto end_inference = std::chrono::high_resolution_clock::now();
+        
+        long long duration_preprocess = std::chrono::duration_cast<std::chrono::milliseconds>(end_preprocess - start_preprocess).count();
+        long long duration_inference = std::chrono::duration_cast<std::chrono::milliseconds>(end_inference - start_inference).count();
+        
+        // Print FPS every 30 frames
+        static int frame_count = 0;
+        if (++frame_count % 30 == 0) {
+            double fps = (duration_inference > 0) ? (1000.0 / duration_inference) : 0.0;
+            std::cout << "YOLOv11 Timing - Preprocess: " << duration_preprocess << "ms | Inference: " << duration_inference << "ms (~" << fps << " FPS)" << std::endl;
+        }
+
+        if (outputs.empty()) return;
+
+        // Output shape is typically [1, 84, 8400] for YOLOv11n (1 class + 4 box coords + ... wait, v11 might be different)
+        // YOLOv8/v11 output: [Batch, 4 + NumClasses, NumAnchors] -> [1, 4+80, 8400] usually.
+        // For Person only model or COCO? The user said "yolo11n.onnx", likely COCO (80 classes).
+        // So 4 box + 80 classes = 84 channels.
+        
+        cv::Mat output = outputs[0];
+        
+        // Check dimensions
+        if (output.dims != 3) {
+            // std::cerr << "Unexpected output dimensions: " << output.dims << std::endl;
+            return;
+        }
+
+        // int batch = output.size[0]; // Unused
+        int dimensions = output.size[1]; // 84 (cx, cy, w, h, class0, class1...)
+        int rows = output.size[2];       // 8400 (anchors)
+
+        if (dimensions < 5) return; // Need at least box + 1 class
+
+        // Transpose to [Batch, Rows, Dimensions] -> [1, 8400, 84] for easier iteration
+        // OpenCV output is [1, 84, 8400]. We want to iterate over 8400 anchors.
+        cv::Mat output2D = output.reshape(1, dimensions); // Reshape to 2D: [84, 8400]
+        cv::Mat output2D_t;
+        cv::transpose(output2D, output2D_t); // [8400, 84]
+
+        float* data = (float*)output2D_t.data;
+        
+        std::vector<int> class_ids;
+        std::vector<float> confidences;
+        std::vector<cv::Rect> boxes;
+
+        float conf_threshold = 0.45f;
+        float nms_threshold = 0.5f;
+        
+        float x_factor = (float)frame.cols / (float)input_w;
+        float y_factor = (float)frame.rows / (float)input_h;
+
+        for (int i = 0; i < rows; ++i) {
+            float* row_ptr = data + i * dimensions;
+            
+            // Find the class with the highest score
+            // First 4 elements are box coordinates (cx, cy, w, h)
+            // The rest are class scores.
+            float* scores_ptr = row_ptr + 4;
+            // int num_classes = dimensions - 4; // Unused
+            
+            // Optimization: We only care about Person (class 0)
+            // If the model is COCO, Person is index 0.
+            float person_score = scores_ptr[0]; 
+
+            if (person_score > conf_threshold) {
+                float cx = row_ptr[0];
+                float cy = row_ptr[1];
+                float w = row_ptr[2];
+                float h = row_ptr[3];
+
+                int left = int((cx - 0.5 * w) * x_factor);
+                int top = int((cy - 0.5 * h) * y_factor);
+                int width = int(w * x_factor);
+                int height = int(h * y_factor);
+
+                boxes.push_back(cv::Rect(left, top, width, height));
+                confidences.push_back(person_score);
+                class_ids.push_back(0);
+            }
+        }
+
+        std::vector<int> indices;
+        cv::dnn::NMSBoxes(boxes, confidences, conf_threshold, nms_threshold, indices);
+
+        // --- Person Removal Logic ---
+        
+        // 1. Initialize background model if needed or if size changed
+        if (g_bg_model_float.empty() || g_bg_model_float.size() != frame.size()) {
+            frame.convertTo(g_bg_model_float, CV_32F);
+            g_bg_model_8u = frame.clone();
+        }
+
+        // 2. Create a mask of all detected persons
+        cv::Mat person_mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+        for (int idx : indices) {
+            cv::Rect box = boxes[idx];
+            // Slightly expand the box to ensure we cover the person edges
+            int pad = 10;
+            cv::Rect padded_box = box;
+            padded_box.x = std::max(0, box.x - pad);
+            padded_box.y = std::max(0, box.y - pad);
+            padded_box.width = std::min(frame.cols - padded_box.x, box.width + 2 * pad);
+            padded_box.height = std::min(frame.rows - padded_box.y, box.height + 2 * pad);
+
+            cv::rectangle(person_mask, padded_box, cv::Scalar(255), cv::FILLED);
+        }
+
+        // 3. Update Background Model
+        // We want to update the background model with the current frame to adapt to lighting,
+        // BUT we must exclude the person regions so they don't become part of the background.
+        // We do this by constructing a synthetic frame that has the "old" background 
+        // in the person regions, and the "new" frame everywhere else.
+        cv::Mat update_frame = frame.clone();
+        if (!g_bg_model_8u.empty()) {
+            g_bg_model_8u.copyTo(update_frame, person_mask);
+        }
+
+        // Update running average (alpha = 0.05 means it adapts to lighting in ~1 second)
+        cv::accumulateWeighted(update_frame, g_bg_model_float, 0.05);
+        
+        // Update the 8-bit background model for next time
+        cv::convertScaleAbs(g_bg_model_float, g_bg_model_8u);
+
+        // 4. Replace Persons in Current Frame
+        // Copy the clean background pixels onto the current frame where persons are detected
+        g_bg_model_8u.copyTo(frame, person_mask);
+    } catch (const cv::Exception& e) {
+        std::cerr << "YOLO Inference Error: " << e.what() << std::endl;
+        g_yolo11_failed = true; 
+    } catch (...) {
+        std::cerr << "YOLO Inference Error (Unknown)" << std::endl;
+        g_yolo11_failed = true;
+    }
+}
+
 void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
     for (int i = 0; i < count; i++) {
         int mode = modes[i];
@@ -500,6 +706,8 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
             ApplyCLAHE(bgr);
         } else if (mode == 8) { // Sharpening
             ApplySharpening(bgr);
+        } else if (mode == 11) { // YOLOv11 Person Detection
+            ApplyYOLO11Detection(bgr);
         }
     }
 }
