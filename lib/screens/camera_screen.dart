@@ -1,10 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
-import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
-import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart' as c;
 import 'package:pdf/pdf.dart';
@@ -104,8 +101,6 @@ class _CameraScreenState extends State<CameraScreen>
   StreamSubscription? _streamStoppedSubscription;
 
   double _minAvailableZoom = 1.0;
-  double _maxAvailableZoom = 1.0;
-  double _currentZoomLevel = 1.0;
 
   @override
   void initState() {
@@ -303,7 +298,6 @@ class _CameraScreenState extends State<CameraScreen>
         setState(() {
           _isStreamMode = true;
           // Set max zoom for RTMP since we can't query it easily from HaishinKit yet
-          _maxAvailableZoom = 10.0; 
         });
       }
     } catch (e) {
@@ -804,6 +798,9 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   void dispose() {
+    // Capture state before async operations or state changes
+    final wasStreamMode = _isStreamMode;
+
     WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
     _controller?.dispose();
@@ -814,7 +811,7 @@ class _CameraScreenState extends State<CameraScreen>
     _mediaServerSubscription?.cancel();
     _streamStoppedSubscription?.cancel();
 
-    if (Platform.isWindows) {
+    if (Platform.isWindows && wasStreamMode) {
       NativeCameraService().stop();
     }
 
@@ -823,38 +820,14 @@ class _CameraScreenState extends State<CameraScreen>
 
   Future<void> _startLocalCamera() async {
     if (Platform.isWindows) {
-      if (_controller != null) {
-        await _controller!.dispose();
-      }
-      if (_selectedCameraIndex < 0 || _selectedCameraIndex >= _cameras.length)
-        return;
-      final camera = _cameras[_selectedCameraIndex];
-      final resolution = _isHighQuality
-          ? c.ResolutionPreset.max
-          : c.ResolutionPreset.medium;
-      _controller = c.CameraController(
-        camera,
-        resolution,
-        enableAudio: false,
-        imageFormatGroup: c.ImageFormatGroup.bgra8888,
-      );
-      try {
-        await _controller!.initialize();
-        if (!mounted) return;
+      // On Windows, we use NativeCameraService via NativeCameraView.
+      // We do NOT initialize package:camera controller to avoid conflicts.
+      if (mounted) {
         setState(() {
           _isInitialized = true;
         });
-      } catch (e) {
-        debugPrint('Error starting camera: $e');
-        if (mounted) {
-          setState(() {
-            _isInitialized = false;
-          });
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Error starting camera: $e')));
-        }
       }
+      return;
     } else {
       // Android / iOS
       if (_controller != null) {
@@ -885,8 +858,6 @@ class _CameraScreenState extends State<CameraScreen>
 
         // Get zoom levels
         _minAvailableZoom = await _controller!.getMinZoomLevel();
-        _maxAvailableZoom = await _controller!.getMaxZoomLevel();
-        _currentZoomLevel = _minAvailableZoom;
 
         if (!mounted) return;
         setState(() {
@@ -1278,20 +1249,6 @@ class _CameraScreenState extends State<CameraScreen>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (Platform.isAndroid) ...[
-                      // Slider removed
-                      const SizedBox(height: 10),
-                    ],
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 16,
-                        vertical: 8,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                    ),
                     const SizedBox(height: 20),
                     ElevatedButton.icon(
                       onPressed: () async {
@@ -1339,11 +1296,11 @@ class _CameraScreenState extends State<CameraScreen>
           IconButton(
             icon: const Icon(Icons.home),
             tooltip: 'Back to Home',
-            onPressed: () async {
-              await _stopMobileRtmpStreaming();
-              _clearActiveStreamTracking();
-              if (!context.mounted) return;
-              Navigator.pop(context);
+            onPressed: () {
+              // Just pop, let dispose handle cleanup to avoid state races
+              if (Navigator.canPop(context)) {
+                Navigator.pop(context);
+              }
             },
           ),
           if (!Platform.isWindows)
@@ -1723,40 +1680,6 @@ class _CameraScreenState extends State<CameraScreen>
                             ],
                           ),
                         ),
-
-                      // Zoom Slider for Android
-                      if (Platform.isAndroid)
-                        Positioned(
-                          bottom: 100,
-                          left: 20,
-                          right: 20,
-                          child: Row(
-                            children: [
-                              const Icon(Icons.zoom_out, color: Colors.white),
-                              Expanded(
-                                child: Slider(
-                                  value: _currentZoomLevel,
-                                  min: _minAvailableZoom,
-                                  max: _maxAvailableZoom,
-                                  onChanged: (value) async {
-                                    setState(() {
-                                      _currentZoomLevel = value;
-                                    });
-                                    if (_controller != null) {
-                                      await _controller!.setZoomLevel(value);
-                                    }
-                                    // Also update RTMP zoom if streaming
-                                    if (RtmpService.instance.isStreaming) {
-                                      RtmpService.instance.setZoom(value);
-                                    }
-                                  },
-                                ),
-                              ),
-                              const Icon(Icons.zoom_in, color: Colors.white),
-                            ],
-                          ),
-                        ),
-
                       Positioned(
                         bottom: 20,
                         left: 0,
