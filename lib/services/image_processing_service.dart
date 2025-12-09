@@ -65,11 +65,6 @@ class ImageProcessingService {
     debugPrint('ImageProcessingService: Modes set to $modes');
   }
 
-  // Helper to attach to track (placeholder for WebRTC)
-  void attachToTrack(dynamic track) {
-    debugPrint('ImageProcessingService: Attaching to track $track');
-  }
-
   Future<Uint8List?> processRawRgba(Uint8List rgbaData, int width, int height) async {
     if (_activeModes.isEmpty) return null;
     

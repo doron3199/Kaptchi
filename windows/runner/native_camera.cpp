@@ -363,8 +363,7 @@ const FlutterDesktopPixelBuffer* NativeCamera::CopyPixelBuffer(size_t width, siz
     return flutter_pixel_buffer_.get();
 }
 
-// Helper functions for external processing (WebRTC stream)
-// These are duplicated from NativeCamera to allow stateless/independent processing
+// Image Processing Helper Functions
 
 static cv::Ptr<cv::BackgroundSubtractor> g_back_sub;
 static cv::Mat g_accumulated_background;

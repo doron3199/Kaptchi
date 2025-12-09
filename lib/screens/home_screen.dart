@@ -1,12 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:kaptchi_flutter/services/raw_socket_service.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:camera/camera.dart';
 import 'package:qr_flutter/qr_flutter.dart';
-import '../services/signaling_server.dart';
-import '../services/webrtc_service.dart';
-import '../models/stream_protocol.dart';
 import '../services/media_server_service.dart'; 
 import 'camera_screen.dart';
 
@@ -22,17 +20,12 @@ class _HomeScreenState extends State<HomeScreen> {
   
   // Windows State
   List<CameraDescription> _cameras = [];
-  SignalingServer? _signalingServer;
-  WebRTCService? _webrtcService;
   String _serverIp = '';
-  int _serverPort = 5000;
-  bool _isServerRunning = false;
   bool _isMediaServerRunning = false;
   String? _mediaServerPath; // Add this
   List<({String name, String ip})> _availableInterfaces = [];
   
   // Protocol Selection
-  // StreamProtocol _selectedProtocol = StreamProtocol.rtmp; // Unused
   StreamSubscription? _streamSubscription;
 
   @override
@@ -51,7 +44,7 @@ class _HomeScreenState extends State<HomeScreen> {
         // Construct the full URL
         final url = 'rtmp://localhost/$path';
         
-        _navigateToCamera(StreamProtocol.rtmp, url);
+        _navigateToCamera(url);
       });
     }
   }
@@ -59,30 +52,23 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void dispose() {
     _streamSubscription?.cancel();
-    _stopServer();
     MediaServerService.instance.stopServer();
     super.dispose();
   }
 
-  void _navigateToCamera(StreamProtocol protocol, String url) {
-     _webrtcService?.disconnect();
-     _webrtcService = null;
-     
+  void _navigateToCamera(String url) {
+
      Navigator.push(
        context,
        MaterialPageRoute(
          builder: (_) => CameraScreen(
-           initialProtocol: protocol,
            initialStreamUrl: url,
          ),
        ),
      ).then((_) {
        if (mounted) {
          _startServer();
-         // Reset to WebRTC when coming back
-         setState(() {
-           // _selectedProtocol = StreamProtocol.webrtc;
-         });
+
        }
      });
   }
@@ -106,78 +92,23 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _startServer() async {
-    _signalingServer = SignalingServer.instance;
-    _webrtcService = WebRTCService();
 
     try {
-      await _signalingServer!.start();
-      final interfaces = await _signalingServer!.getNetworkInterfaces();
+        final interfaces = await RawSocketService.instance.getNetworkInterfaces();
       
       if (mounted) {
         setState(() {
-          _serverPort = _signalingServer!.port;
           _availableInterfaces = interfaces;
           if (interfaces.isNotEmpty) {
             _serverIp = interfaces[0].ip;
           }
-          _isServerRunning = true;
         });
       }
 
-      // Connect WebRTC Service to local signaling server
-      await _webrtcService!.connect('localhost:$_serverPort', false);
-      
-      _webrtcService!.onRemoteStream = (stream) {
-        if (!mounted) return;
-        
-        // Navigate to CameraScreen in WebRTC mode
-        // We pass the services, so CameraScreen takes ownership
-        final service = _webrtcService;
-        // We don't pass the server anymore as it is a singleton, 
-        // but we keep the parameter for compatibility or remove it.
-        // Let's keep passing it but CameraScreen should know not to stop it.
-        final server = _signalingServer;
-        
-        // We do NOT nullify _webrtcService here because we want it to stay alive?
-        // Actually, CameraScreen takes ownership of the stream.
-        // If we come back, we might need to recreate WebRTCService or reconnect.
-        // For now, let's stick to the existing flow but WITHOUT stopping the server.
-        
-        _webrtcService = null;
-        _signalingServer = null;
-        // _isServerRunning = false; // Server is still running!
-
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => CameraScreen(
-              preConnectedWebRTCService: service,
-              preStartedSignalingServer: server,
-            ),
-          ),
-        ).then((_) {
-           if (mounted) {
-             _startServer();
-           }
-        });
-      };
 
     } catch (e) {
-      debugPrint('Error starting server: $e');
-      if (mounted) {
-        setState(() {
-          _isServerRunning = false;
-        });
-      }
+      debugPrint('Error getting network interfaces: $e');
     }
-  }
-
-  void _stopServer() {
-    _webrtcService?.disconnect();
-    // _signalingServer?.stop(); // NEVER STOP THE SERVER
-    _webrtcService = null;
-    _signalingServer = null;
-    // _isServerRunning = false; // Server is still running
   }
 
   void _onDetect(BarcodeCapture capture) {
@@ -252,13 +183,6 @@ class _HomeScreenState extends State<HomeScreen> {
                                   leading: const Icon(Icons.camera_alt, color: Colors.white),
                                   title: Text(cleanName, style: const TextStyle(color: Colors.white)),
                                   onTap: () {
-                                    // _stopServer(); // Don't stop the server!
-                                    // We might want to disconnect the local WebRTC client though?
-                                    // If we don't, and a call comes in, we might get navigated away.
-                                    // For now, let's just disconnect the client but keep server.
-                                    _webrtcService?.disconnect();
-                                    _webrtcService = null;
-                                    
                                     // Fix for swapped cameras when exactly 2 are present
                                     int targetIndex = index;
                                     if (_cameras.length == 2) {

@@ -7,7 +7,6 @@ import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart' as c;
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
@@ -23,10 +22,8 @@ import '../services/media_server_service.dart';
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
-import '../services/webrtc_service.dart';
-import '../services/signaling_server.dart';
 import '../services/rtmp_service.dart';
-import '../models/stream_protocol.dart';
+import '../services/raw_socket_service.dart';
 import 'package:vector_math/vector_math_64.dart' as vm;
 import '../widgets/camera_sidebars.dart';
 import '../widgets/camera_stream_view.dart';
@@ -34,18 +31,12 @@ import '../widgets/camera_stream_view.dart';
 class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
   final int? initialCameraIndex;
-  final WebRTCService? preConnectedWebRTCService;
-  final SignalingServer? preStartedSignalingServer;
-  final StreamProtocol? initialProtocol;
   final String? initialStreamUrl;
 
   const CameraScreen({
     super.key,
     this.connectionUrl,
     this.initialCameraIndex,
-    this.preConnectedWebRTCService,
-    this.preStartedSignalingServer,
-    this.initialProtocol,
     this.initialStreamUrl,
   });
 
@@ -56,9 +47,6 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver {
   final _transformationController = TransformationController();
-  late final WebRTCService _webrtcService;
-  RTCVideoRenderer _localRenderer = RTCVideoRenderer();
-  late final SignalingServer _signalingServer;
 
   c.CameraController? _controller;
   List<c.CameraDescription> _cameras = [];
@@ -68,9 +56,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   // Remote / Stream Mode State
   bool _isStreamMode = false;
-  StreamProtocol _selectedProtocol = StreamProtocol.webrtc;
   String _serverIp = '';
-  int _serverPort = 5000;
   List<({String name, String ip})> _availableInterfaces = [];
   Timer? _frameTimer;
   final GlobalKey _videoViewKey = GlobalKey();
@@ -92,7 +78,6 @@ class _CameraScreenState extends State<CameraScreen>
   int _currentGalleryIndex = 0;
   String? _activeStreamUrl;
   bool _pendingRtmpResume = false;
-  bool _isRtmpStreaming = false;
 
   // Sidebar state
   bool _isSidebarOpen = false;
@@ -126,33 +111,34 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-
-    _webrtcService = widget.preConnectedWebRTCService ?? WebRTCService();
-    _signalingServer =
-        widget.preStartedSignalingServer ?? SignalingServer.instance;
-
     // Enable digital zoom override by default for native cameras (Windows)
-    if (Platform.isWindows && widget.preConnectedWebRTCService == null) {
+    if (Platform.isWindows) {
       _isDigitalZoomOverride = true;
+    }
+
+    // Setup Raw Socket Listener (Android)
+    if (Platform.isAndroid) {
+      RawSocketService.instance.onControlMessage = (command, data) {
+        if (command == 'zoom') {
+          double? level = data['level'];
+          if (level != null) {
+            debugPrint('Received zoom command: $level');
+            if (RtmpService.instance.isStreaming) {
+              RtmpService.instance.setZoom(level);
+            }
+            if (_controller != null) {
+              _controller!.setZoomLevel(level);
+            }
+          }
+        }
+      };
     }
 
     // Handle disconnection on Windows
     if (Platform.isWindows) {
-      if (widget.preConnectedWebRTCService != null) {
-        _webrtcService.onIceConnectionStateChange = (state) {
-          if (state ==
-                  RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-              state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-              state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
-            if (mounted) {
-              ScaffoldMessenger.of(
-                context,
-              ).showSnackBar(const SnackBar(content: Text('Connection lost')));
-              Navigator.pop(context);
-            }
-          }
-        };
-      }
+      RawSocketService.instance.startServer();
+
+
 
       // Auto-close QR dialog when RTMP stream starts
       _mediaServerSubscription = MediaServerService.instance.onStreamStarted.listen((path) async {
@@ -167,16 +153,15 @@ class _CameraScreenState extends State<CameraScreen>
           
           // Automatically connect if we are waiting for a stream
           // This handles the case where we just showed the QR code
-          if (Platform.isWindows && (!_isStreamMode || _selectedProtocol != StreamProtocol.rtmp)) {
+          if (Platform.isWindows && !_isStreamMode) {
              final url = 'rtmp://localhost/$path';
              
              setState(() {
-               _selectedProtocol = StreamProtocol.rtmp;
                _isStreamMode = true;
              });
              
-             // Start signaling server for zoom control
-             _signalingServer.start().then((_) {
+             // Start Raw Socket server for zoom control
+             RawSocketService.instance.startServer().then((_) {
                 _connectToStream(url);
              });
           }
@@ -203,44 +188,19 @@ class _CameraScreenState extends State<CameraScreen>
 
     _init();
     _setDefaultPath();
-    _localRenderer.initialize().then((_) {
-      if (mounted && widget.preConnectedWebRTCService != null) {
-        setState(() {
-          _isStreamMode = true;
-          if (_webrtcService.remoteStream != null) {
-            _localRenderer.srcObject = _webrtcService.remoteStream;
-            _startFrameExtraction(_webrtcService.remoteStream!);
-          }
-        });
-
-        _webrtcService.onRemoteStream = (stream) {
-          setState(() {
-            _localRenderer.srcObject = stream;
-          });
-          _startFrameExtraction(stream);
-        };
-      }
-    });
 
     if (widget.connectionUrl != null) {
       WakelockPlus.enable();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _connectToUrl(widget.connectionUrl!);
       });
-    } else if (widget.initialProtocol != null) {
-      _selectedProtocol = widget.initialProtocol!;
-      if (_selectedProtocol == StreamProtocol.webrtc) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _startWebRTCLogic();
-        });
-      } else if (widget.initialStreamUrl != null) {
+    } else if (widget.initialStreamUrl != null) {
         // Ensure we are in "Remote/Stream" mode so the view renders correctly
         // This is critical for Windows to show the player instead of the camera
         _isStreamMode = true;
         WidgetsBinding.instance.addPostFrameCallback((_) {
           _connectToStream(widget.initialStreamUrl!);
         });
-      }
     }
   }
 
@@ -264,25 +224,16 @@ class _CameraScreenState extends State<CameraScreen>
     if (mounted) {
       setState(() {
         _isStreamMode = true;
-        if (url.startsWith('rtmp://')) {
-          _selectedProtocol = StreamProtocol.rtmp;
-        }
       });
     }
 
-    if (_selectedProtocol == StreamProtocol.rtmp && Platform.isWindows) {
+    if (Platform.isWindows) {
       // Ensure clean state with a small delay
       NativeCameraService().stop();
       await Future.delayed(const Duration(milliseconds: 200));
       
       NativeCameraService().startStream(url);
-      
-      // Ensure signaling server is running for zoom control
-      _signalingServer.start();
-      
-      // Don't show QR code for RTMP on Windows
-    } else {
-      _showQrCodeDialog(url);
+
     }
   }
 
@@ -350,7 +301,6 @@ class _CameraScreenState extends State<CameraScreen>
 
       if (mounted) {
         setState(() {
-          _isRtmpStreaming = true;
           _isStreamMode = true;
           // Set max zoom for RTMP since we can't query it easily from HaishinKit yet
           _maxAvailableZoom = 10.0; 
@@ -378,28 +328,22 @@ class _CameraScreenState extends State<CameraScreen>
 
     if (!fromDispose && mounted) {
       setState(() {
-        _isRtmpStreaming = false;
+        _isStreamMode = false;
       });
     } else {
-      _isRtmpStreaming = false;
+      _isStreamMode = false;
     }
   }
 
   Widget _buildStreamWidget() {
     return CameraStreamView(
-      selectedProtocol: _selectedProtocol,
       supportsMobileRtmp: _supportsMobileRtmp,
       controller: _controller,
-      localRenderer: _localRenderer,
       connectionUrl: widget.connectionUrl,
     );
   }
 
   Future<void> _suspendRtmpStreamForLifecycle() async {
-    if (_selectedProtocol != StreamProtocol.rtmp) {
-      return;
-    }
-
     // flutter_rtmp_publisher handles lifecycle internally or we can't control it.
     if (_supportsMobileRtmp) {
       return;
@@ -449,230 +393,32 @@ class _CameraScreenState extends State<CameraScreen>
     _pendingRtmpResume = false;
   }
 
-
-
-  Future<void> _startWebRTCLogic() async {
-    try {
-      await _signalingServer.start();
-      final interfaces = await _signalingServer.getNetworkInterfaces();
-      if (!mounted) return;
-
-      setState(() {
-        _serverPort = _signalingServer.port;
-        _availableInterfaces = interfaces;
-        if (interfaces.isNotEmpty) {
-          _serverIp = interfaces[0].ip;
-        }
-      });
-
-      // Connect to our own local server to listen for the camera
-      await _webrtcService.connect('localhost:$_serverPort', false);
-
-      _webrtcService.onIceConnectionStateChange = (state) {
-        if (state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-            state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
-          if (mounted) {
-            Navigator.pop(context);
-          }
-        }
-      };
-
-      _webrtcService.onRemoteStream = (stream) {
-        // Close the QR code dialog if it's open
-        if (Navigator.canPop(context)) {
-          Navigator.pop(context);
-        }
-
-        setState(() {
-          _localRenderer.srcObject = stream;
-        });
-
-        // Start pulling frames from the stream for processing
-        _startFrameExtraction(stream);
-      };
-
-      _showQrCodeDialog();
-    } catch (e) {
-      debugPrint('Error starting WebRTC server: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Error starting server: $e')));
-      }
-    }
-  }
-
-  void _startFrameExtraction(MediaStream stream) {
-    _frameTimer?.cancel();
-    // Extract frames at ~15fps (sufficient for processing without killing CPU)
-    _frameTimer = Timer.periodic(const Duration(milliseconds: 66), (
-      timer,
-    ) async {
-      // Check if any filter is active
-      bool hasActiveFilters = _filters.any((f) => f.isActive);
-
-      if (!hasActiveFilters) {
-        if (_processedImageNotifier.value != null) {
-          _processedImageNotifier.value = null;
-        }
-        return;
-      }
-
-      try {
-        // Capture frame from the RepaintBoundary wrapping the RTCVideoView
-        final boundary =
-            _videoViewKey.currentContext?.findRenderObject()
-                as RenderRepaintBoundary?;
-        if (boundary == null) return;
-
-        // Capture as image
-        final image = await boundary.toImage();
-
-        // Get byte data (RGBA)
-        final byteData = await image.toByteData(
-          format: ui.ImageByteFormat.rawRgba,
-        );
-        if (byteData == null) return;
-
-        // Convert to CameraImage-like structure or pass directly to service
-        // Our service expects CameraImage, but we can overload or create a helper
-        // Actually, ImageProcessingService.processImageAndEncode expects CameraImage.
-        // We should add a method to process raw bytes.
-
-        // Let's modify ImageProcessingService to accept raw bytes too, or just use the internal logic here.
-        // Since we can't easily modify the service interface in this step without reading it again,
-        // let's assume we can add a helper or just call the C++ function directly if we exposed it.
-        // Wait, ImageProcessingService exposes processImageAndEncode which takes CameraImage.
-        // We need to extend ImageProcessingService to handle raw bytes.
-
-        // For now, let's use a workaround: Create a fake CameraImage? No, that's hard.
-        // Let's add a new method to ImageProcessingService in the next step.
-        // Assuming we will add `processRawRgba` to ImageProcessingService.
-
-        final processedBytes = await ImageProcessingService.instance
-            .processRawRgba(
-              byteData.buffer.asUint8List(),
-              image.width,
-              image.height,
-            );
-
-        if (mounted) {
-          _processedImageNotifier.value = processedBytes;
-        }
-      } catch (e) {
-        debugPrint('Error extracting frame: $e');
-      }
-    });
-  }
-
-  void _showQrCodeDialog([String? customData]) {
-    final qrData = customData ?? 'ws://$_serverIp:$_serverPort';
-
-    _isQrDialogVisible = true;
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Connect Mobile Camera'),
-        content: SizedBox(
-          width: 300,
-          height: 400, // Increased height to prevent overflow
-          child: SingleChildScrollView(
-            // Added scroll view to prevent overflow
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Container(
-                  color: Colors.white,
-                  padding: const EdgeInsets.all(16),
-                  child: QrImageView(
-                    data: qrData,
-                    version: QrVersions.auto,
-                    size: 200.0,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Text(
-                  'Scan with Kaptchi mobile app\n$qrData',
-                  textAlign: TextAlign.center,
-                ),
-                const SizedBox(height: 16),
-                if (customData == null && _availableInterfaces.isNotEmpty)
-                  DropdownButton<String>(
-                    value: _serverIp,
-                    isExpanded: true,
-                    items: _availableInterfaces.map((i) {
-                      return DropdownMenuItem(
-                        value: i.ip,
-                        child: Text('${i.name} (${i.ip})'),
-                      );
-                    }).toList(),
-                    onChanged: (val) {
-                      if (val != null) {
-                        setState(() {
-                          _serverIp = val;
-                        });
-                        Navigator.pop(context);
-                        _showQrCodeDialog();
-                      }
-                    },
-                  ),
-              ],
-            ),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('Close'),
-          ),
-        ],
-      ),
-    ).then((_) => _isQrDialogVisible = false);
-  }
-
-  void _handleConnectionFailure() {
-    if (!mounted) return;
-    setState(() {
-      _isStreamMode = false;
-      _localRenderer.srcObject = null;
-    });
-    _webrtcService.disconnect();
-
-    // If we are on Android, restart the local camera
-    if (Platform.isAndroid) {
-      _startLocalCamera();
-    }
-  }
-
   Future<void> _connectToUrl(String url) async {
     WakelockPlus.enable();
     
     // Ensure complete cleanup of previous sessions
     await _releaseLocalCameraResources();
-    // Clear any previous error handlers to prevent unwanted disconnects
-    _webrtcService.onError = null;
-    await _webrtcService.disconnect();
     await _stopMobileRtmpStreaming(resetTracking: true);
 
     String cleanUrl = url.trim();
 
     if (cleanUrl.startsWith('rtmp://')) {
-      setState(() => _selectedProtocol = StreamProtocol.rtmp);
       _activeStreamUrl = cleanUrl;
       _pendingRtmpResume = false;
 
       if (Platform.isAndroid) {
-        // Only connect for control if needed, but be careful not to trigger WebRTC media
-        _connectToWebSocketFromRtmpUrl(cleanUrl);
-        
+        // Connect to Raw Socket Server
+        try {
+          Uri uri = Uri.parse(cleanUrl);
+          String ip = uri.host;
+          RawSocketService.instance.connect(ip);
+        } catch (e) {
+          debugPrint('Error connecting to socket: $e');
+        }
+
         // Start the stream here, after the screen has loaded
         await _startMobileRtmpStreaming(cleanUrl);
       } else if (Platform.isWindows) {
-        // Windows acts as the HOST/SERVER for signaling in this setup.
-        // It does NOT need to connect to itself via WebSocket.
-        // It will use _signalingServer.broadcast() to send commands.
-        
         // Just start the stream player
         NativeCameraService().startStream(cleanUrl);
         if (!mounted) return;
@@ -689,57 +435,6 @@ class _CameraScreenState extends State<CameraScreen>
         }
       }
       return;
-    }
-
-    // WebRTC Mode
-    setState(() => _selectedProtocol = StreamProtocol.webrtc);
-
-    _webrtcService.onError = (error) {
-      debugPrint('WebRTC Service Error: $error');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Connection Error: $error'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 5),
-          ),
-        );
-        _handleConnectionFailure();
-      }
-    };
-
-    _webrtcService.onIceConnectionStateChange = (state) {
-      if (mounted) {
-        if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Connected!'),
-              backgroundColor: Colors.green,
-            ),
-          );
-        } else if (state == RTCIceConnectionState.RTCIceConnectionStateFailed ||
-            state == RTCIceConnectionState.RTCIceConnectionStateDisconnected ||
-            state == RTCIceConnectionState.RTCIceConnectionStateClosed) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Connection Failed/Lost'),
-              backgroundColor: Colors.red,
-            ),
-          );
-          _handleConnectionFailure();
-        }
-      }
-    };
-
-    await _webrtcService.connect(cleanUrl, true);
-    if (!mounted) return;
-
-    if (_webrtcService.localStream != null) {
-      setState(() {
-        _isStreamMode = true;
-        _localRenderer.srcObject = _webrtcService.localStream;
-      });
-      _startFrameExtraction(_webrtcService.localStream!);
     }
   }
 
@@ -803,7 +498,7 @@ class _CameraScreenState extends State<CameraScreen>
     // Ensure we have network info
     if (_serverIp.isEmpty) {
       try {
-        final interfaces = await _signalingServer.getNetworkInterfaces();
+        final interfaces = await RawSocketService.instance.getNetworkInterfaces();
         if (!mounted) return;
         if (interfaces.isNotEmpty) {
           setState(() {
@@ -1006,8 +701,6 @@ class _CameraScreenState extends State<CameraScreen>
                           _currentZoom = 1.0;
                           _viewOffset = Offset.zero;
                         });
-                        _webrtcService.disconnect();
-                        await _signalingServer.stop();
 
                         // Fix for swapped cameras when exactly 2 are present
                         // The user reported that selecting one opens the other.
@@ -1077,21 +770,13 @@ class _CameraScreenState extends State<CameraScreen>
 
   void _sendZoomCommand(double zoom) {
     debugPrint('Sending zoom command: $zoom');
+    if (!Platform.isWindows) return;
     
-    if (Platform.isWindows && _selectedProtocol == StreamProtocol.rtmp) {
-      // Direct broadcast via SignalingServer (Host mode)
-      final msg = jsonEncode({
-        'type': 'control',
-        'payload': {
-          'command': 'zoom',
-          'data': {'level': zoom}
-        }
-      });
-      _signalingServer.broadcast(msg);
-    } else {
-      // Client mode (Android or WebRTC)
-      _webrtcService.sendControlMessage('zoom', {'level': zoom});
-    }
+    // Direct broadcast via RawSocketService (Host mode)
+    RawSocketService.instance.send('control', {
+        'command': 'zoom',
+        'data': {'level': zoom}
+    });
   }
 
   void _updateFilters() {
@@ -1106,7 +791,7 @@ class _CameraScreenState extends State<CameraScreen>
       NativeCameraService().setFilterSequence(activeFilters);
     }
 
-    // 3. Update Image Processing Service (WebRTC / Non-Windows)
+    // 3. Update Image Processing Service (Streamed)
     List<ProcessingMode> modes = [];
     for (var id in activeFilters) {
       if (id >= 0 && id < ProcessingMode.values.length) {
@@ -1124,13 +809,10 @@ class _CameraScreenState extends State<CameraScreen>
     _controller?.dispose();
     unawaited(_stopMobileRtmpStreaming(fromDispose: true));
     _transformationController.dispose();
-    _webrtcService.disconnect();
     _clearActiveStreamTracking();
-    // _signalingServer.stop(); // NEVER STOP THE SERVER
     _frameTimer?.cancel();
     _mediaServerSubscription?.cancel();
     _streamStoppedSubscription?.cancel();
-    _localRenderer.dispose();
 
     if (Platform.isWindows) {
       NativeCameraService().stop();
@@ -1233,60 +915,28 @@ class _CameraScreenState extends State<CameraScreen>
       int finalHeight = 0;
 
       if (_isStreamMode) {
-        // Check protocol
-        if (_selectedProtocol == StreamProtocol.rtmp) {
-          // Use NativeCameraService for Windows RTMP capture
-          final service = NativeCameraService();
-          final width = service.getFrameWidth();
-          final height = service.getFrameHeight();
-          final bytes = service.getFrameData();
+        // Use NativeCameraService for Windows RTMP capture
+        final service = NativeCameraService();
+        final width = service.getFrameWidth();
+        final height = service.getFrameHeight();
+        final bytes = service.getFrameData();
 
-          if (bytes != null && width > 0 && height > 0) {
-            final image = img.Image.fromBytes(
-              width: width,
-              height: height,
-              bytes: bytes.buffer,
-              numChannels: 4,
-              order: img.ChannelOrder.rgba,
-            );
-            finalBytes = img.encodePng(image);
-            finalWidth = width;
-            finalHeight = height;
-          }
+        if (bytes != null && width > 0 && height > 0) {
+          final image = img.Image.fromBytes(
+            width: width,
+            height: height,
+            bytes: bytes.buffer,
+            numChannels: 4,
+            order: img.ChannelOrder.rgba,
+          );
+          finalBytes = img.encodePng(image);
+          finalWidth = width;
+          finalHeight = height;
         } else {
-          // If we have a processed (filtered) image, use it
-          bool hasActiveFilters = _filters.any((f) => f.isActive);
-          if (hasActiveFilters && _processedImageNotifier.value != null) {
-            finalBytes = _processedImageNotifier.value;
-            // Decode to get dimensions
-            final decoded = img.decodeImage(finalBytes!);
-            if (decoded != null) {
-              finalWidth = decoded.width;
-              finalHeight = decoded.height;
-            }
-          } else {
-            // Otherwise capture the raw stream from the view
-            final boundary =
-                _videoViewKey.currentContext?.findRenderObject()
-                    as RenderRepaintBoundary?;
-            if (boundary == null) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Failed to capture WebRTC frame')),
-              );
-              return;
-            }
-
-            final image = await boundary.toImage();
-            final byteData = await image.toByteData(
-              format: ui.ImageByteFormat.png,
-            );
-
-            if (byteData != null) {
-              finalBytes = byteData.buffer.asUint8List();
-              finalWidth = image.width;
-              finalHeight = image.height;
-            }
-          }
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to capture frame')),
+          );
+          return;
         }
       } else {
         // 1. Get full frame data
@@ -1479,59 +1129,6 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  void _connectToWebSocketFromRtmpUrl(String rtmpUrl) {
-    debugPrint('CameraScreen: _connectToWebSocketFromRtmpUrl called with $rtmpUrl');
-    try {
-      final uri = Uri.parse(rtmpUrl);
-      String ip = uri.host;
-      
-      // If localhost, prefer 127.0.0.1 to ensure IPv4 compatibility with the server
-      if (ip == 'localhost') {
-        ip = '127.0.0.1';
-      }
-      
-      // Assuming default port 5000 for signaling
-      final wsUrl = 'ws://$ip:5000';
-
-      debugPrint('DEBUG: Connecting to Signaling Server for RTMP control: $wsUrl');
-
-      _webrtcService.onControlMessage = (command, data) {
-        debugPrint('DEBUG: CameraScreen received control message: $command, data: $data');
-        if (command == 'zoom') {
-          double? level = data['level'];
-          if (level != null) {
-             debugPrint('DEBUG: Received zoom command in RTMP mode: $level');
-             if (Platform.isAndroid) {
-               RtmpService.instance.setZoom(level);
-               if (mounted) {
-                 setState(() {
-                   _currentZoomLevel = level;
-                 });
-               }
-             }
-          }
-        }
-      };
-
-      // Connect ONLY for signaling/control, do NOT initiate media
-      _webrtcService.connect(wsUrl, false, useWebRTC: false); 
-    } catch (e) {
-      debugPrint('DEBUG: Error connecting to WebSocket from RTMP URL: $e');
-    }
-  }
-
-  Future<void> _reinitializeRenderer() async {
-    await _localRenderer.dispose();
-    final newRenderer = RTCVideoRenderer();
-    await newRenderer.initialize();
-    if (mounted) {
-      setState(() {
-        _localRenderer = newRenderer;
-      });
-    } else {
-      _localRenderer = newRenderer;
-    }
-  }
 
   Future<void> _scanQrCode() async {
     // Dispose local camera before scanning to avoid conflicts
@@ -1606,68 +1203,7 @@ class _CameraScreenState extends State<CameraScreen>
       // Enable Wakelock to prevent screen from turning off during streaming
       WakelockPlus.enable();
 
-      if (result.startsWith('ws://') || result.startsWith('wss://')) {
-        setState(() => _selectedProtocol = StreamProtocol.webrtc);
-
-        // Re-initialize renderer to ensure fresh surface
-        await _reinitializeRenderer();
-
-        _webrtcService.onError = (error) {
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('Connection Error: $error'),
-                backgroundColor: Colors.red,
-                duration: const Duration(seconds: 5),
-              ),
-            );
-          }
-        };
-
-        _webrtcService.onIceConnectionStateChange = (state) {
-          if (mounted) {
-            if (state == RTCIceConnectionState.RTCIceConnectionStateConnected) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Connected!'),
-                  backgroundColor: Colors.green,
-                ),
-              );
-            } else if (state ==
-                RTCIceConnectionState.RTCIceConnectionStateFailed) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('Connection Failed'),
-                  backgroundColor: Colors.red,
-                ),
-              );
-            }
-          }
-        };
-
-        try {
-          await _webrtcService.connect(result, true);
-
-          if (_webrtcService.localStream != null) {
-            setState(() {
-              _isStreamMode = true;
-              _localRenderer.srcObject = _webrtcService.localStream;
-            });
-            _startFrameExtraction(_webrtcService.localStream!);
-          }
-        } catch (e) {
-          debugPrint('WebRTC Connect Error: $e');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              SnackBar(
-                content: Text('WebRTC Error: $e'),
-                backgroundColor: Colors.red,
-              ),
-            );
-          }
-        }
-      } else if (result.startsWith('rtmp://')) {
-        setState(() => _selectedProtocol = StreamProtocol.rtmp);
+      if (result.startsWith('rtmp://')) {
         _activeStreamUrl = result;
         _pendingRtmpResume = false;
 
@@ -1701,8 +1237,6 @@ class _CameraScreenState extends State<CameraScreen>
               _isStreamMode = true;
             });
           }
-          // Connect to signaling server for control messages (Zoom)
-          _connectToWebSocketFromRtmpUrl(result);
           return;
         }
 
@@ -1710,6 +1244,14 @@ class _CameraScreenState extends State<CameraScreen>
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('RTMP not supported on this platform'),
+            ),
+          );
+        }
+      } else {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Unsupported protocol. Only RTMP is supported.'),
             ),
           );
         }
@@ -1749,15 +1291,6 @@ class _CameraScreenState extends State<CameraScreen>
                         color: Colors.black54,
                         borderRadius: BorderRadius.circular(20),
                       ),
-                      child: Text(
-                        _selectedProtocol == StreamProtocol.rtmp
-                            ? 'Transmitting via RTMP'
-                            : 'Transmitting via WebRTC',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 16,
-                        ),
-                      ),
                     ),
                     const SizedBox(height: 20),
                     ElevatedButton.icon(
@@ -1767,7 +1300,6 @@ class _CameraScreenState extends State<CameraScreen>
                         if (Platform.isAndroid) {
                           await RtmpService.instance.stopStream();
                         }
-                        _webrtcService.disconnect();
                         _clearActiveStreamTracking();
                         if (!context.mounted) return;
                         Navigator.pop(context);
@@ -1809,7 +1341,6 @@ class _CameraScreenState extends State<CameraScreen>
             tooltip: 'Back to Home',
             onPressed: () async {
               await _stopMobileRtmpStreaming();
-              _webrtcService.disconnect();
               _clearActiveStreamTracking();
               if (!context.mounted) return;
               Navigator.pop(context);

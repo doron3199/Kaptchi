@@ -1,35 +1,29 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart' as c;
-import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:haishin_kit/stream_view_texture.dart';
 import 'package:haishin_kit/rtmp_stream.dart';
 import '../services/rtmp_service.dart';
-import '../models/stream_protocol.dart';
 import '../widgets/native_texture_view.dart';
 
 class CameraStreamView extends StatelessWidget {
-  final StreamProtocol selectedProtocol;
   final bool supportsMobileRtmp;
   final c.CameraController? controller;
-  final RTCVideoRenderer localRenderer;
   final String? connectionUrl;
 
   const CameraStreamView({
     super.key,
-    required this.selectedProtocol,
     required this.supportsMobileRtmp,
     required this.controller,
-    required this.localRenderer,
     this.connectionUrl,
   });
 
   @override
   Widget build(BuildContext context) {
     debugPrint(
-      'Building Stream Widget. Protocol: $selectedProtocol, Windows: ${Platform.isWindows}',
+      'Building Stream Widget. Windows: ${Platform.isWindows}',
     );
-    if (selectedProtocol == StreamProtocol.rtmp && supportsMobileRtmp) {
+    if (supportsMobileRtmp) {
       // On Android, if we are "transmitting" (simulated), show the local camera
       // If we are actually streaming via HaishinKit, we should show its preview
       return ValueListenableBuilder<RtmpStream?>(
@@ -102,17 +96,9 @@ class CameraStreamView extends StatelessWidget {
       );
     }
 
-    if (Platform.isWindows && selectedProtocol == StreamProtocol.rtmp) {
+    if (Platform.isWindows) {
       debugPrint('Using NativeTextureView');
       return const NativeTextureView();
-    }
-
-    if (selectedProtocol == StreamProtocol.webrtc) {
-      return RTCVideoView(
-        localRenderer,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitContain,
-        mirror: false, // Do not mirror the back camera
-      );
     }
 
     return const Center(child: CircularProgressIndicator());
