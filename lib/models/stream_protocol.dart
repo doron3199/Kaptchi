@@ -1,4 +1,0 @@
-enum StreamProtocol {
-  webrtc,
-  rtmp,
-}

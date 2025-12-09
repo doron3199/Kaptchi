@@ -18,8 +18,8 @@ Kaptchi is an assistive technology application designed to help visually impaire
 
 *   **Frontend:** Flutter (Android & Windows).
 *   **Image Processing:** C++ via `dart:ffi` (OpenCV) for high-performance filtering and background subtraction.
-*   **Streaming:** WebRTC for low-latency video transmission over a local network.
-*   **Signaling:** Built-in lightweight WebSocket server on the Windows host for local device discovery.
+*   **Streaming:** RTMP for video transmission over a local network (via MediaMTX).
+*   **Discovery:** Network interface scanning for local device connection.
 
 ## Getting Started
 

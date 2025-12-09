@@ -4,7 +4,6 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   camera_windows
-  flutter_webrtc
   permission_handler_windows
   printing
 )
