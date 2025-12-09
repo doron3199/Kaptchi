@@ -52,6 +52,20 @@ add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
   "$<TARGET_FILE_DIR:${BINARY_NAME}>/models"
 )
 
+# Copy mediamtx.exe
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../server/bin/mediamtx.exe"
+  "$<TARGET_FILE_DIR:${BINARY_NAME}>/mediamtx.exe"
+)
+
+# Copy mediamtx.yml
+add_custom_command(TARGET ${BINARY_NAME} POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+  "${CMAKE_CURRENT_SOURCE_DIR}/../../mediamtx.yml"
+  "$<TARGET_FILE_DIR:${BINARY_NAME}>/mediamtx.yml"
+)
+
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.
 apply_standard_settings(${BINARY_NAME})
