@@ -3,18 +3,35 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'screens/home_screen.dart';
 import 'services/media_server_service.dart';
+import 'services/image_processing_service.dart';
 
-void main() {
+import 'package:window_manager/window_manager.dart';
+
+void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
-  // Force landscape mode on mobile devices to ensure video stream is landscape
+
+  // Force landscape mode on mobile devices
   if (Platform.isAndroid || Platform.isIOS) {
     SystemChrome.setPreferredOrientations([
       DeviceOrientation.landscapeLeft,
       DeviceOrientation.landscapeRight,
     ]);
   }
-  
+
+  if (Platform.isWindows) {
+    await ImageProcessingService.instance.initialize();
+    await windowManager.ensureInitialized();
+    WindowOptions windowOptions = const WindowOptions(
+      size: Size(1280, 720),
+      center: true,
+      title: 'Kaptchi',
+    );
+    windowManager.waitUntilReadyToShow(windowOptions, () async {
+      await windowManager.show();
+      await windowManager.focus();
+    });
+  }
+
   runApp(const MyApp());
 }
 

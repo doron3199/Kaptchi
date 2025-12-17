@@ -9,6 +9,15 @@
 // Forward declaration
 void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count);
 
+// --- Global State for Filters ---
+static cv::Mat g_prev_gray_stab;
+static cv::Point2f g_shaking_offset(0,0);
+static float g_avg_brightness = -1.0f;
+
+// Person Removal Smooth Mask
+static cv::Mat g_person_prob_mask;
+
+
 // Helper to get absolute path to models
 std::string GetModelPath(const std::string& modelName) {
     char buffer[MAX_PATH];
@@ -389,6 +398,11 @@ static void ApplySharpening(cv::Mat& frame) {
 }
 
 static void ApplyMovingAverage(cv::Mat& frame) {
+    // Clear history if frame size changed (e.g., camera switch)
+    if (!g_frame_history.empty() && g_frame_history.front().size() != frame.size()) {
+        g_frame_history.clear();
+    }
+
     g_frame_history.push_back(frame.clone());
     if (g_frame_history.size() > g_history_size) {
         g_frame_history.pop_front();
@@ -491,6 +505,110 @@ static void ApplySmartObstacleRemoval(cv::Mat& frame) {
 
     frame.copyTo(g_accumulated_background, update_mask);
     g_accumulated_background.copyTo(frame);
+}
+
+// --- New Filters ---
+
+static void ApplyStabilization(cv::Mat& frame) {
+    cv::Mat gray;
+    cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
+    
+    if (g_prev_gray_stab.empty() || g_prev_gray_stab.size() != gray.size()) {
+        gray.copyTo(g_prev_gray_stab);
+        return;
+    }
+
+    // Phase correlation to find translation
+    cv::Mat window; // Hanning window to reduce edge effects
+    cv::createHanningWindow(window, gray.size(), CV_32F);
+    
+    // 2. Prepare floating point images for phaseCorrelate (MUST be CV_32F or CV_64F)
+    cv::Mat prev_32f, curr_32f;
+    g_prev_gray_stab.convertTo(prev_32f, CV_32F);
+    gray.convertTo(curr_32f, CV_32F);
+
+    // 3. Estimate translation
+    // phaseCorrelate returns the shift to align prev to curr (or curr to prev?)
+    // actually it calculates shift from src1 to src2. 
+    cv::Point2d shift = cv::phaseCorrelate(prev_32f, curr_32f, window);
+    
+    // Check confidence or max shift?
+    // simple low-pass filter on the shift
+    // We want to counteract the shift.
+    // If camera moved (dx, dy), we want to shift image by (-dx, -dy) to keep it stable relative to previous.
+    // However, we don't want to freeze panning. We only want to remove high freq jitter.
+    
+    // Current "absolute" position relative to stabilized view
+    // smoothed_pos = alpha * (smoothed_pos + shift) + (1-alpha) * 0 ? 
+    // Simplify: Just dampen the inter-frame movement
+    
+    double dx = shift.x;
+    double dy = shift.y;
+    
+    // Ignore large shifts (intentional panning)
+    if (fabs(dx) > 20 || fabs(dy) > 20) {
+        dx = 0;
+        dy = 0;
+    }
+
+    // Accumulate offset (with decay to re-center)
+    g_shaking_offset.x = g_shaking_offset.x * 0.9f - (float)dx;
+    g_shaking_offset.y = g_shaking_offset.y * 0.9f - (float)dy;
+    
+    // Build affine matrix
+    cv::Mat M = (cv::Mat_<double>(2,3) << 1, 0, g_shaking_offset.x, 0, 1, g_shaking_offset.y);
+    
+    cv::Mat stabilized;
+    cv::warpAffine(frame, stabilized, M, frame.size());
+    
+    stabilized.copyTo(frame);
+    gray.copyTo(g_prev_gray_stab);
+}
+
+static void ApplyLightStabilization(cv::Mat& frame) {
+    cv::Mat hsv;
+    cv::cvtColor(frame, hsv, cv::COLOR_BGR2HSV);
+    
+    // Calculate mean brightness (V channel is index 2)
+    // Faster: just subsample
+    cv::Scalar mean = cv::mean(hsv);
+    float current_v = (float)mean[2];
+    
+    if (g_avg_brightness < 0) {
+        g_avg_brightness = current_v;
+    } else {
+        // Smooth changes
+        g_avg_brightness = g_avg_brightness * 0.95f + current_v * 0.05f;
+    }
+    
+    if (current_v > 1.0f) { // Avoid div by zero
+        float gain = g_avg_brightness / current_v;
+        // Clamp gain to avoid extreme noise
+        if (gain < 0.8f) gain = 0.8f;
+        if (gain > 1.2f) gain = 1.2f;
+        
+        // Apply gain to V channel
+        // Splitting is slow, can we do it in place?
+        // Iterate or use scaling
+        // hsv is 3 channels. 
+        // We can use convertScaleAbs on the V channel if we split.
+        
+        std::vector<cv::Mat> channels;
+        cv::split(hsv, channels);
+        channels[2] = channels[2] * gain; 
+        cv::merge(channels, hsv);
+        
+        cv::cvtColor(hsv, frame, cv::COLOR_HSV2BGR);
+    }
+}
+
+static void ApplyCornerSmoothing(cv::Mat& frame) {
+    // Bilateral Filter is good for edge preserving smoothing
+    cv::Mat temp;
+    // d=5, sigmaColor=75, sigmaSpace=75 is standard
+    // For "Corner Smoothing" (Text Readability), we might want stronger smoothing on flat areas?
+    cv::bilateralFilter(frame, temp, 9, 75, 75);
+    temp.copyTo(frame);
 }
 
 // --- YOLOv11 Person Detection Helpers ---
@@ -671,9 +789,35 @@ static void ApplyYOLO11Detection(cv::Mat& frame) {
         // Update the 8-bit background model for next time
         cv::convertScaleAbs(g_bg_model_float, g_bg_model_8u);
 
-        // 4. Replace Persons in Current Frame
+        // 4. Update/Smooth Person Mask
+        // To prevent flickering: use a probaility mask with decay
+        // mask_prob = mask_prob * 0.8 + new_mask * 0.2
+        
+        if (g_person_prob_mask.empty() || g_person_prob_mask.size() != frame.size()) {
+             g_person_prob_mask = cv::Mat::zeros(frame.size(), CV_32FC1);
+        }
+        
+        cv::Mat current_detection_f;
+        person_mask.convertTo(current_detection_f, CV_32F, 1.0/255.0);
+        
+        // Decay existing probability
+        // If person detected (1.0), prob increases. If not (0.0), prob decreases.
+        // alpha up = 0.4 (fast appear), alpha down = 0.1 (slow disappear)
+        
+        // Ideally we do: new_prob = old_prob * (1-alpha) + new_det * alpha
+        // But we want asymmetric decay
+        // Let's stick to simple exponential moving average for now, but bias towards keeping it?
+        
+        cv::accumulateWeighted(current_detection_f, g_person_prob_mask, 0.2); // 0.2 speed
+        
+        // Threshold to get binary mask
+        // If prob > 0.2 (arbitrary), treat as person
+        cv::Mat final_mask;
+        cv::compare(g_person_prob_mask, 0.2, final_mask, cv::CMP_GT); // binary 255/0
+        
+        // 5. Replace Persons in Current Frame
         // Copy the clean background pixels onto the current frame where persons are detected
-        g_bg_model_8u.copyTo(frame, person_mask);
+        g_bg_model_8u.copyTo(frame, final_mask);
     } catch (const cv::Exception& e) {
         std::cerr << "YOLO Inference Error: " << e.what() << std::endl;
         g_yolo11_failed = true; 
@@ -707,8 +851,88 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
             ApplySharpening(bgr);
         } else if (mode == 11) { // YOLOv11 Person Detection
             ApplyYOLO11Detection(bgr);
+        } else if (mode == 12) { // Shaking Stabilization
+            ApplyStabilization(bgr);
+        } else if (mode == 13) { // Light Stabilization
+            ApplyLightStabilization(bgr);
+        } else if (mode == 14) { // Corner Smoothing
+            ApplyCornerSmoothing(bgr);
         }
     }
+}
+
+// --- Perspective Crop Export ---
+
+extern "C" __declspec(dllexport) void ProcessPerspectiveCrop(
+    uint8_t* inputBytes, int inputSize,
+    double* corners, // 8 doubles: x1,y1, x2,y2, x3,y3, x4,y4 (TL, TR, BR, BL) - Normalized 0..1
+    uint8_t** outputBytes, int* outputSize
+) {
+    if (inputBytes == nullptr || inputSize <= 0) return;
+
+    // 1. Decode
+    std::vector<uint8_t> data(inputBytes, inputBytes + inputSize);
+    cv::Mat image = cv::imdecode(data, cv::IMREAD_COLOR);
+    if (image.empty()) return;
+
+    // 2. Points
+    // Corners are normalized (0..1). Convert to image coords.
+    std::vector<cv::Point2f> srcPoints;
+    for(int i=0; i<4; i++) {
+        srcPoints.push_back(cv::Point2f((float)(corners[i*2] * image.cols), (float)(corners[i*2+1] * image.rows)));
+    }
+
+    // 3. Destination Size & Points
+    // We need to estimate the width/height of the rectified image.
+    // Width = max(dist(TL, TR), dist(BL, BR))
+    // Height = max(dist(TL, BL), dist(TR, BR))
+    
+    auto dist = [](cv::Point2f a, cv::Point2f b) -> float {
+        return (float)std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2));
+    };
+
+    float w1 = dist(srcPoints[0], srcPoints[1]);
+    float w2 = dist(srcPoints[3], srcPoints[2]);
+    float maxWidth = std::max(w1, w2);
+
+    float h1 = dist(srcPoints[0], srcPoints[3]);
+    float h2 = dist(srcPoints[1], srcPoints[2]);
+    float maxHeight = std::max(h1, h2);
+
+    std::vector<cv::Point2f> dstPoints;
+    dstPoints.push_back(cv::Point2f(0, 0));
+    dstPoints.push_back(cv::Point2f(maxWidth - 1, 0));
+    dstPoints.push_back(cv::Point2f(maxWidth - 1, maxHeight - 1));
+    dstPoints.push_back(cv::Point2f(0, maxHeight - 1));
+
+    // 4. Perspective Transform
+    cv::Mat M = cv::getPerspectiveTransform(srcPoints, dstPoints);
+    cv::Mat warped;
+    cv::warpPerspective(image, warped, M, cv::Size((int)maxWidth, (int)maxHeight));
+
+    // 5. Encode
+    std::vector<uint8_t> encoded;
+    cv::imencode(".jpg", warped, encoded);
+
+    // 6. Copy to output buffer (Caller must free used dedicated Free function if we were strict, 
+    // but here we allocate using CoTaskMemAlloc or similar if crossing interop? 
+    // Standard Dart FFI with "malloc" usually allocates via system malloc.
+    // If we return a pointer, Dart needs to free it using the same allocator.
+    
+    // Safer: Dart allocates output buffer? No, size is unknown.
+    // We will allocate here using malloc, and Dart `calloc.free` (from ffi) is compatible on Windows (usually).
+    // Or we keep it simple: Use a global buffer? No, concurrency issues.
+    // Use `CoTaskMemAlloc` on Windows for COM compatibility? 
+    // Flutter `ffi` package uses standard `malloc/free`.
+    // Let's use `malloc`.
+    
+    *outputSize = (int)encoded.size();
+    *outputBytes = (uint8_t*)malloc(*outputSize);
+    memcpy(*outputBytes, encoded.data(), *outputSize);
+}
+
+extern "C" __declspec(dllexport) void FreeBuffer(uint8_t* buffer) {
+    if (buffer) free(buffer);
 }
 
 // FFI Exports
