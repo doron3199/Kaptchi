@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 import '../services/media_server_service.dart';
 import '../services/raw_socket_service.dart';
 
@@ -74,7 +75,7 @@ class _MobileConnectionDialogState extends State<MobileConnectionDialog> {
   @override
   Widget build(BuildContext context) {
     return AlertDialog(
-      title: const Text('Connect Mobile Camera'),
+      title: Text(AppLocalizations.of(context)!.connectMobileCamera),
       content: SizedBox(
         width: 300,
         height: 450,
@@ -89,9 +90,12 @@ class _MobileConnectionDialogState extends State<MobileConnectionDialog> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text(
-                        'Server Interface:',
-                        style: TextStyle(color: Colors.grey, fontSize: 12),
+                      Text(
+                        AppLocalizations.of(context)!.serverInterface,
+                        style: const TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                        ),
                       ),
                       DropdownButton<String>(
                         value: _serverIp,
@@ -127,7 +131,7 @@ class _MobileConnectionDialogState extends State<MobileConnectionDialog> {
                 ),
                 const SizedBox(height: 16),
                 Text(
-                  'Scan with Kaptchi mobile app',
+                  AppLocalizations.of(context)!.scanWithApp,
                   style: TextStyle(fontSize: 16, color: Colors.grey[600]),
                   textAlign: TextAlign.center,
                 ),
@@ -135,21 +139,28 @@ class _MobileConnectionDialogState extends State<MobileConnectionDialog> {
 
                 // Media Server Status
                 if (MediaServerService.instance.isRunning)
-                  const Row(
+                  Row(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Icon(Icons.check_circle, color: Colors.green, size: 16),
-                      SizedBox(width: 8),
+                      const Icon(
+                        Icons.check_circle,
+                        color: Colors.green,
+                        size: 16,
+                      ),
+                      const SizedBox(width: 8),
                       Text(
-                        'Media Server Running',
-                        style: TextStyle(color: Colors.green, fontSize: 12),
+                        AppLocalizations.of(context)!.mediaServerRunning,
+                        style: const TextStyle(
+                          color: Colors.green,
+                          fontSize: 12,
+                        ),
                       ),
                     ],
                   )
                 else
-                  const Text(
-                    'Media Server Stopped',
-                    style: TextStyle(color: Colors.red, fontSize: 12),
+                  Text(
+                    AppLocalizations.of(context)!.mediaServerStopped,
+                    style: const TextStyle(color: Colors.red, fontSize: 12),
                     textAlign: TextAlign.center,
                   ),
               ],
@@ -160,7 +171,7 @@ class _MobileConnectionDialogState extends State<MobileConnectionDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(context),
-          child: const Text('Close'),
+          child: Text(AppLocalizations.of(context)!.close),
         ),
       ],
     );

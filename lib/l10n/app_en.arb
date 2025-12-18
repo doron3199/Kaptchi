@@ -1,0 +1,159 @@
+{
+  "appTitle": "Kaptchi",
+  "settings": "Settings",
+  "language": "Language",
+  "english": "English",
+  "hebrew": "Hebrew",
+  "availableCameras": "Available Cameras",
+  "noCamerasFound": "No cameras found",
+  "exportSettings": "Export Settings",
+  "fileName": "File Name",
+  "saveLocation": "Save Location",
+  "exportPdf": "Export {count} Images to PDF",
+  "@exportPdf": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "connectMobileCamera": "Connect Mobile Camera",
+  "serverInterface": "Server Interface:",
+  "scanWithApp": "Scan with Kaptchi mobile app",
+  "streamDisconnected": "Stream disconnected",
+  "permissionsRequired": "Camera and Microphone permissions are required for streaming",
+  "failedToStartStream": "Failed to start stream: {error}",
+  "@failedToStartStream": {
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "failedToResumeStream": "Failed to resume stream: {error}",
+  "@failedToResumeStream": {
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "rtmpNotSupported": "RTMP not supported on this platform",
+  "errorStartingCamera": "Error starting camera: {error}",
+  "@errorStartingCamera": {
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "captureFrameError": "Failed to capture frame",
+  "boundaryNotFoundError": "Failed to capture frame: boundary not found",
+  "errorCapturingFrame": "Error capturing frame: {error}",
+  "@errorCapturingFrame": {
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "groupName": "Group Name",
+  "selectFilters": "Select Filters:",
+  "delete": "Delete",
+  "cancel": "Cancel",
+  "save": "Save",
+  "allFilters": "All Filters",
+  "filterGroups": "Filter Groups",
+  "editFilterGroup": "Edit Filter Group",
+  "addFilterGroup": "Add Filter Group",
+  "activeFiltersCount": "{count} active filters",
+  "@activeFiltersCount": {
+    "placeholders": {
+      "count": {
+        "type": "int"
+      }
+    }
+  },
+  "dragToReorder": "Drag to reorder. Top filters apply first.",
+  "capturedImages": "Captured Images",
+  "noImagesCaptured": "No images captured",
+  "imageIndex": "Image {index}",
+  "@imageIndex": {
+    "placeholders": {
+      "index": {
+        "type": "int"
+      }
+    }
+  },
+  "exportToPdf": "Export to PDF",
+  "exportPdfButton": "Export PDF",
+  "close": "Close",
+  "edit": "Edit",
+  "crop": "Crop",
+  "overlay": "Overlay",
+  "fullscreenExit": "Exit Fullscreen",
+  "transmissionTitle": "Transmitting",
+  "stopTransmission": "Stop Transmission",
+  "cameraMode": "Camera Mode",
+  "openFilters": "Open Filters",
+  "closeFilters": "Close Filters",
+  "backToHome": "Back to Home",
+  "openGallery": "Open Gallery",
+  "closeGallery": "Close Gallery",
+  "switchCamera": "Switch Camera",
+  "lockZoom": "Lock Zoom to Pan",
+  "unlockZoom": "Unlock Zoom",
+  "quickDraw": "Quick Draw",
+  "captureFrame": "Capture Frame",
+  "tryNextCamera": "Try Next Camera",
+  "cameraFailed": "Camera failed to initialize",
+
+  "noCamerasFound": "No cameras found",
+  "scanQrCode": "Scan QR Code",
+  "unsavedImagesTitle": "Unsaved Images",
+  "unsavedImagesMessage": "You have images in your gallery that are not exported. They will be lost if you exit. Are you sure?",
+  "exit": "Exit",
+  "pdfSaved": "Saved PDF to {path}",
+  "@pdfSaved": {
+    "placeholders": {
+      "path": {
+        "type": "String"
+      }
+    }
+  },
+  "pdfExportError": "Error exporting PDF: {error}",
+  "@pdfExportError": {
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "mediaServerRunning": "Media Server Running",
+  "mediaServerStopped": "Media Server Stopped",
+  "editImage": "Edit Image",
+  "perspective": "Perspective",
+  "rectangular": "Rectangular",
+  "cropFailed": "Crop Failed",
+  "cropImageTitle": "Crop Image",
+  "selectVideoSource": "Select Video Source",
+  "localCameras": "Local Cameras",
+  "remoteStreams": "Remote Streams",
+  "mobileApp": "Mobile App",
+  "connectViaQr": "Connect via QR Code",
+
+  "filterShakingStabilization": "Shaking Stabilization",
+  "filterLightStabilization": "Light Stabilization",
+  "filterCornerSmoothing": "Corner Smoothing",
+  "filterSharpening": "Sharpening",
+  "filterContrastBoost": "Contrast Boost (CLAHE)",
+  "filterMovingAverage": "Moving Average",
+  "filterSmartObstacleRemoval": "Smart Obstacle Removal",
+  "filterSmartWhiteboard": "Smart Whiteboard",
+  "filterPersonRemoval": "Person Removal (AI)",
+  "filterBlurLegacy": "Blur (Legacy)",
+  "filterInvertColors": "Invert Colors",
+  "filterWhiteboardLegacy": "Whiteboard (Legacy)",
+  "filterGroupStabilizers": "Stabilizers",
+  "filterGroupWhiteboard": "Whiteboard"
+}
