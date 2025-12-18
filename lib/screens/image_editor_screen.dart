@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 
 class StrokePoint {
   final Offset point;
@@ -289,7 +290,7 @@ class _ImageEditorScreenState extends State<ImageEditorScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
-        title: const Text('Edit Image'),
+        title: Text(AppLocalizations.of(context)!.editImage),
         backgroundColor: Colors.black,
         actions: [
           // Top actions removed (moved to bottom)

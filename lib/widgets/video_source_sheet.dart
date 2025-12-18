@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 
 class VideoSourceSheet extends StatelessWidget {
   final List<CameraDescription> cameras;
@@ -21,19 +22,19 @@ class VideoSourceSheet extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              'Select Video Source',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            Text(
+              AppLocalizations.of(context)!.selectVideoSource,
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
 
             // Local Cameras
             if (cameras.isNotEmpty) ...[
-              const Align(
+              Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Local Cameras',
-                  style: TextStyle(
+                  AppLocalizations.of(context)!.localCameras,
+                  style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.grey,
                   ),
@@ -64,11 +65,11 @@ class VideoSourceSheet extends StatelessWidget {
               const Divider(),
             ],
 
-            const Align(
+            Align(
               alignment: Alignment.centerLeft,
               child: Text(
-                'Remote Streams',
-                style: TextStyle(
+                AppLocalizations.of(context)!.remoteStreams,
+                style: const TextStyle(
                   fontWeight: FontWeight.bold,
                   color: Colors.grey,
                 ),
@@ -76,8 +77,8 @@ class VideoSourceSheet extends StatelessWidget {
             ),
             ListTile(
               leading: const Icon(Icons.phone_android),
-              title: const Text('Mobile App'),
-              subtitle: const Text('Connect via QR Code'),
+              title: Text(AppLocalizations.of(context)!.mobileApp),
+              subtitle: Text(AppLocalizations.of(context)!.connectViaQr),
               onTap: onSelectMobile,
             ),
           ],

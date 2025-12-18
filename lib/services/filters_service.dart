@@ -59,25 +59,29 @@ class FiltersService extends ChangeNotifier {
   FiltersService._();
 
   final List<FilterItem> _filters = [
-    FilterItem(id: 12, name: 'Shaking Stabilization', isActive: false),
-    FilterItem(id: 13, name: 'Light Stabilization', isActive: false),
-    FilterItem(id: 14, name: 'Corner Smoothing', isActive: false),
-    FilterItem(id: 8, name: 'Sharpening', isActive: false),
-    FilterItem(id: 7, name: 'Contrast Boost (CLAHE)', isActive: false),
-    FilterItem(id: 6, name: 'Moving Average', isActive: false),
-    FilterItem(id: 5, name: 'Smart Obstacle Removal', isActive: false),
-    FilterItem(id: 4, name: 'Smart Whiteboard', isActive: false),
-    FilterItem(id: 11, name: 'Person Removal (AI)', isActive: false),
-    FilterItem(id: 3, name: 'Blur (Legacy)', isActive: false),
-    FilterItem(id: 1, name: 'Invert Colors', isActive: false),
-    FilterItem(id: 2, name: 'Whiteboard (Legacy)', isActive: false),
+    FilterItem(id: 12, name: 'filterShakingStabilization', isActive: false),
+    FilterItem(id: 13, name: 'filterLightStabilization', isActive: false),
+    FilterItem(id: 14, name: 'filterCornerSmoothing', isActive: false),
+    FilterItem(id: 8, name: 'filterSharpening', isActive: false),
+    FilterItem(id: 7, name: 'filterContrastBoost', isActive: false),
+    FilterItem(id: 6, name: 'filterMovingAverage', isActive: false),
+    FilterItem(id: 5, name: 'filterSmartObstacleRemoval', isActive: false),
+    FilterItem(id: 4, name: 'filterSmartWhiteboard', isActive: false),
+    FilterItem(id: 11, name: 'filterPersonRemoval', isActive: false),
+    FilterItem(id: 3, name: 'filterBlurLegacy', isActive: false),
+    FilterItem(id: 1, name: 'filterInvertColors', isActive: false),
+    FilterItem(id: 2, name: 'filterWhiteboardLegacy', isActive: false),
   ];
 
   final List<FilterGroup> _filterGroups = [
-    FilterGroup(id: 'stabilizers', name: 'Stabilizers', filterIds: [12, 13]),
+    FilterGroup(
+      id: 'stabilizers',
+      name: 'filterGroupStabilizers',
+      filterIds: [12, 13],
+    ),
     FilterGroup(
       id: 'whiteboard',
-      name: 'Whiteboard',
+      name: 'filterGroupWhiteboard',
       filterIds: [6, 8, 4, 11, 1],
     ),
   ];
@@ -88,20 +92,28 @@ class FiltersService extends ChangeNotifier {
   Future<void> loadFilters() async {
     final prefs = await SharedPreferences.getInstance();
 
+    // Migration: Check if we need to clear old format
     final String? filtersJson = prefs.getString('saved_filters');
     if (filtersJson != null) {
       final List<dynamic> decoded = jsonDecode(filtersJson);
-      final List<FilterItem> loadedFilters = decoded
-          .map((item) => FilterItem.fromJson(item))
-          .toList();
 
-      // Ensure filters are off on app start
-      for (var f in loadedFilters) {
-        f.isActive = false;
+      // Build a map of saved filter order by ID
+      final Map<int, int> savedOrder = {};
+      for (int i = 0; i < decoded.length; i++) {
+        savedOrder[decoded[i]['id'] as int] = i;
       }
 
-      _filters.clear();
-      _filters.addAll(loadedFilters);
+      // Reorder _filters according to saved order while keeping current names (translation keys)
+      _filters.sort((a, b) {
+        final orderA = savedOrder[a.id] ?? 999;
+        final orderB = savedOrder[b.id] ?? 999;
+        return orderA.compareTo(orderB);
+      });
+
+      // Note: isActive is always set to false on app start
+      for (var f in _filters) {
+        f.isActive = false;
+      }
     }
 
     final String? groupsJson = prefs.getString('saved_filter_groups');
@@ -111,9 +123,16 @@ class FiltersService extends ChangeNotifier {
           .map((item) => FilterGroup.fromJson(item))
           .toList();
 
-      // Ensure groups are off on app start
+      // For groups, we need to preserve user-created groups but use translation keys for built-in ones
+      // Check if the group has a built-in ID and update its name to the translation key
       for (var g in loadedGroups) {
         g.isActive = false;
+        if (g.id == 'stabilizers') {
+          g.name = 'filterGroupStabilizers';
+        } else if (g.id == 'whiteboard') {
+          g.name = 'filterGroupWhiteboard';
+        }
+        // User-created groups keep their original names
       }
 
       _filterGroups.clear();

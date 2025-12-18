@@ -12,6 +12,8 @@ import 'camera_screen.dart';
 import 'package:pdf/pdf.dart';
 import 'package:pdf/widgets.dart' as pw;
 import 'package:path_provider/path_provider.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
+import 'settings_screen.dart';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -110,18 +112,19 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       final shouldExit = await showDialog<bool>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Unsaved Images'),
-          content: const Text(
-            'You have images in your gallery that are not exported. They will be lost if you exit. Are you sure?',
-          ),
+          title: Text(AppLocalizations.of(context)!.unsavedImagesTitle),
+          content: Text(AppLocalizations.of(context)!.unsavedImagesMessage),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Cancel'),
+              child: Text(AppLocalizations.of(context)!.cancel),
             ),
             TextButton(
               onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('Exit', style: TextStyle(color: Colors.red)),
+              child: Text(
+                AppLocalizations.of(context)!.exit,
+                style: const TextStyle(color: Colors.red),
+              ),
             ),
           ],
         ),
@@ -264,15 +267,21 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       GalleryService.instance.clear();
 
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Saved PDF to ${file.path}')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(AppLocalizations.of(context)!.pdfSaved(file.path)),
+        ),
+      );
     } catch (e) {
       debugPrint('Error exporting PDF: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error exporting PDF: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            AppLocalizations.of(context)!.pdfExportError(e.toString()),
+          ),
+        ),
+      );
     }
   }
 
@@ -311,7 +320,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
   Widget build(BuildContext context) {
     if (Platform.isAndroid || Platform.isIOS) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Scan QR Code')),
+        appBar: AppBar(title: Text(AppLocalizations.of(context)!.scanQrCode)),
         body: _isScanning
             ? MobileScanner(onDetect: _onDetect)
             : const Center(child: CircularProgressIndicator()),
@@ -319,7 +328,21 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Kaptchi Start')),
+      appBar: AppBar(
+        title: Text(AppLocalizations.of(context)!.appTitle),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.settings),
+            tooltip: AppLocalizations.of(context)!.settings,
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const SettingsScreen()),
+              );
+            },
+          ),
+        ],
+      ),
       body: Row(
         children: [
           // Left side: Camera List
@@ -329,11 +352,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
               color: Colors.black,
               child: Column(
                 children: [
-                  const Padding(
+                  Padding(
                     padding: EdgeInsets.all(16.0),
                     child: Text(
-                      'Available Cameras',
-                      style: TextStyle(
+                      AppLocalizations.of(context)!.availableCameras,
+                      style: const TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
                         color: Colors.white,
@@ -342,10 +365,10 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                   ),
                   Expanded(
                     child: _cameras.isEmpty
-                        ? const Center(
+                        ? Center(
                             child: Text(
-                              'No cameras found',
-                              style: TextStyle(color: Colors.white),
+                              AppLocalizations.of(context)!.noCamerasFound,
+                              style: const TextStyle(color: Colors.white),
                             ),
                           )
                         : ListView.builder(
@@ -402,9 +425,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
                           const Divider(color: Colors.white24),
-                          const Text(
-                            'Export Settings',
-                            style: TextStyle(
+                          Text(
+                            AppLocalizations.of(context)!.exportSettings,
+                            style: const TextStyle(
                               color: Colors.white,
                               fontWeight: FontWeight.bold,
                             ),
@@ -416,9 +439,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                             onChanged: (val) {
                               // Local state only
                             },
-                            decoration: const InputDecoration(
-                              labelText: 'File Name',
-                              labelStyle: TextStyle(color: Colors.white70),
+                            decoration: InputDecoration(
+                              labelText: AppLocalizations.of(context)!.fileName,
+                              labelStyle: const TextStyle(
+                                color: Colors.white70,
+                              ),
                               enabledBorder: UnderlineInputBorder(
                                 borderSide: BorderSide(color: Colors.white70),
                               ),
@@ -435,9 +460,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                                     fontSize: 12,
                                   ),
                                   readOnly: true,
-                                  decoration: const InputDecoration(
-                                    labelText: 'Save Location',
-                                    labelStyle: TextStyle(
+                                  decoration: InputDecoration(
+                                    labelText: AppLocalizations.of(
+                                      context,
+                                    )!.saveLocation,
+                                    labelStyle: const TextStyle(
                                       color: Colors.white70,
                                     ),
                                     enabledBorder: UnderlineInputBorder(
@@ -464,7 +491,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                               onPressed: _exportPdf,
                               icon: const Icon(Icons.picture_as_pdf),
                               label: Text(
-                                'Export ${GalleryService.instance.images.length} Images to PDF',
+                                AppLocalizations.of(context)!.exportPdf(
+                                  GalleryService.instance.images.length,
+                                ),
                               ),
                               style: ElevatedButton.styleFrom(
                                 backgroundColor: Colors.indigo,
@@ -493,9 +522,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     const SizedBox(height: 32), // Add some top padding
-                    const Text(
-                      'Connect Mobile Camera',
-                      style: TextStyle(
+                    Text(
+                      AppLocalizations.of(context)!.connectMobileCamera,
+                      style: const TextStyle(
                         fontSize: 24,
                         fontWeight: FontWeight.bold,
                         color: Colors.white,
@@ -513,9 +542,9 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            const Text(
-                              'Server Interface:',
-                              style: TextStyle(
+                            Text(
+                              AppLocalizations.of(context)!.serverInterface,
+                              style: const TextStyle(
                                 color: Colors.grey,
                                 fontSize: 12,
                               ),
@@ -559,21 +588,25 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                       Container(
                         color: Colors.white,
                         padding: const EdgeInsets.all(16),
-                        child: QrImageView(
-                          data: 'rtmp://$_serverIp/live/stream',
-                          version: QrVersions.auto,
-                          size: 250.0,
+                        child: Semantics(
+                          label:
+                              'QR Code for server: rtmp://${_serverIp}/live/stream',
+                          child: QrImageView(
+                            data: 'rtmp://$_serverIp/live/stream',
+                            version: QrVersions.auto,
+                            size: 250.0,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'Scan with Kaptchi mobile app',
+                        AppLocalizations.of(context)!.scanWithApp,
                         style: TextStyle(fontSize: 16, color: Colors.grey[400]),
                       ),
                       const SizedBox(height: 16),
 
                       if (_isMediaServerRunning)
-                        const Row(
+                        Row(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
                             Icon(
@@ -583,8 +616,8 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                             ),
                             SizedBox(width: 8),
                             Text(
-                              'Media Server Running',
-                              style: TextStyle(
+                              AppLocalizations.of(context)!.mediaServerRunning,
+                              style: const TextStyle(
                                 color: Colors.green,
                                 fontSize: 12,
                               ),
@@ -592,9 +625,12 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                           ],
                         )
                       else
-                        const Text(
-                          'Media Server Stopped',
-                          style: TextStyle(color: Colors.grey, fontSize: 12),
+                        Text(
+                          AppLocalizations.of(context)!.mediaServerStopped,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
                           textAlign: TextAlign.center,
                         ),
                     ],

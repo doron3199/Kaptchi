@@ -1,6 +1,7 @@
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 import '../services/image_processing_service.dart';
 
 class CropScreen extends StatefulWidget {
@@ -138,7 +139,10 @@ class _CropScreenState extends State<CropScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.black,
-      appBar: AppBar(title: const Text('Crop Image'), actions: []),
+      appBar: AppBar(
+        title: Text(AppLocalizations.of(context)!.cropImageTitle),
+        actions: [],
+      ),
       bottomNavigationBar: Container(
         color: Colors.black,
         padding: const EdgeInsets.all(16),
@@ -147,7 +151,9 @@ class _CropScreenState extends State<CropScreen> {
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
               Text(
-                _isFreeForm ? "Perspective" : "Rectangular",
+                _isFreeForm
+                    ? AppLocalizations.of(context)!.perspective
+                    : AppLocalizations.of(context)!.rectangular,
                 style: const TextStyle(color: Colors.white),
               ),
               Switch(
@@ -204,7 +210,9 @@ class _CropScreenState extends State<CropScreen> {
                     Navigator.pop(context, result);
                   } else {
                     ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(content: Text("Crop Failed")),
+                      SnackBar(
+                        content: Text(AppLocalizations.of(context)!.cropFailed),
+                      ),
                     );
                     // Return original image if crop failed
                     Navigator.pop(context, widget.imageBytes);

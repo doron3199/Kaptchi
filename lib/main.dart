@@ -6,6 +6,9 @@ import 'services/media_server_service.dart';
 import 'services/image_processing_service.dart';
 
 import 'package:window_manager/window_manager.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
+import 'services/language_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,6 +22,7 @@ void main() async {
   }
 
   if (Platform.isWindows) {
+    await LanguageService.instance.initialize();
     await ImageProcessingService.instance.initialize();
     await windowManager.ensureInitialized();
     WindowOptions windowOptions = const WindowOptions(
@@ -64,18 +68,31 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      debugShowCheckedModeBanner: false,
-      title: 'Kaptchi',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.blue,
-          brightness: Brightness.dark,
-        ),
-        scaffoldBackgroundColor: Colors.black,
-        useMaterial3: true,
-      ),
-      home: const HomeScreen(),
+    return ValueListenableBuilder<Locale>(
+      valueListenable: LanguageService.instance.localeNotifier,
+      builder: (context, locale, child) {
+        return MaterialApp(
+          locale: locale,
+          localizationsDelegates: [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          supportedLocales: const [Locale('en'), Locale('he')],
+          debugShowCheckedModeBanner: false,
+          title: 'Kaptchi',
+          theme: ThemeData(
+            colorScheme: ColorScheme.fromSeed(
+              seedColor: Colors.blue,
+              brightness: Brightness.dark,
+            ),
+            scaffoldBackgroundColor: Colors.black,
+            useMaterial3: true,
+          ),
+          home: const HomeScreen(),
+        );
+      },
     );
   }
 }

@@ -11,6 +11,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:image/image.dart' as img;
 import 'package:file_picker/file_picker.dart';
+import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -198,7 +199,11 @@ class _CameraScreenState extends State<CameraScreen>
               if (_isStreamMode &&
                   (_activeStreamUrl?.contains(path) ?? false)) {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('Stream disconnected')),
+                  SnackBar(
+                    content: Text(
+                      AppLocalizations.of(context)!.streamDisconnected,
+                    ),
+                  ),
                 );
                 // If we are in the camera screen, pop back to home
                 // Assuming CameraScreen is pushed on top of HomeScreen
@@ -324,10 +329,8 @@ class _CameraScreenState extends State<CameraScreen>
         statuses[Permission.microphone] != PermissionStatus.granted) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-              'Camera and Microphone permissions are required for streaming',
-            ),
+          SnackBar(
+            content: Text(AppLocalizations.of(context)!.permissionsRequired),
           ),
         );
       }
@@ -357,9 +360,13 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (e) {
       debugPrint('Failed to start RTMP streaming: $e');
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('Failed to start stream: $e')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              AppLocalizations.of(context)!.failedToStartStream(e.toString()),
+            ),
+          ),
+        );
       }
     }
   }
@@ -427,7 +434,13 @@ class _CameraScreenState extends State<CameraScreen>
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Failed to resume stream: $e')),
+            SnackBar(
+              content: Text(
+                AppLocalizations.of(
+                  context,
+                )!.failedToResumeStream(e.toString()),
+              ),
+            ),
           );
         }
       } finally {
@@ -476,8 +489,8 @@ class _CameraScreenState extends State<CameraScreen>
       } else {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('RTMP not supported on this platform'),
+            SnackBar(
+              content: Text(AppLocalizations.of(context)!.rtmpNotSupported),
             ),
           );
         }
@@ -698,9 +711,13 @@ class _CameraScreenState extends State<CameraScreen>
           setState(() {
             _isInitialized = false;
           });
-          ScaffoldMessenger.of(
-            context,
-          ).showSnackBar(SnackBar(content: Text('Error starting camera: $e')));
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                AppLocalizations.of(context)!.errorStartingCamera(e.toString()),
+              ),
+            ),
+          );
         }
       }
     }
@@ -722,8 +739,10 @@ class _CameraScreenState extends State<CameraScreen>
       if (boundary == null) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('Failed to capture frame: boundary not found'),
+            SnackBar(
+              content: Text(
+                AppLocalizations.of(context)!.boundaryNotFoundError,
+              ),
             ),
           );
         }
@@ -740,7 +759,9 @@ class _CameraScreenState extends State<CameraScreen>
 
       if (byteData == null) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to capture frame')),
+          SnackBar(
+            content: Text(AppLocalizations.of(context)!.captureFrameError),
+          ),
         );
         return;
       }
@@ -755,9 +776,13 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (e) {
       debugPrint('Error capturing frame: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Error capturing frame: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            AppLocalizations.of(context)!.errorCapturingFrame(e.toString()),
+          ),
+        ),
+      );
     }
   }
 
@@ -937,7 +962,9 @@ class _CameraScreenState extends State<CameraScreen>
   Widget build(BuildContext context) {
     if (widget.connectionUrl != null) {
       return Scaffold(
-        appBar: AppBar(title: const Text('Transmitting')),
+        appBar: AppBar(
+          title: Text(AppLocalizations.of(context)!.transmissionTitle),
+        ),
         body: Stack(
           children: [
             // Video Preview
@@ -965,7 +992,9 @@ class _CameraScreenState extends State<CameraScreen>
                         Navigator.pop(context);
                       },
                       icon: const Icon(Icons.stop),
-                      label: const Text('Stop Transmission'),
+                      label: Text(
+                        AppLocalizations.of(context)!.stopTransmission,
+                      ),
                       style: ElevatedButton.styleFrom(
                         backgroundColor: Colors.red,
                         foregroundColor: Colors.white,
@@ -984,373 +1013,419 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Camera Mode'),
-        leading: IconButton(
-          icon: Icon(_isLeftSidebarOpen ? Icons.chevron_left : Icons.tune),
-          onPressed: () {
-            setState(() {
-              _isLeftSidebarOpen = !_isLeftSidebarOpen;
-            });
-          },
+    return Directionality(
+      textDirection: TextDirection.ltr,
+      child: Scaffold(
+        appBar: AppBar(
+          title: Text(AppLocalizations.of(context)!.cameraMode),
+          leading: IconButton(
+            icon: Icon(_isLeftSidebarOpen ? Icons.chevron_left : Icons.tune),
+            tooltip: _isLeftSidebarOpen
+                ? AppLocalizations.of(context)!.closeFilters
+                : AppLocalizations.of(context)!.openFilters,
+            onPressed: () {
+              setState(() {
+                _isLeftSidebarOpen = !_isLeftSidebarOpen;
+              });
+            },
+          ),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.home),
+              tooltip: AppLocalizations.of(context)!.backToHome,
+              onPressed: () {
+                // Just pop, let dispose handle cleanup to avoid state races
+                if (Navigator.canPop(context)) {
+                  Navigator.pop(context);
+                }
+              },
+            ),
+            IconButton(
+              icon: Icon(_isSidebarOpen ? Icons.chevron_right : Icons.list),
+              tooltip: _isSidebarOpen
+                  ? AppLocalizations.of(context)!.closeGallery
+                  : AppLocalizations.of(context)!.openGallery,
+              onPressed: () {
+                setState(() {
+                  _isSidebarOpen = !_isSidebarOpen;
+                });
+              },
+            ),
+          ],
         ),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.home),
-            tooltip: 'Back to Home',
-            onPressed: () {
-              // Just pop, let dispose handle cleanup to avoid state races
-              if (Navigator.canPop(context)) {
-                Navigator.pop(context);
-              }
-            },
-          ),
-          IconButton(
-            icon: Icon(_isSidebarOpen ? Icons.chevron_right : Icons.list),
-            onPressed: () {
-              setState(() {
-                _isSidebarOpen = !_isSidebarOpen;
-              });
-            },
-          ),
-        ],
-      ),
-      body: Stack(
-        children: [
-          // Main Content
-          Positioned.fill(
-            child: Column(
-              children: [
-                Expanded(
-                  child: Stack(
-                    children: [
-                      if (Platform.isWindows)
-                        RepaintBoundary(
-                          key: _zoomedViewKey,
-                          child: ZoomableStreamView(
-                            currentZoom: _currentZoom,
-                            viewOffset: _viewOffset,
-                            isDigitalZoomOverride: _isDigitalZoomOverride,
-                            lockedPhoneZoom: _lockedPhoneZoom,
-                            isStreamMode: _isStreamMode,
-                            phoneMaxZoom: _phoneMaxZoom,
-                            onTransformChanged: (zoom, offset, viewportSize) {
-                              setState(() {
-                                _currentZoom = zoom;
-                                _viewOffset = offset;
-                                // viewportSize is no longer needed - we use screenshot capture
-                              });
-                            },
-                            onSendZoomCommand: _sendZoomCommand,
-                            child: _isStreamMode
-                                ? Stack(
-                                    children: [
-                                      // Hidden RepaintBoundary for capture
-                                      Opacity(
-                                        opacity: 1.0,
-                                        child: RepaintBoundary(
-                                          key: _videoViewKey,
-                                          child: _buildStreamWidget(),
+        body: Stack(
+          children: [
+            // Main Content
+            Positioned.fill(
+              child: Column(
+                children: [
+                  Expanded(
+                    child: Stack(
+                      children: [
+                        if (Platform.isWindows)
+                          RepaintBoundary(
+                            key: _zoomedViewKey,
+                            child: ZoomableStreamView(
+                              currentZoom: _currentZoom,
+                              viewOffset: _viewOffset,
+                              isDigitalZoomOverride: _isDigitalZoomOverride,
+                              lockedPhoneZoom: _lockedPhoneZoom,
+                              isStreamMode: _isStreamMode,
+                              phoneMaxZoom: _phoneMaxZoom,
+                              onTransformChanged: (zoom, offset, viewportSize) {
+                                setState(() {
+                                  _currentZoom = zoom;
+                                  _viewOffset = offset;
+                                  // viewportSize is no longer needed - we use screenshot capture
+                                });
+                              },
+                              onSendZoomCommand: _sendZoomCommand,
+                              child: _isStreamMode
+                                  ? Stack(
+                                      children: [
+                                        // Hidden RepaintBoundary for capture
+                                        Opacity(
+                                          opacity: 1.0,
+                                          child: RepaintBoundary(
+                                            key: _videoViewKey,
+                                            child: _buildStreamWidget(),
+                                          ),
                                         ),
-                                      ),
-                                      // Processed overlay
-                                      ValueListenableBuilder<Uint8List?>(
-                                        valueListenable:
-                                            _processedImageNotifier,
-                                        builder: (context, processedImage, child) {
-                                          bool hasActiveFilters = FiltersService
-                                              .instance
-                                              .filters
-                                              .any((f) => f.isActive);
-                                          if (processedImage != null &&
-                                              hasActiveFilters) {
-                                            return Opacity(
-                                              opacity: 0.995,
-                                              child: Image.memory(
-                                                processedImage,
-                                                gaplessPlayback: true,
-                                                fit: BoxFit.contain,
-                                                width: double.infinity,
-                                                height: double.infinity,
-                                              ),
-                                            );
-                                          }
-                                          // Overlay is now rendered from main Stack widget
-                                          return const SizedBox.shrink();
-                                        },
-                                      ),
-                                    ],
+                                        // Processed overlay
+                                        ValueListenableBuilder<Uint8List?>(
+                                          valueListenable:
+                                              _processedImageNotifier,
+                                          builder:
+                                              (context, processedImage, child) {
+                                                bool hasActiveFilters =
+                                                    FiltersService
+                                                        .instance
+                                                        .filters
+                                                        .any((f) => f.isActive);
+                                                if (processedImage != null &&
+                                                    hasActiveFilters) {
+                                                  return Opacity(
+                                                    opacity: 0.995,
+                                                    child: Image.memory(
+                                                      processedImage,
+                                                      gaplessPlayback: true,
+                                                      fit: BoxFit.contain,
+                                                      width: double.infinity,
+                                                      height: double.infinity,
+                                                    ),
+                                                  );
+                                                }
+                                                // Overlay is now rendered from main Stack widget
+                                                return const SizedBox.shrink();
+                                              },
+                                        ),
+                                      ],
+                                    )
+                                  : const NativeCameraView(),
+                            ),
+                          )
+                        else if (_isInitialized)
+                          InteractiveViewer(
+                            transformationController: _transformationController,
+                            minScale: 1.0,
+                            maxScale: 50.0,
+                            child: ValueListenableBuilder<Uint8List?>(
+                              valueListenable: _processedImageNotifier,
+                              builder: (context, processedImage, child) {
+                                bool hasActiveFilters = FiltersService
+                                    .instance
+                                    .filters
+                                    .any((f) => f.isActive);
+                                if (processedImage != null &&
+                                    hasActiveFilters) {
+                                  return Image.memory(
+                                    processedImage,
+                                    gaplessPlayback: true,
+                                    fit: BoxFit.contain,
+                                  );
+                                }
+                                if (_controller != null) {
+                                  return c.CameraPreview(_controller!);
+                                }
+                                return const SizedBox.shrink();
+                              },
+                            ),
+                          )
+                        else if (_isStreamMode)
+                          InteractiveViewer(
+                            transformationController: _transformationController,
+                            minScale: 1.0,
+                            maxScale: 50.0,
+                            child: _buildStreamWidget(),
+                          )
+                        else
+                          Center(
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                if (_cameras.isEmpty && !Platform.isWindows)
+                                  Text(
+                                    AppLocalizations.of(
+                                      context,
+                                    )!.noCamerasFound,
                                   )
-                                : const NativeCameraView(),
-                          ),
-                        )
-                      else if (_isInitialized)
-                        InteractiveViewer(
-                          transformationController: _transformationController,
-                          minScale: 1.0,
-                          maxScale: 50.0,
-                          child: ValueListenableBuilder<Uint8List?>(
-                            valueListenable: _processedImageNotifier,
-                            builder: (context, processedImage, child) {
-                              bool hasActiveFilters = FiltersService
-                                  .instance
-                                  .filters
-                                  .any((f) => f.isActive);
-                              if (processedImage != null && hasActiveFilters) {
-                                return Image.memory(
-                                  processedImage,
-                                  gaplessPlayback: true,
-                                  fit: BoxFit.contain,
-                                );
-                              }
-                              if (_controller != null) {
-                                return c.CameraPreview(_controller!);
-                              }
-                              return const SizedBox.shrink();
-                            },
-                          ),
-                        )
-                      else if (_isStreamMode)
-                        InteractiveViewer(
-                          transformationController: _transformationController,
-                          minScale: 1.0,
-                          maxScale: 50.0,
-                          child: _buildStreamWidget(),
-                        )
-                      else
-                        Center(
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (_cameras.isEmpty && !Platform.isWindows)
-                                const Text('No cameras found')
-                              else if (_controller == null &&
-                                  !Platform.isWindows)
-                                const CircularProgressIndicator()
-                              else
-                                Column(
-                                  children: [
-                                    const Icon(
-                                      Icons.error_outline,
-                                      size: 48,
-                                      color: Colors.red,
-                                    ),
-                                    const SizedBox(height: 16),
-                                    const Text('Camera failed to initialize'),
-                                    if (!Platform.isWindows)
-                                      TextButton(
-                                        onPressed: _switchCamera,
-                                        child: const Text('Try Next Camera'),
+                                else if (_controller == null &&
+                                    !Platform.isWindows)
+                                  const CircularProgressIndicator()
+                                else
+                                  Column(
+                                    children: [
+                                      const Icon(
+                                        Icons.error_outline,
+                                        size: 48,
+                                        color: Colors.red,
                                       ),
-                                  ],
+                                      const SizedBox(height: 16),
+                                      Text(
+                                        AppLocalizations.of(
+                                          context,
+                                        )!.cameraFailed,
+                                      ),
+                                      if (!Platform.isWindows)
+                                        TextButton(
+                                          onPressed: _switchCamera,
+                                          child: Text(
+                                            AppLocalizations.of(
+                                              context,
+                                            )!.tryNextCamera,
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                              ],
+                            ),
+                          ),
+                        Positioned(
+                          bottom: 20,
+                          left: 0,
+                          right: 0,
+                          child: Directionality(
+                            textDirection: TextDirection.ltr,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                              children: [
+                                FloatingActionButton(
+                                  heroTag: 'switch_camera',
+                                  onPressed: _switchCamera,
+                                  backgroundColor: Colors.black54,
+                                  tooltip: AppLocalizations.of(
+                                    context,
+                                  )!.switchCamera,
+                                  child: const Icon(
+                                    Icons.switch_camera,
+                                    color: Colors.white,
+                                  ),
                                 ),
-                            ],
+                                // Add the Pan/Digital Zoom Override Button
+                                if (_isStreamMode)
+                                  FloatingActionButton(
+                                    heroTag: 'pan_mode',
+                                    onPressed: () {
+                                      setState(() {
+                                        _isDigitalZoomOverride =
+                                            !_isDigitalZoomOverride;
+                                        if (_isDigitalZoomOverride) {
+                                          // Lock the phone zoom at the current level
+                                          _lockedPhoneZoom = _currentZoom.clamp(
+                                            1.0,
+                                            _phoneMaxZoom,
+                                          );
+                                          // We don't reset _currentZoom, we just continue from here
+                                          // Ensure we send the lock command once
+                                          _sendZoomCommand(_lockedPhoneZoom);
+                                        } else {
+                                          // Restore phone zoom control
+                                          _sendZoomCommand(
+                                            _currentZoom.clamp(
+                                              1.0,
+                                              _phoneMaxZoom,
+                                            ),
+                                          );
+                                        }
+                                      });
+                                    },
+                                    backgroundColor: _isDigitalZoomOverride
+                                        ? Colors.blue
+                                        : Colors.black54,
+                                    tooltip: _isDigitalZoomOverride
+                                        ? AppLocalizations.of(
+                                            context,
+                                          )!.unlockZoom
+                                        : AppLocalizations.of(
+                                            context,
+                                          )!.lockZoom,
+                                    child: Icon(
+                                      _isDigitalZoomOverride
+                                          ? Icons.lock
+                                          : Icons.lock_open,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                FloatingActionButton(
+                                  heroTag: 'quick_draw',
+                                  onPressed: _quickDraw,
+                                  backgroundColor: Colors.blue,
+                                  tooltip: AppLocalizations.of(
+                                    context,
+                                  )!.quickDraw,
+                                  child: const Icon(
+                                    Icons.draw,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                                FloatingActionButton(
+                                  heroTag: 'capture_frame',
+                                  onPressed: _captureFrame,
+                                  backgroundColor: Colors.red,
+                                  tooltip: AppLocalizations.of(
+                                    context,
+                                  )!.captureFrame,
+                                  child: const Icon(
+                                    Icons.camera_alt,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
+                            ),
                           ),
                         ),
-                      Positioned(
-                        bottom: 20,
-                        left: 0,
-                        right: 0,
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                          children: [
-                            FloatingActionButton(
-                              heroTag: 'switch_camera',
-                              onPressed: _switchCamera,
-                              backgroundColor: Colors.black54,
-                              child: const Icon(
-                                Icons.switch_camera,
-                                color: Colors.white,
-                              ),
-                            ),
-                            // Add the Pan/Digital Zoom Override Button
-                            if (_isStreamMode)
-                              FloatingActionButton(
-                                heroTag: 'pan_mode',
-                                onPressed: () {
-                                  setState(() {
-                                    _isDigitalZoomOverride =
-                                        !_isDigitalZoomOverride;
-                                    if (_isDigitalZoomOverride) {
-                                      // Lock the phone zoom at the current level
-                                      _lockedPhoneZoom = _currentZoom.clamp(
-                                        1.0,
-                                        _phoneMaxZoom,
-                                      );
-                                      // We don't reset _currentZoom, we just continue from here
-                                      // Ensure we send the lock command once
-                                      _sendZoomCommand(_lockedPhoneZoom);
-                                    } else {
-                                      // Restore phone zoom control
-                                      _sendZoomCommand(
-                                        _currentZoom.clamp(1.0, _phoneMaxZoom),
-                                      );
-                                    }
-                                  });
-                                },
-                                backgroundColor: _isDigitalZoomOverride
-                                    ? Colors.blue
-                                    : Colors.black54,
-                                child: Icon(
-                                  _isDigitalZoomOverride
-                                      ? Icons.lock
-                                      : Icons.lock_open,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            FloatingActionButton(
-                              heroTag: 'quick_draw',
-                              onPressed: _quickDraw,
-                              backgroundColor: Colors.blue,
-                              child: const Icon(
-                                Icons.draw,
-                                color: Colors.white,
-                              ),
-                            ),
-                            FloatingActionButton(
-                              heroTag: 'capture_frame',
-                              onPressed: _captureFrame,
-                              backgroundColor: Colors.red,
-                              child: const Icon(
-                                Icons.camera_alt,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          ),
 
-          // Edge Gesture Detectors
-          Positioned(
-            left: 0,
-            top: 0,
-            bottom: 0,
-            width: 120,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragEnd: (details) {
-                if (details.primaryVelocity! > 300) {
-                  setState(() => _isLeftSidebarOpen = true);
+            // Edge Gesture Detectors
+            Positioned(
+              left: 0,
+              top: 0,
+              bottom: 0,
+              width: 120,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onHorizontalDragEnd: (details) {
+                  if (details.primaryVelocity! > 300) {
+                    setState(() => _isLeftSidebarOpen = true);
+                  }
+                },
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+            Positioned(
+              right: 0,
+              top: 0,
+              bottom: 0,
+              width: 120,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onHorizontalDragEnd: (details) {
+                  if (details.primaryVelocity! < -300) {
+                    setState(() => _isSidebarOpen = true);
+                  }
+                },
+                child: Container(color: Colors.transparent),
+              ),
+            ),
+
+            // Left Sidebar (Filters)
+            FilterSidebar(
+              isOpen: _isLeftSidebarOpen,
+              onClose: () => setState(() => _isLeftSidebarOpen = false),
+              filters: FiltersService.instance.filters,
+              filterGroups: FiltersService.instance.filterGroups,
+              onReorder: FiltersService.instance.reorderFilters,
+              onFilterToggle: FiltersService.instance.toggleFilter,
+              onGroupToggle: FiltersService.instance.toggleGroup,
+              onAddGroup: FiltersService.instance.addGroup,
+              onEditGroup: FiltersService.instance.editGroup,
+              onDeleteGroup: FiltersService.instance.deleteGroup,
+            ),
+
+            // Overlay Widget (Feature 11) - Resizable with handles
+            if (_overlayImageBytes != null)
+              ResizableOverlay(
+                imageBytes: _overlayImageBytes!,
+                initialPosition: _overlayPosition,
+                initialWidth: _overlayWidth,
+                initialHeight: _overlayHeight,
+                onRemove: () {
+                  setState(() {
+                    _overlayImageBytes = null;
+                  });
+                },
+                onChanged: (position, width, height) {
+                  setState(() {
+                    _overlayPosition = position;
+                    _overlayWidth = width;
+                    _overlayHeight = height;
+                  });
+                },
+              ),
+
+            // Right Sidebar (Captured Images)
+            GallerySidebar(
+              isOpen: _isSidebarOpen,
+              isFullScreen: _isGalleryFullScreen,
+              capturedImages: GalleryService.instance.images,
+              currentIndex: _currentGalleryIndex,
+              onClose: () => setState(() => _isSidebarOpen = false),
+              onToggleFullScreen: () =>
+                  setState(() => _isGalleryFullScreen = !_isGalleryFullScreen),
+              onOpenEditor: _openEditor,
+              onDeleteImage: (index) {
+                // Delete from RAM service
+                GalleryService.instance.removeImage(index);
+
+                // Validate current index
+                if (_currentGalleryIndex >=
+                    GalleryService.instance.images.length) {
+                  _currentGalleryIndex =
+                      (GalleryService.instance.images.length - 1).clamp(
+                        0,
+                        100000,
+                      );
                 }
-              },
-              child: Container(color: Colors.transparent),
-            ),
-          ),
-          Positioned(
-            right: 0,
-            top: 0,
-            bottom: 0,
-            width: 120,
-            child: GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onHorizontalDragEnd: (details) {
-                if (details.primaryVelocity! < -300) {
-                  setState(() => _isSidebarOpen = true);
+                if (GalleryService.instance.images.isEmpty) {
+                  _currentGalleryIndex = 0;
+                  // Optionally exit full screen if empty?
+                  // _isGalleryFullScreen = false;
                 }
+
+                setState(() {});
               },
-              child: Container(color: Colors.transparent),
-            ),
-          ),
-
-          // Left Sidebar (Filters)
-          FilterSidebar(
-            isOpen: _isLeftSidebarOpen,
-            onClose: () => setState(() => _isLeftSidebarOpen = false),
-            filters: FiltersService.instance.filters,
-            filterGroups: FiltersService.instance.filterGroups,
-            onReorder: FiltersService.instance.reorderFilters,
-            onFilterToggle: FiltersService.instance.toggleFilter,
-            onGroupToggle: FiltersService.instance.toggleGroup,
-            onAddGroup: FiltersService.instance.addGroup,
-            onEditGroup: FiltersService.instance.editGroup,
-            onDeleteGroup: FiltersService.instance.deleteGroup,
-          ),
-
-          // Overlay Widget (Feature 11) - Resizable with handles
-          if (_overlayImageBytes != null)
-            ResizableOverlay(
-              imageBytes: _overlayImageBytes!,
-              initialPosition: _overlayPosition,
-              initialWidth: _overlayWidth,
-              initialHeight: _overlayHeight,
-              onRemove: () {
+              onPageChanged: (index) {
                 setState(() {
-                  _overlayImageBytes = null;
+                  _currentGalleryIndex = index;
                 });
               },
-              onChanged: (position, width, height) {
-                setState(() {
-                  _overlayPosition = position;
-                  _overlayWidth = width;
-                  _overlayHeight = height;
-                });
-              },
+              pdfNameController: _pdfNameController,
+              pdfPathController: _pdfPathController,
+              onExportPdf: _exportPdf,
+              onSelectDirectory: _pickSaveDirectory,
+              onCropImage: _cropImage,
+              onUseAsOverlay: _useAsOverlay,
             ),
 
-          // Right Sidebar (Captured Images)
-          GallerySidebar(
-            isOpen: _isSidebarOpen,
-            isFullScreen: _isGalleryFullScreen,
-            capturedImages: GalleryService.instance.images,
-            currentIndex: _currentGalleryIndex,
-            onClose: () => setState(() => _isSidebarOpen = false),
-            onToggleFullScreen: () =>
-                setState(() => _isGalleryFullScreen = !_isGalleryFullScreen),
-            onOpenEditor: _openEditor,
-            onDeleteImage: (index) {
-              // Delete from RAM service
-              GalleryService.instance.removeImage(index);
-
-              // Validate current index
-              if (_currentGalleryIndex >=
-                  GalleryService.instance.images.length) {
-                _currentGalleryIndex =
-                    (GalleryService.instance.images.length - 1).clamp(
-                      0,
-                      100000,
-                    );
-              }
-              if (GalleryService.instance.images.isEmpty) {
-                _currentGalleryIndex = 0;
-                // Optionally exit full screen if empty?
-                // _isGalleryFullScreen = false;
-              }
-
-              setState(() {});
-            },
-            onPageChanged: (index) {
-              setState(() {
-                _currentGalleryIndex = index;
-              });
-            },
-            pdfNameController: _pdfNameController,
-            pdfPathController: _pdfPathController,
-            onExportPdf: _exportPdf,
-            onSelectDirectory: _pickSaveDirectory,
-            onCropImage: _cropImage,
-            onUseAsOverlay: _useAsOverlay,
-          ),
-
-          // Flash Overlay
-          IgnorePointer(
-            child: AnimatedBuilder(
-              animation: _flashAnimation,
-              builder: (context, child) {
-                return Opacity(
-                  opacity: _flashAnimation.value,
-                  child: Container(color: Colors.black),
-                );
-              },
+            // Flash Overlay
+            IgnorePointer(
+              child: AnimatedBuilder(
+                animation: _flashAnimation,
+                builder: (context, child) {
+                  return Opacity(
+                    opacity: _flashAnimation.value,
+                    child: Container(color: Colors.black),
+                  );
+                },
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
