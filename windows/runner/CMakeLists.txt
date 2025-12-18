@@ -17,9 +17,17 @@ add_executable(${BINARY_NAME} WIN32
   "runner.exe.manifest"
 )
 
-# Add OpenCV Integration - MANUAL LINKING to bypass version check
-# We assume the standard OpenCV Windows extraction path structure
-set(OPENCV_ROOT "C:/Users/doron/dev_tools/opencv/build")
+# Local paths configuration (gitignored)
+# Copy local_paths.cmake.example to local_paths.cmake and update with your paths
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/local_paths.cmake")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/local_paths.cmake")
+else()
+  message(FATAL_ERROR 
+    "local_paths.cmake not found!\n"
+    "Please copy local_paths.cmake.example to local_paths.cmake and update with your local paths:\n"
+    "  - OPENCV_ROOT: Path to OpenCV build directory\n"
+  )
+endif()
 
 # 1. Include Headers
 include_directories("${OPENCV_ROOT}/include")
