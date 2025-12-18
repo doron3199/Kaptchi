@@ -1,0 +1,5 @@
+# Local paths configuration - DO NOT COMMIT THIS FILE
+# Copy local_paths.cmake.example to local_paths.cmake and update paths
+
+# OpenCV path (directory containing 'include' and 'x64/vc16/lib')
+set(OPENCV_ROOT "C:/path/to/opencv/build")
