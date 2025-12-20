@@ -28,14 +28,19 @@ class _NativeCameraViewState extends State<NativeCameraView> {
   Future<void> _initializeCamera() async {
     // Ensure service is initialized
     _service.initialize();
-    
+
     final textureId = _service.getTextureId();
     if (textureId != -1) {
       if (mounted) {
         setState(() {
           _textureId = textureId;
         });
-        _service.start();
+        // Only start the camera if screen capture is NOT active.
+        // The native Start() method stops screen capture, so we must avoid
+        // calling it when screen capture is the intended source.
+        if (!_service.isScreenCaptureActive()) {
+          _service.start();
+        }
       }
     } else {
       debugPrint("Failed to get texture ID");
@@ -53,7 +58,7 @@ class _NativeCameraViewState extends State<NativeCameraView> {
     if (_textureId == null) {
       return const Center(child: CircularProgressIndicator());
     }
-    
+
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: Texture(textureId: _textureId!),

@@ -1,21 +1,33 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:kaptchi_flutter/l10n/app_localizations.dart';
+import '../services/native_camera_service.dart';
 
 class VideoSourceSheet extends StatelessWidget {
   final List<CameraDescription> cameras;
   final Function(int) onSelectCamera;
   final VoidCallback onSelectMobile;
 
+  /// Callback for screen capture: (monitorIndex, windowHandle)
+  /// windowHandle = 0 means capture full monitor
+  final Function(int monitorIndex, int windowHandle)? onSelectScreenCapture;
+
   const VideoSourceSheet({
     super.key,
     required this.cameras,
     required this.onSelectCamera,
     required this.onSelectMobile,
+    this.onSelectScreenCapture,
   });
 
   @override
   Widget build(BuildContext context) {
+    // Get available monitors
+    final monitors = Platform.isWindows && onSelectScreenCapture != null
+        ? NativeCameraService().getMonitors()
+        : <MonitorInfo>[];
+
     return Container(
       padding: const EdgeInsets.all(16),
       child: SingleChildScrollView(
@@ -65,6 +77,39 @@ class VideoSourceSheet extends StatelessWidget {
               const Divider(),
             ],
 
+            // Screen Capture (Windows only)
+            if (Platform.isWindows && onSelectScreenCapture != null) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Screen Capture',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey,
+                  ),
+                ),
+              ),
+              // List all monitors
+              ...monitors.map(
+                (monitor) => ListTile(
+                  leading: const Icon(Icons.desktop_windows),
+                  title: Text('Capture ${monitor.name}'),
+                  onTap: () {
+                    Navigator.pop(context); // Close sheet first
+                    onSelectScreenCapture!(monitor.index, 0); // 0 = full screen
+                  },
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.window),
+                title: const Text('Capture Window...'),
+                onTap: () {
+                  _showWindowPicker(context);
+                },
+              ),
+              const Divider(),
+            ],
+
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -83,6 +128,44 @@ class VideoSourceSheet extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  void _showWindowPicker(BuildContext context) {
+    final cameraService = NativeCameraService();
+    final windows = cameraService.getCapturableWindows();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Select Window to Capture'),
+        content: SizedBox(
+          width: 400,
+          height: 400,
+          child: ListView.builder(
+            itemCount: windows.length,
+            itemBuilder: (context, index) {
+              final window = windows[index];
+              return ListTile(
+                leading: const Icon(Icons.window),
+                title: Text(window.title, overflow: TextOverflow.ellipsis),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  Navigator.of(context).pop(); // Close sheet too
+                  // Window captures from primary monitor (0), with specific window handle
+                  onSelectScreenCapture!(0, window.handle);
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+        ],
       ),
     );
   }
