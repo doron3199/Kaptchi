@@ -21,6 +21,7 @@ public:
     void Start();
     void StartStream(const char* url);
     void Stop();
+    void StartProcessingOnly(); // For screen capture: start processing thread without camera
     void SwitchCamera();
     void SelectCamera(int index);
     void SetResolution(int width, int height);
@@ -29,6 +30,9 @@ public:
     void GetFrameData(uint8_t* buffer, int32_t size);
     int32_t GetFrameWidth();
     int32_t GetFrameHeight();
+
+    // External frame input (for screen capture, etc.)
+    void PushExternalFrame(const cv::Mat& frame);
 
 private:
     flutter::TextureRegistrar* texture_registrar_;

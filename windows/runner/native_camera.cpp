@@ -1,4 +1,5 @@
 #include "native_camera.h"
+#include "screen_capture_source.h"
 #include <iostream>
 #include <cmath>
 #include <chrono>
@@ -34,10 +35,20 @@ std::string GetModelPath(const std::string& modelName) {
 
 // Global instance pointer
 NativeCamera* g_native_camera = nullptr;
+ScreenCaptureSource* g_screen_capture = nullptr;
+
+// Forward declarations
+static void ApplyLivePerspectiveCrop(cv::Mat& frame);
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar) {
     if (g_native_camera) return;
     g_native_camera = new NativeCamera(texture_registrar);
+    
+    // Initialize screen capture source
+    if (!g_screen_capture) {
+        g_screen_capture = new ScreenCaptureSource();
+        g_screen_capture->Init(g_native_camera);
+    }
 }
 
 NativeCamera::NativeCamera(flutter::TextureRegistrar* texture_registrar)
@@ -65,6 +76,11 @@ NativeCamera::~NativeCamera() {
 
 void NativeCamera::Start() {
     if (is_running_ && !is_stream_) return;
+
+    // Stop screen capture if running to prevent conflicts
+    if (g_screen_capture && g_screen_capture->IsCapturing()) {
+        g_screen_capture->StopCapture();
+    }
 
     // Clear any stale frame from previous sessions to avoid ghosting
     {
@@ -120,6 +136,18 @@ void NativeCamera::Stop() {
         processing_thread_.join();
     }
     // capture_.release() is now handled inside the thread loop
+}
+
+void NativeCamera::StartProcessingOnly() {
+    // If already running with processing, nothing to do
+    if (is_running_) return;
+    
+    // Start only the processing thread (no camera capture thread)
+    // This is used for screen capture, which pushes frames via PushExternalFrame()
+    is_running_ = true;
+    is_stream_ = false;
+    processing_thread_ = std::thread(&NativeCamera::ProcessingThreadLoop, this);
+    std::cout << "[NativeCamera] Started processing thread only (for screen capture)" << std::endl;
 }
 
 void NativeCamera::SwitchCamera() {
@@ -188,6 +216,18 @@ int32_t NativeCamera::GetFrameWidth() {
 int32_t NativeCamera::GetFrameHeight() {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_frame_.empty() ? 0 : current_frame_.rows;
+}
+
+void NativeCamera::PushExternalFrame(const cv::Mat& frame) {
+    if (frame.empty()) return;
+    
+    // Queue frame for async processing
+    {
+        std::lock_guard<std::mutex> lock(processing_mutex_);
+        frame.copyTo(pending_frame_);
+        has_new_frame_ = true;
+    }
+    processing_cv_.notify_one();
 }
 
 void NativeCamera::CameraThreadLoop() {
@@ -309,6 +349,9 @@ void NativeCamera::CameraThreadLoop() {
 }
 
 void NativeCamera::ProcessFrame(cv::Mat& frame) {
+    // Always apply live perspective crop first (independent of filters)
+    ApplyLivePerspectiveCrop(frame);
+
     std::vector<int> filters_copy;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -611,6 +654,206 @@ static void ApplyCornerSmoothing(cv::Mat& frame) {
     temp.copyTo(frame);
 }
 
+// --- Smart Video Crop State ---
+// --- Smart Video Crop State ---
+static cv::Mat g_prev_crop_small;      // Previous frame (downscaled)
+static cv::Mat g_motion_energy_small;  // Motion energy (downscaled)
+static float g_crop_top_target = 0.0f;     // Normalized (0.0 - 1.0)
+static float g_crop_bottom_target = 1.0f;  // Normalized (0.0 - 1.0)
+static float g_crop_top_current = 0.0f;    // Normalized (0.0 - 1.0)
+static float g_crop_bottom_current = 1.0f; // Normalized (0.0 - 1.0)
+
+// Config
+static const int kAnalysisWidth = 256; // Low resolution for fast analysis
+
+static void ApplySmartVideoCrop(cv::Mat& frame) {
+    if (frame.empty()) return;
+
+    // 1. Downscale for Analysis
+    float aspect = (float)frame.rows / (float)frame.cols;
+    int analysis_height = (int)(kAnalysisWidth * aspect);
+    if (analysis_height < 10) analysis_height = 10; // Safety
+
+    cv::Mat small_frame;
+    cv::resize(frame, small_frame, cv::Size(kAnalysisWidth, analysis_height), 0, 0, cv::INTER_LINEAR);
+
+    cv::Mat small_gray;
+    cv::cvtColor(small_frame, small_gray, cv::COLOR_BGR2GRAY);
+    
+    // 2. Initialize or Reset if size changed (or first run)
+    if (g_prev_crop_small.empty() || g_prev_crop_small.size() != small_gray.size()) {
+        small_gray.copyTo(g_prev_crop_small);
+        g_motion_energy_small = cv::Mat::zeros(small_gray.size(), CV_32F);
+        g_crop_top_target = 0.0f;
+        g_crop_bottom_target = 1.0f;
+        g_crop_top_current = 0.0f;
+        g_crop_bottom_current = 1.0f;
+        return;
+    }
+
+    // 3. Compute Frame Difference (Motion) on Small Frame
+    cv::Mat diff;
+    cv::absdiff(small_gray, g_prev_crop_small, diff);
+    small_gray.copyTo(g_prev_crop_small);
+
+    cv::Mat diff_float;
+    diff.convertTo(diff_float, CV_32F, 1.0/255.0);
+
+    // Threshold noise
+    cv::threshold(diff_float, diff_float, 0.05, 1.0, cv::THRESH_TOZERO);
+
+    // 4. Update Motion Energy
+    // Accumulate: energy = energy * decay + diff
+    cv::addWeighted(g_motion_energy_small, 0.95, diff_float, 1.0, 0, g_motion_energy_small);
+    
+    // 5. Analyze Row Energy
+    cv::Mat row_sums;
+    cv::reduce(g_motion_energy_small, row_sums, 1, cv::REDUCE_SUM, CV_32F); 
+    
+    // Dynamic threshold based on width (which is fixed kAnalysisWidth now)
+    float threshold = (float)kAnalysisWidth * 0.02f; // 2% of pixels moving on average
+
+    int top_content_y = 0;
+    int bottom_content_y = analysis_height;
+
+    for (int y = 0; y < analysis_height; y++) {
+        if (row_sums.at<float>(y, 0) > threshold) {
+            top_content_y = y;
+            break;
+        }
+    }
+    
+    for (int y = analysis_height - 1; y >= 0; y--) {
+        if (row_sums.at<float>(y, 0) > threshold) {
+            bottom_content_y = y + 1;
+            break;
+        }
+    }
+
+    // Normalize targets (0.0 to 1.0)
+    float target_top_norm = (float)top_content_y / (float)analysis_height;
+    float target_bottom_norm = (float)bottom_content_y / (float)analysis_height;
+
+    // Safety: Don't crop everything
+    if (target_bottom_norm <= target_top_norm + 0.1f) { 
+        target_top_norm = 0.0f;
+        target_bottom_norm = 1.0f;
+    }
+
+    // 6. Smooth Transitions (Hysteresis) - Interpolate on Normalized Coordinates
+    g_crop_top_target = target_top_norm;
+    g_crop_bottom_target = target_bottom_norm;
+
+    float alpha = 0.05f; // Slower transition for smoothness
+    g_crop_top_current = g_crop_top_current * (1.0f - alpha) + g_crop_top_target * alpha;
+    g_crop_bottom_current = g_crop_bottom_current * (1.0f - alpha) + g_crop_bottom_target * alpha;
+
+    // 7. Apply Crop to Original Frame
+    int final_top = (int)(g_crop_top_current * frame.rows);
+    int final_bottom = (int)(g_crop_bottom_current * frame.rows);
+
+    // Clamp
+    final_top = std::max(0, final_top);
+    final_bottom = std::min(frame.rows, final_bottom);
+    if (final_bottom <= final_top) {
+        final_bottom = frame.rows;
+        final_top = 0;
+    }
+    
+    // Even height precaution
+    int height = final_bottom - final_top;
+    if (height % 2 != 0) height--;
+    final_bottom = final_top + height;
+
+    if (final_top > 0 || final_bottom < frame.rows) {
+        cv::Mat cropped = frame.rowRange(final_top, final_bottom).clone();
+        frame = cropped; 
+    }
+}
+
+// --- Live Perspective Crop State ---
+static bool g_live_crop_enabled = false;
+static double g_live_crop_corners[8] = {0}; // TL(x,y), TR(x,y), BR(x,y), BL(x,y) - Normalized 0..1
+static std::mutex g_live_crop_mutex;
+
+static void ApplyLivePerspectiveCrop(cv::Mat& frame) {
+    if (!g_live_crop_enabled || frame.empty()) return;
+
+    double corners[8];
+    {
+        std::lock_guard<std::mutex> lock(g_live_crop_mutex);
+        memcpy(corners, g_live_crop_corners, sizeof(corners));
+    }
+
+    int origWidth = frame.cols;
+    int origHeight = frame.rows;
+
+    // Convert normalized corners to pixel coordinates
+    std::vector<cv::Point2f> srcPoints;
+    for (int i = 0; i < 4; i++) {
+        srcPoints.push_back(cv::Point2f(
+            (float)(corners[i*2] * frame.cols),
+            (float)(corners[i*2+1] * frame.rows)
+        ));
+    }
+
+    // Calculate destination size based on quad dimensions
+    auto dist = [](cv::Point2f a, cv::Point2f b) -> float {
+        return (float)std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2));
+    };
+
+    float w1 = dist(srcPoints[0], srcPoints[1]);
+    float w2 = dist(srcPoints[3], srcPoints[2]);
+    float maxWidth = std::max(w1, w2);
+
+    float h1 = dist(srcPoints[0], srcPoints[3]);
+    float h2 = dist(srcPoints[1], srcPoints[2]);
+    float maxHeight = std::max(h1, h2);
+
+    if (maxWidth < 10 || maxHeight < 10) return; // Safety check
+
+    std::vector<cv::Point2f> dstPoints;
+    dstPoints.push_back(cv::Point2f(0, 0));
+    dstPoints.push_back(cv::Point2f(maxWidth - 1, 0));
+    dstPoints.push_back(cv::Point2f(maxWidth - 1, maxHeight - 1));
+    dstPoints.push_back(cv::Point2f(0, maxHeight - 1));
+
+    // Apply perspective transform to get cropped content
+    cv::Mat M = cv::getPerspectiveTransform(srcPoints, dstPoints);
+    cv::Mat warped;
+    cv::warpPerspective(frame, warped, M, cv::Size((int)maxWidth, (int)maxHeight));
+
+    // Now resize to fit the original frame height while maintaining aspect ratio
+    float cropAspect = maxWidth / maxHeight;
+    int finalHeight = origHeight;
+    int finalWidth = (int)(finalHeight * cropAspect);
+    
+    cv::Mat resized;
+    cv::resize(warped, resized, cv::Size(finalWidth, finalHeight));
+
+    // Create output frame with original dimensions, filled with black
+    frame = cv::Mat::zeros(origHeight, origWidth, frame.type());
+    
+    // Center the resized image horizontally
+    int xOffset = (origWidth - finalWidth) / 2;
+    if (xOffset < 0) {
+        // Cropped content is wider than frame - scale to fit width instead
+        finalWidth = origWidth;
+        finalHeight = (int)(origWidth / cropAspect);
+        cv::resize(warped, resized, cv::Size(finalWidth, finalHeight));
+        xOffset = 0;
+        int yOffset = (origHeight - finalHeight) / 2;
+        if (yOffset < 0) yOffset = 0;
+        cv::Rect destRect(0, yOffset, finalWidth, std::min(finalHeight, origHeight - yOffset));
+        cv::Rect srcRect(0, 0, finalWidth, std::min(finalHeight, origHeight - yOffset));
+        resized(srcRect).copyTo(frame(destRect));
+    } else {
+        // Normal case - content fits, center horizontally
+        cv::Rect destRect(xOffset, 0, finalWidth, finalHeight);
+        resized.copyTo(frame(destRect));
+    }
+}
+
 // --- YOLOv11 Person Detection Helpers ---
 
 static cv::dnn::Net g_yolo11_net;
@@ -857,6 +1100,8 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
             ApplyLightStabilization(bgr);
         } else if (mode == 14) { // Corner Smoothing
             ApplyCornerSmoothing(bgr);
+        } else if (mode == 15) { // Smart Video Crop
+            ApplySmartVideoCrop(bgr);
         }
     }
 }
@@ -935,6 +1180,19 @@ extern "C" __declspec(dllexport) void FreeBuffer(uint8_t* buffer) {
     if (buffer) free(buffer);
 }
 
+// Set or clear live perspective crop corners
+// corners: 8 doubles (TL.x, TL.y, TR.x, TR.y, BR.x, BR.y, BL.x, BL.y) - Normalized 0..1
+// Pass nullptr to disable live crop
+extern "C" __declspec(dllexport) void SetLiveCropCorners(double* corners) {
+    std::lock_guard<std::mutex> lock(g_live_crop_mutex);
+    if (corners == nullptr) {
+        g_live_crop_enabled = false;
+    } else {
+        memcpy(g_live_crop_corners, corners, sizeof(g_live_crop_corners));
+        g_live_crop_enabled = true;
+    }
+}
+
 // FFI Exports
 extern "C" {
     __declspec(dllexport) int64_t GetTextureId() {
@@ -982,6 +1240,107 @@ extern "C" {
     __declspec(dllexport) int32_t GetFrameHeight() {
         if (!g_native_camera) return 0;
         return g_native_camera->GetFrameHeight();
+    }
+
+    // --- Screen Capture FFI Exports ---
+    
+    // Get count of capturable windows
+    __declspec(dllexport) int32_t GetWindowCount() {
+        auto windows = ScreenCaptureSource::EnumerateWindows();
+        return static_cast<int32_t>(windows.size());
+    }
+    
+    // Get window title at index (returns length, writes to buffer)
+    // Buffer should be preallocated by caller
+    __declspec(dllexport) int32_t GetWindowTitle(int32_t index, char* buffer, int32_t bufferSize) {
+        auto windows = ScreenCaptureSource::EnumerateWindows();
+        if (index < 0 || index >= static_cast<int32_t>(windows.size())) return 0;
+        
+        const auto& title = windows[index].title;
+        // Convert wstring to UTF-8
+        int len = WideCharToMultiByte(CP_UTF8, 0, title.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 0 || len > bufferSize) return 0;
+        WideCharToMultiByte(CP_UTF8, 0, title.c_str(), -1, buffer, bufferSize, nullptr, nullptr);
+        return len - 1; // Don't count null terminator
+    }
+    
+    // Get window handle at index (as int64 for FFI)
+    __declspec(dllexport) int64_t GetWindowHandle(int32_t index) {
+        auto windows = ScreenCaptureSource::EnumerateWindows();
+        if (index < 0 || index >= static_cast<int32_t>(windows.size())) return 0;
+        return reinterpret_cast<int64_t>(windows[index].hwnd);
+    }
+    
+    // --- Monitor Enumeration FFI Exports ---
+    
+    // Get count of monitors
+    __declspec(dllexport) int32_t GetMonitorCount() {
+        auto monitors = ScreenCaptureSource::EnumerateMonitors();
+        return static_cast<int32_t>(monitors.size());
+    }
+    
+    // Get monitor name at index (returns length, writes to buffer)
+    __declspec(dllexport) int32_t GetMonitorName(int32_t index, char* buffer, int32_t bufferSize) {
+        auto monitors = ScreenCaptureSource::EnumerateMonitors();
+        if (index < 0 || index >= static_cast<int32_t>(monitors.size())) return 0;
+        
+        const auto& monitor = monitors[index];
+        // Format: "Monitor N (Primary)" or "Monitor N"
+        std::wstring displayName = L"Monitor " + std::to_wstring(index + 1);
+        if (monitor.isPrimary) {
+            displayName += L" (Primary)";
+        }
+        
+        // Convert wstring to UTF-8
+        int len = WideCharToMultiByte(CP_UTF8, 0, displayName.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        if (len <= 0 || len > bufferSize) return 0;
+        WideCharToMultiByte(CP_UTF8, 0, displayName.c_str(), -1, buffer, bufferSize, nullptr, nullptr);
+        return len - 1; // Don't count null terminator
+    }
+    
+    // Get monitor bounds (left, top, right, bottom as 4 ints)
+    __declspec(dllexport) void GetMonitorBounds(int32_t index, int32_t* left, int32_t* top, int32_t* right, int32_t* bottom) {
+        auto monitors = ScreenCaptureSource::EnumerateMonitors();
+        if (index < 0 || index >= static_cast<int32_t>(monitors.size())) {
+            *left = *top = *right = *bottom = 0;
+            return;
+        }
+        const auto& rect = monitors[index].bounds;
+        *left = rect.left;
+        *top = rect.top;
+        *right = rect.right;
+        *bottom = rect.bottom;
+    }
+    
+    // Start screen capture with monitor selection
+    // monitorIndex: which monitor to capture (0 = primary)
+    // windowHandle: 0 = full screen, otherwise specific window handle
+    __declspec(dllexport) int32_t StartScreenCapture(int32_t monitorIndex, int64_t windowHandle) {
+        if (!g_screen_capture || !g_native_camera) return 0;
+        
+        // Stop camera if running (screen capture will feed frames instead)
+        g_native_camera->Stop();
+        
+        HWND hwnd = (windowHandle == 0) ? nullptr : reinterpret_cast<HWND>(windowHandle);
+        bool success = g_screen_capture->StartCapture(monitorIndex, hwnd);
+        
+        if (success) {
+            // Start the processing thread so frames pushed by screen capture are processed
+            g_native_camera->StartProcessingOnly();
+        }
+        
+        return success ? 1 : 0;
+    }
+    
+    // Stop screen capture
+    __declspec(dllexport) void StopScreenCapture() {
+        if (g_screen_capture) g_screen_capture->StopCapture();
+    }
+    
+    // Check if screen capture is active
+    __declspec(dllexport) int32_t IsScreenCaptureActive() {
+        if (!g_screen_capture) return 0;
+        return g_screen_capture->IsCapturing() ? 1 : 0;
     }
 
     __declspec(dllexport) void process_frame(uint8_t* bytes, int32_t width, int32_t height, int32_t mode) {

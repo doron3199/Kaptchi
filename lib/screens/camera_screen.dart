@@ -5,10 +5,8 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:camera/camera.dart' as c;
-import 'package:pdf/pdf.dart';
-import 'package:pdf/widgets.dart' as pw;
-import 'package:path_provider/path_provider.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import '../services/document_service.dart';
+
 import 'package:image/image.dart' as img;
 import 'package:file_picker/file_picker.dart';
 import 'package:kaptchi_flutter/l10n/app_localizations.dart';
@@ -95,6 +93,9 @@ class _CameraScreenState extends State<CameraScreen>
   final TextEditingController _pdfNameController = TextEditingController();
   final TextEditingController _pdfPathController = TextEditingController();
 
+  // Live Perspective Crop State
+  bool _isLiveCropActive = false;
+
   // Flash Animation State
   late AnimationController _flashController;
   late Animation<double> _flashAnimation;
@@ -110,16 +111,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   Future<void> _loadPdfPath() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? lastPath = prefs.getString('last_pdf_path');
-
-    String initialPath;
-    if (lastPath != null) {
-      initialPath = lastPath;
-    } else {
-      final dir = await getApplicationDocumentsDirectory();
-      initialPath = dir.path;
-    }
+    final initialPath = await DocumentService.instance.getInitialPdfPath();
 
     if (mounted) {
       setState(() {
@@ -508,13 +500,22 @@ class _CameraScreenState extends State<CameraScreen>
       // Initialize image processing service
       await ImageProcessingService.instance.initialize();
 
+      // If screen capture is already active, don't start the local camera
+      if (NativeCameraService().isScreenCaptureActive()) {
+        return;
+      }
+
       if (widget.initialCameraIndex != null) {
         _selectedCameraIndex = widget.initialCameraIndex!;
         // Yield to event loop to ensure scheduler is idle before calling native code
         // This prevents the "SchedulerPhase.idle" assertion error
         WidgetsBinding.instance.addPostFrameCallback((_) async {
           await Future.delayed(Duration.zero);
-          NativeCameraService().selectCamera(_selectedCameraIndex);
+          // Re-check if screen capture is active, since this callback runs async
+          // and screen capture might have been started after _init() began
+          if (!NativeCameraService().isScreenCaptureActive()) {
+            NativeCameraService().selectCamera(_selectedCameraIndex);
+          }
         });
       }
       return;
@@ -564,13 +565,11 @@ class _CameraScreenState extends State<CameraScreen>
           cameras: cameras,
           onSelectCamera: (index) {
             Navigator.pop(context);
-            // Stop any active stream before switching
-            NativeCameraService().stop();
+            _switchToSource();
 
             setState(() {
               _isStreamMode = false;
-              _isDigitalZoomOverride =
-                  true; // Enable by default for local cameras
+              _isDigitalZoomOverride = true;
               _lockedPhoneZoom = 1.0;
               _currentZoom = 1.0;
               _viewOffset = Offset.zero;
@@ -580,20 +579,38 @@ class _CameraScreenState extends State<CameraScreen>
           },
           onSelectMobile: () {
             Navigator.pop(context);
+            _switchToSource();
+
             showDialog(
               context: context,
               builder: (context) => MobileConnectionDialog(
                 onConnect: () {
-                  // Usually called by the dialog when connection is successful
-                  // But dialog doesn't know about `_connectToStream` of this parent.
-                  // MobileConnectionDialog should just notify or we handle it here.
-                  // Wait, MobileConnectionDialog in my implementation calls onConnect when stream starts.
-                  // So I just need to:
                   Navigator.of(context).pop();
                   _connectToStream('rtmp://localhost/live/stream');
                 },
               ),
             );
+          },
+          onSelectScreenCapture: (monitorIndex, windowHandle) {
+            _switchToSource();
+
+            final success = NativeCameraService().startScreenCapture(
+              monitorIndex,
+              windowHandle: windowHandle,
+            );
+            if (success) {
+              setState(() {
+                _isStreamMode = false;
+                _isDigitalZoomOverride = true;
+                _lockedPhoneZoom = 1.0;
+                _currentZoom = 1.0;
+                _viewOffset = Offset.zero;
+              });
+            } else {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Failed to start screen capture')),
+              );
+            }
           },
         ),
       );
@@ -637,6 +654,19 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     ImageProcessingService.instance.setProcessingModes(modes);
+  }
+
+  /// Stops all video sources and clears any active crop.
+  void _switchToSource() {
+    // Stop ALL sources before starting new one
+    NativeCameraService().stop(); // Stop camera/stream
+    NativeCameraService().stopScreenCapture(); // Stop screen capture
+
+    // Clear crop when switching inputs
+    NativeCameraService().setLiveCropCorners(null);
+    setState(() {
+      _isLiveCropActive = false;
+    });
   }
 
   @override
@@ -786,6 +816,78 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  /// Captures the current frame and opens CropScreen for 4-point perspective crop.
+  Future<void> _captureAndCrop() async {
+    if (!Platform.isWindows) return;
+
+    try {
+      // Capture the current frame using RepaintBoundary
+      final RenderRepaintBoundary? boundary =
+          _zoomedViewKey.currentContext?.findRenderObject()
+              as RenderRepaintBoundary?;
+
+      if (boundary == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                AppLocalizations.of(context)!.boundaryNotFoundError,
+              ),
+            ),
+          );
+        }
+        return;
+      }
+
+      final ui.Image image = await boundary.toImage(pixelRatio: 1.0);
+      final ByteData? byteData = await image.toByteData(
+        format: ui.ImageByteFormat.png,
+      );
+
+      if (!mounted) return;
+
+      if (byteData == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(AppLocalizations.of(context)!.captureFrameError),
+          ),
+        );
+        return;
+      }
+
+      final Uint8List pngBytes = byteData.buffer.asUint8List();
+
+      // Navigate to CropScreen with returnCornersOnly to get corner coordinates
+      final result = await Navigator.push<List<Offset>>(
+        context,
+        MaterialPageRoute(
+          builder: (_) =>
+              CropScreen(imageBytes: pngBytes, returnCornersOnly: true),
+        ),
+      );
+
+      if (!mounted) return;
+
+      // If user confirmed the crop, apply it to live feed
+      if (result != null && result.length == 4) {
+        NativeCameraService().setLiveCropCorners(result);
+        setState(() {
+          _isLiveCropActive = true;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error in _captureAndCrop: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            AppLocalizations.of(context)!.errorCapturingFrame(e.toString()),
+          ),
+        ),
+      );
+    }
+  }
+
   Future<void> _quickDraw() async {
     // Capture and go directly to editor
     int preCount = GalleryService.instance.images.length;
@@ -830,8 +932,7 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _pickSaveDirectory() async {
     String? selectedDirectory = await FilePicker.platform.getDirectoryPath();
     if (selectedDirectory != null) {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('last_pdf_path', selectedDirectory);
+      await DocumentService.instance.saveLastPdfPath(selectedDirectory);
 
       setState(() {
         _pdfPathController.text = selectedDirectory;
@@ -843,52 +944,14 @@ class _CameraScreenState extends State<CameraScreen>
     if (_capturedImages.isEmpty) return;
 
     try {
-      final pdf = pw.Document();
-
-      for (final item in _capturedImages) {
-        final image = pw.MemoryImage(item.bytes);
-
-        // Create a page with the exact dimensions of the image
-        pdf.addPage(
-          pw.Page(
-            pageFormat: PdfPageFormat(
-              item.width.toDouble(),
-              item.height.toDouble(),
-            ),
-            margin: pw.EdgeInsets.zero,
-            build: (pw.Context context) {
-              return pw.Image(image, fit: pw.BoxFit.cover);
-            },
-          ),
-        );
-      }
-
-      String fileName = _pdfNameController.text.trim();
-      if (fileName.isEmpty) {
-        final now = DateTime.now();
-        fileName =
-            "Capture_${now.year}-${now.month.toString().padLeft(2, '0')}-${now.day.toString().padLeft(2, '0')}_${now.hour.toString().padLeft(2, '0')}-${now.minute.toString().padLeft(2, '0')}";
-      }
-      if (!fileName.toLowerCase().endsWith('.pdf')) {
-        fileName += '.pdf';
-      }
-
-      String dirPath = _pdfPathController.text.trim();
-      if (dirPath.isEmpty) {
-        final dir = await getApplicationDocumentsDirectory();
-        dirPath = dir.path;
-      }
-
-      final file = File("$dirPath/$fileName");
-      await file.writeAsBytes(await pdf.save());
+      final file = await DocumentService.instance.exportPdf(
+        images: _capturedImages,
+        fileName: _pdfNameController.text.trim(),
+        directoryPath: _pdfPathController.text.trim(),
+      );
 
       if (!mounted) return;
 
-      // Persist the LAST USED path
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setString('last_pdf_path', dirPath);
-
-      if (!mounted) return;
       setState(() {
         GalleryService.instance.clear();
         _pdfNameController.clear();
@@ -1030,6 +1093,26 @@ class _CameraScreenState extends State<CameraScreen>
             },
           ),
           actions: [
+            // Crop Button - set or clear live perspective crop
+            IconButton(
+              icon: Icon(
+                _isLiveCropActive ? Icons.crop_free : Icons.crop,
+                color: _isLiveCropActive ? Colors.green : null,
+              ),
+              tooltip: _isLiveCropActive ? 'Clear Crop' : 'Crop Frame',
+              onPressed: () {
+                if (_isLiveCropActive) {
+                  // Clear the crop
+                  NativeCameraService().setLiveCropCorners(null);
+                  setState(() {
+                    _isLiveCropActive = false;
+                  });
+                } else {
+                  // Set new crop
+                  _captureAndCrop();
+                }
+              },
+            ),
             IconButton(
               icon: const Icon(Icons.home),
               tooltip: AppLocalizations.of(context)!.backToHome,

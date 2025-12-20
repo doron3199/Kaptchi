@@ -6,8 +6,13 @@ import '../services/image_processing_service.dart';
 
 class CropScreen extends StatefulWidget {
   final Uint8List imageBytes;
+  final bool returnCornersOnly;
 
-  const CropScreen({super.key, required this.imageBytes});
+  const CropScreen({
+    super.key,
+    required this.imageBytes,
+    this.returnCornersOnly = false,
+  });
 
   @override
   State<CropScreen> createState() => _CropScreenState();
@@ -177,29 +182,18 @@ class _CropScreenState extends State<CropScreen> {
               IconButton(
                 icon: const Icon(Icons.check, color: Colors.green, size: 32),
                 onPressed: () async {
-                  // Logic ...
+                  // If returnCornersOnly, just return the corners for live feed crop
+                  if (widget.returnCornersOnly) {
+                    Navigator.pop(context, List<Offset>.from(_corners));
+                    return;
+                  }
+
+                  // Otherwise, process and return the cropped image
                   Uint8List? result;
                   if (_isFreeForm) {
                     result = await ImageProcessingService.instance
                         .applyPerspectiveCrop(widget.imageBytes, _corners);
                   } else {
-                    // Rect crop
-                    // We need to pass the bounding box of current corners (which should be a rect)
-                    // Or just use the top-left and bottom-right corners logic.
-                    // Since we enforce rect, we can take min/max of current points to be safe.
-                    double minX = 1.0, minY = 1.0, maxX = 0.0, maxY = 0.0;
-                    for (var p in _corners) {
-                      if (p.dx < minX) minX = p.dx;
-                      if (p.dy < minY) minY = p.dy;
-                      if (p.dx > maxX) maxX = p.dx;
-                      if (p.dy > maxY) maxY = p.dy;
-                    }
-                    // Ensure valid values
-                    if (minX < 0) minX = 0;
-                    if (minY < 0) minY = 0;
-                    if (maxX > 1) maxX = 1;
-                    if (maxY > 1) maxY = 1;
-
                     result = await ImageProcessingService.instance
                         .applyPerspectiveCrop(widget.imageBytes, _corners);
                   }
@@ -214,7 +208,6 @@ class _CropScreenState extends State<CropScreen> {
                         content: Text(AppLocalizations.of(context)!.cropFailed),
                       ),
                     );
-                    // Return original image if crop failed
                     Navigator.pop(context, widget.imageBytes);
                   }
                 },
