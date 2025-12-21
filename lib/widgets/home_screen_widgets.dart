@@ -267,9 +267,28 @@ class MobileConnectionSection extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      AppLocalizations.of(context)!.serverInterface,
-                      style: const TextStyle(color: Colors.grey, fontSize: 12),
+                    Row(
+                      children: [
+                        Text(
+                          AppLocalizations.of(context)!.serverInterface,
+                          style: const TextStyle(
+                            color: Colors.grey,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Tooltip(
+                          message: AppLocalizations.of(
+                            context,
+                          )!.ipSelectionTooltip,
+                          triggerMode: TooltipTriggerMode.tap,
+                          child: const Icon(
+                            Icons.info_outline,
+                            color: Colors.grey,
+                            size: 16,
+                          ),
+                        ),
+                      ],
                     ),
                     DropdownButton<String>(
                       value: serverIp.isNotEmpty ? serverIp : null,
@@ -294,7 +313,7 @@ class MobileConnectionSection extends StatelessWidget {
                 color: Colors.white,
                 padding: const EdgeInsets.all(16),
                 child: Semantics(
-                  label: 'QR Code for server: rtmp://${serverIp}/live/stream',
+                  label: 'QR Code for server: rtmp://$serverIp/live/stream',
                   child: QrImageView(
                     data: 'rtmp://$serverIp/live/stream',
                     version: QrVersions.auto,

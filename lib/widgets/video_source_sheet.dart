@@ -82,7 +82,7 @@ class VideoSourceSheet extends StatelessWidget {
               Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Screen Capture',
+                  AppLocalizations.of(context)!.screenCapture,
                   style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     color: Colors.grey,
@@ -93,7 +93,9 @@ class VideoSourceSheet extends StatelessWidget {
               ...monitors.map(
                 (monitor) => ListTile(
                   leading: const Icon(Icons.desktop_windows),
-                  title: Text('Capture ${monitor.name}'),
+                  title: Text(
+                    AppLocalizations.of(context)!.captureMonitor(monitor.name),
+                  ),
                   onTap: () {
                     Navigator.pop(context); // Close sheet first
                     onSelectScreenCapture!(monitor.index, 0); // 0 = full screen
@@ -102,7 +104,7 @@ class VideoSourceSheet extends StatelessWidget {
               ),
               ListTile(
                 leading: const Icon(Icons.window),
-                title: const Text('Capture Window...'),
+                title: Text(AppLocalizations.of(context)!.captureWindow),
                 onTap: () {
                   _showWindowPicker(context);
                 },
@@ -139,7 +141,7 @@ class VideoSourceSheet extends StatelessWidget {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Select Window to Capture'),
+        title: Text(AppLocalizations.of(context)!.selectWindowToCapture),
         content: SizedBox(
           width: 400,
           height: 400,
@@ -163,7 +165,7 @@ class VideoSourceSheet extends StatelessWidget {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
+            child: Text(AppLocalizations.of(context)!.cancel),
           ),
         ],
       ),

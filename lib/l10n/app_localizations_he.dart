@@ -298,5 +298,102 @@ class AppLocalizationsHe extends AppLocalizations {
   String get filterGroupStabilizers => 'מייצבים';
 
   @override
+  String get mobileConnect => 'חבר מצלמת טלפון';
+
+  @override
   String get filterGroupWhiteboard => 'לוח לבן';
+
+  @override
+  String get aboutKaptchi => 'אודות Kaptchi';
+
+  @override
+  String get whatIsKaptchi => 'מה זה Kaptchi?';
+
+  @override
+  String get whatIsKaptchiDescription =>
+      'Kaptchi נוצרה במיוחד כדי לעזור לסטודנטים לקויי ראייה לראות את הלוח טוב יותר. היא הופכת את המחשב שלך לעזר ראייה אישי עם מסננים חכמים לשיפור ניגודיות, ייצוב והגדלה, כדי שלא תפספס אף פרט בשיעור.';
+
+  @override
+  String get singleMonitorTip => 'טיפ למסך יחיד';
+
+  @override
+  String get singleMonitorTipDescription =>
+      'אם יש לך רק מסך אחד ואתה רוצה לצלם חלון מסוים (כמו זום או גוגל מיט) בלי שהחלון יסתיר לך, אנחנו ממליצים להתקין את \"Virtual-Display-Driver\" מ-GitHub כדי ליצור מסך שני וירטואלי.';
+
+  @override
+  String get getVirtualDisplayDriver => 'הורד דרייבר למסך וירטואלי';
+
+  @override
+  String get multiSourceCapable => 'תמיכה במקורות מרובים';
+
+  @override
+  String get multiSourceDescription =>
+      'החלף באופן מיידי בין מצלמות מרובות ולכידת מסך.';
+
+  @override
+  String get smartFilters => 'מסננים חכמים';
+
+  @override
+  String get smartFiltersDescription =>
+      'שפר את קריאות הטקסט עם מסנני \"לוח לבן\", \"ייצוב\" ו\"חידוד\".';
+
+  @override
+  String get pdfExportDescription =>
+      'צלם תמונות לגלריה וייצא אותן ישירות לקובץ PDF.';
+
+  @override
+  String get mobileConnectDescription =>
+      'השתמש בטלפון כמצלמה חיצונית באמצעות סריקת קוד QR.';
+
+  @override
+  String get howToUse => 'איך להשתמש';
+
+  @override
+  String get step1 => 'חבר את המצלמות או וודא שהן פעילות.';
+
+  @override
+  String get step2 => 'בחר מקור מצלמה מהרשימה בצד שמאל.';
+
+  @override
+  String get step3 =>
+      'השתמש בסרגל הצד במסך המצלמה כדי להפעיל מסננים כמו \"לוח לבן\" לניגודיות טובה יותר.';
+
+  @override
+  String get step4 => 'צלם תמונות באמצעות כפתור הצילום. הן יופיעו בגלריה.';
+
+  @override
+  String get step5 => 'חזור למסך הבית כדי לעבור על הגלריה ולייצא ל-PDF.';
+
+  @override
+  String get visitGithub => 'בקר בגיטהאב';
+
+  @override
+  String get madeWithLove => 'נבנה באהבה על ידי צוות Kaptchi';
+
+  @override
+  String get aboutTooltip => 'אודות';
+
+  @override
+  String get ipSelectionTooltip =>
+      'בחר את כתובת ה-IP של חיבור ה-Wi-Fi או הרשת המקומית שלך.\nבדרך כלל מתחיל ב-192.168.x.x או 10.x.x.x.\nוודא שהטלפון מחובר לאותה רשת.';
+
+  @override
+  String get screenCapture => 'לכידת מסך';
+
+  @override
+  String captureMonitor(Object monitorName) {
+    return 'לכוד $monitorName';
+  }
+
+  @override
+  String get captureWindow => 'לכוד חלון...';
+
+  @override
+  String get selectWindowToCapture => 'בחר חלון ללכידה';
+
+  @override
+  String get failedToStartScreenCapture => 'נכשל בהפעלת לכידת מסך';
+
+  @override
+  String get couldNotOpenLink => 'לא ניתן לפתוח קישור';
 }

@@ -14,6 +14,7 @@ import '../widgets/home_screen_widgets.dart';
 
 import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 import 'settings_screen.dart';
+import 'info_screen.dart';
 
 import 'package:file_picker/file_picker.dart';
 
@@ -249,7 +250,11 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     if (!success) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Failed to start screen capture')),
+          SnackBar(
+            content: Text(
+              AppLocalizations.of(context)!.failedToStartScreenCapture,
+            ),
+          ),
         );
       }
       return;
@@ -272,7 +277,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Select Window to Capture'),
+        title: Text(AppLocalizations.of(context)!.selectWindowToCapture),
         content: SizedBox(
           width: 400,
           height: 400,
@@ -295,7 +300,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Cancel'),
+            child: Text(AppLocalizations.of(context)!.cancel),
           ),
         ],
       ),
@@ -348,6 +353,16 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       appBar: AppBar(
         title: Text(AppLocalizations.of(context)!.appTitle),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.info_outline),
+            tooltip: AppLocalizations.of(context)!.aboutTooltip,
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const InfoScreen()),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.settings),
             tooltip: AppLocalizations.of(context)!.settings,

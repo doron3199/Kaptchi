@@ -1,35 +1,68 @@
-# Kaptchi Flutter
+# Kaptchi: The Ultimate Vision Aid for Students
 
-Kaptchi is an assistive technology application designed to help visually impaired students see the whiteboard clearly in a classroom setting.
+**Kaptchi** is a powerful, open-source application designed to help **visually impaired students** see the whiteboard better. It transforms your computer into a personal vision tool by allowing you to seamlessly switch between multiple cameras, screen capture, and apply real-time high-contrast enhancements.
 
-## Features
+## Key Features
 
-*   **Real-time Visual Enhancement:**
-    *   **Infinite Zoom:** High-level digital zoom capabilities.
-    *   **Color Inversion:** High contrast modes for better visibility.
-    *   **Whiteboard Filter:** Enhances text visibility and removes glare/shadows.
-*   **Obstacle Removal:** Uses computer vision (temporal median filtering) to "erase" moving objects (like a lecturer) from the view, leaving only the static whiteboard content.
-*   **Cross-Device Streaming:**
-    *   **Camera Mode (Android):** Uses the smartphone as a wireless camera.
-    *   **Monitor Mode (Windows):** Receives the stream, performs heavy image processing (C++), and displays the enhanced video on a larger screen.
-*   **Capture & Save:** Take snapshots of the processed whiteboard and save them as PDF notes.
+- **Vision Accessibility**: High-contrast "Whiteboard Mode" and sharpening filters to make text legible.
+- **Multi-Camera Support**: Connect and switch between multiple webcams instantly.
+- **Screen Capture**: Capture specific windows or entire screens (e.g., Zoom/Teams shared screen) and apply filters to them.
+- **Real-Time Filters**:
+    - **Whiteboard Mode**: High-contrast filter to make whiteboard writing pop.
+    - **Stabilization**: Smooth out camera shake.
+    - **Sharpening & Adjustments**: Invert colors, adjust brightness, and more.
+- **PDF Export**: Snap pictures during class and export them as a single PDF document.
+- **Mobile Connection**: Use your smartphone as a portable camera close to the board via QR code connection.
 
-## Architecture
-
-*   **Frontend:** Flutter (Android & Windows).
-*   **Image Processing:** C++ via `dart:ffi` (OpenCV) for high-performance filtering and background subtraction.
-*   **Streaming:** RTMP for video transmission over a local network (via MediaMTX).
-*   **Discovery:** Network interface scanning for local device connection.
+> **Tip**: If you have a single monitor setup and want to screen capture apps like Zoom or Google Meet without the app window blocking your view, we recommend installing the [Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) to create a virtual second monitor.
 
 ## Getting Started
 
-This project is a starting point for a Flutter application.
+### Prerequisites
 
-A few resources to get you started if this is your first Flutter project:
+- Windows 10/11
+- Webcam (Optional, but recommended)
 
-- [Lab: Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Cookbook: Useful Flutter samples](https://docs.flutter.dev/cookbook)
+### Installation
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+1.  Download the latest release from the [Releases](https://github.com/doron3199/kaptchi_flutter/releases) page.
+2.  Extract the zip file.
+3.  Run `kaptchi_flutter.exe`.
+4.  Install the android app from the app store.
+
+### Development Setup
+
+To build Kaptchi from source, you need Flutter installed.
+
+1.  **Clone the repository:**
+    ```bash
+    git clone https://github.com/doron3199/kaptchi_flutter.git
+    cd kaptchi_flutter
+    ```
+
+2.  **Install dependencies:**
+    ```bash
+    flutter pub get
+    ```
+
+3.  **Run the app:**
+    ```bash
+    flutter run -d windows
+    ```
+
+## Usage Guide
+
+1.  **Connect Sources**: Plug in your webcams. Kaptchi will automatically detect them.
+2.  **Select Source**: Click on a camera preview in the left sidebar to make it the main view.
+3.  **Apply Filters**: Open the right sidebar (filters icon) to toggle stabilization, whiteboard mode, and other effects.
+4.  **Capture**: Use the shutter button to take snapshots.
+5.  **Export**: Click the PDF icon in the gallery sidebar to save your captured images as a PDF.
+
+## Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+## Notice
+
+The Majority is build with the help of AI. Mainly Gemini 3 pro and Claude 4.5 Opus
+There can be mistakes in the code, please report them if you find any.

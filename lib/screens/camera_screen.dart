@@ -608,7 +608,11 @@ class _CameraScreenState extends State<CameraScreen>
               });
             } else {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Failed to start screen capture')),
+                SnackBar(
+                  content: Text(
+                    AppLocalizations.of(context)!.failedToStartScreenCapture,
+                  ),
+                ),
               );
             }
           },
