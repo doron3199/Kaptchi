@@ -25,7 +25,7 @@
 
 ### Installation
 
-1.  Download the latest release from the [Releases](https://github.com/doron3199/kaptchi_flutter/releases) page.
+1.  Download the latest release from the [Releases](https://github.com/doron3199/Kaptchi/releases) page.
 2.  Extract the zip file.
 3.  Run `kaptchi_flutter.exe`.
 4.  Install the android app from the app store.
@@ -36,7 +36,7 @@ To build Kaptchi from source, you need Flutter installed.
 
 1.  **Clone the repository:**
     ```bash
-    git clone https://github.com/doron3199/kaptchi_flutter.git
+    git clone https://github.com/doron3199/Kaptchi.git
     cd kaptchi_flutter
     ```
 

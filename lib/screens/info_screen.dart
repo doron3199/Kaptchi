@@ -260,9 +260,7 @@ class InfoScreen extends StatelessWidget {
         const SizedBox(height: 8),
         InkWell(
           onTap: () async {
-            final Uri url = Uri.parse(
-              'https://github.com/doron3199/kaptchi_flutter',
-            );
+            final Uri url = Uri.parse('https://github.com/doron3199/Kaptchi');
             if (!await launchUrl(url)) {
               // ignore: use_build_context_synchronously
               ScaffoldMessenger.of(
