@@ -81,7 +81,7 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           ],
           supportedLocales: const [Locale('en'), Locale('he')],
           debugShowCheckedModeBanner: false,
-          title: 'Kaptchi',
+          title: Platform.isAndroid ? 'kaptchi mobile' : 'Kaptchi',
           theme: ThemeData(
             colorScheme: ColorScheme.fromSeed(
               seedColor: Colors.blue,
