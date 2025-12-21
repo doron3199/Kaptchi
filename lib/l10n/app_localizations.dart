@@ -638,11 +638,185 @@ abstract class AppLocalizations {
   /// **'Stabilizers'**
   String get filterGroupStabilizers;
 
+  /// No description provided for @mobileConnect.
+  ///
+  /// In en, this message translates to:
+  /// **'Mobile Connect'**
+  String get mobileConnect;
+
   /// No description provided for @filterGroupWhiteboard.
   ///
   /// In en, this message translates to:
   /// **'Whiteboard'**
   String get filterGroupWhiteboard;
+
+  /// No description provided for @aboutKaptchi.
+  ///
+  /// In en, this message translates to:
+  /// **'About Kaptchi'**
+  String get aboutKaptchi;
+
+  /// No description provided for @whatIsKaptchi.
+  ///
+  /// In en, this message translates to:
+  /// **'What is Kaptchi?'**
+  String get whatIsKaptchi;
+
+  /// No description provided for @whatIsKaptchiDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Kaptchi is specifically designed to help visually impaired students see the whiteboard better. It transforms your setup into a personal vision aid with high-contrast filters, stabilization, and magnification, ensuring you never miss a detail in class.'**
+  String get whatIsKaptchiDescription;
+
+  /// No description provided for @singleMonitorTip.
+  ///
+  /// In en, this message translates to:
+  /// **'Single Monitor Tip'**
+  String get singleMonitorTip;
+
+  /// No description provided for @singleMonitorTipDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'If you only have one monitor and want to capture a specific window (like Zoom or Google Meet) without obstruction, we recommend installing the \"Virtual-Display-Driver\" from GitHub to create a virtual second screen.'**
+  String get singleMonitorTipDescription;
+
+  /// No description provided for @getVirtualDisplayDriver.
+  ///
+  /// In en, this message translates to:
+  /// **'Get Virtual Display Driver'**
+  String get getVirtualDisplayDriver;
+
+  /// No description provided for @multiSourceCapable.
+  ///
+  /// In en, this message translates to:
+  /// **'Multi-Source Capable'**
+  String get multiSourceCapable;
+
+  /// No description provided for @multiSourceDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Switch instantly between multiple cameras and screen capture sources.'**
+  String get multiSourceDescription;
+
+  /// No description provided for @smartFilters.
+  ///
+  /// In en, this message translates to:
+  /// **'Smart Filters'**
+  String get smartFilters;
+
+  /// No description provided for @smartFiltersDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Enhance legibility with \"Whiteboard\", \"Stabilization\", and \"Sharpening\" filters.'**
+  String get smartFiltersDescription;
+
+  /// No description provided for @pdfExportDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture snapshots to your gallery and export them directly as a PDF document.'**
+  String get pdfExportDescription;
+
+  /// No description provided for @mobileConnectDescription.
+  ///
+  /// In en, this message translates to:
+  /// **'Use your phone as an external camera via the QR code connection.'**
+  String get mobileConnectDescription;
+
+  /// No description provided for @howToUse.
+  ///
+  /// In en, this message translates to:
+  /// **'How to Use'**
+  String get howToUse;
+
+  /// No description provided for @step1.
+  ///
+  /// In en, this message translates to:
+  /// **'Connect your cameras or ensure they are active.'**
+  String get step1;
+
+  /// No description provided for @step2.
+  ///
+  /// In en, this message translates to:
+  /// **'Select a camera source from the list on the left.'**
+  String get step2;
+
+  /// No description provided for @step3.
+  ///
+  /// In en, this message translates to:
+  /// **'Use the sidebar in the camera view to apply filters like \"Whiteboard\" for better contrast.'**
+  String get step3;
+
+  /// No description provided for @step4.
+  ///
+  /// In en, this message translates to:
+  /// **'Take snapshots using the shutter button. They appear in the gallery.'**
+  String get step4;
+
+  /// No description provided for @step5.
+  ///
+  /// In en, this message translates to:
+  /// **'Go to the home screen to review your gallery and export to PDF.'**
+  String get step5;
+
+  /// No description provided for @visitGithub.
+  ///
+  /// In en, this message translates to:
+  /// **'Visit GitHub Repository'**
+  String get visitGithub;
+
+  /// No description provided for @madeWithLove.
+  ///
+  /// In en, this message translates to:
+  /// **'Made with ❤️ by the Kaptchi Team'**
+  String get madeWithLove;
+
+  /// No description provided for @aboutTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'About'**
+  String get aboutTooltip;
+
+  /// No description provided for @ipSelectionTooltip.
+  ///
+  /// In en, this message translates to:
+  /// **'Select the IP address of your Wi-Fi or Local Network connection.\nUsually starts with 192.168.x.x or 10.x.x.x.\nEnsure your phone is on the same network.'**
+  String get ipSelectionTooltip;
+
+  /// No description provided for @screenCapture.
+  ///
+  /// In en, this message translates to:
+  /// **'Screen Capture'**
+  String get screenCapture;
+
+  /// No description provided for @captureMonitor.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture {monitorName}'**
+  String captureMonitor(Object monitorName);
+
+  /// No description provided for @captureWindow.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture Window...'**
+  String get captureWindow;
+
+  /// No description provided for @selectWindowToCapture.
+  ///
+  /// In en, this message translates to:
+  /// **'Select Window to Capture'**
+  String get selectWindowToCapture;
+
+  /// No description provided for @failedToStartScreenCapture.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed to start screen capture'**
+  String get failedToStartScreenCapture;
+
+  /// No description provided for @couldNotOpenLink.
+  ///
+  /// In en, this message translates to:
+  /// **'Could not open link'**
+  String get couldNotOpenLink;
 }
 
 class _AppLocalizationsDelegate

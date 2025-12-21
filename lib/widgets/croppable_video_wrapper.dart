@@ -44,7 +44,7 @@ class CroppableVideoWrapper extends StatelessWidget {
                 left: 0,
                 right: 0,
                 height: cropTop,
-                child: Container(color: Colors.black.withOpacity(0.6)),
+                child: Container(color: Colors.black.withValues(alpha: 0.6)),
               ),
               // Bottom dark overlay
               Positioned(
@@ -52,7 +52,7 @@ class CroppableVideoWrapper extends StatelessWidget {
                 left: 0,
                 right: 0,
                 height: cropBottom,
-                child: Container(color: Colors.black.withOpacity(0.6)),
+                child: Container(color: Colors.black.withValues(alpha: 0.6)),
               ),
               // Top handle
               Positioned(
@@ -78,7 +78,7 @@ class CroppableVideoWrapper extends StatelessWidget {
                           borderRadius: BorderRadius.circular(3),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.black.withOpacity(0.5),
+                              color: Colors.black.withValues(alpha: 0.5),
                               blurRadius: 4,
                             ),
                           ],
@@ -114,7 +114,7 @@ class CroppableVideoWrapper extends StatelessWidget {
                           borderRadius: BorderRadius.circular(3),
                           boxShadow: [
                             BoxShadow(
-                              color: Colors.black.withOpacity(0.5),
+                              color: Colors.black.withValues(alpha: 0.5),
                               blurRadius: 4,
                             ),
                           ],

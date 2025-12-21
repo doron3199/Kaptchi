@@ -236,9 +236,13 @@ class _ZoomableStreamViewState extends State<ZoomableStreamView> {
     }
 
     // Matrix
-    final matrix = Matrix4.identity()
-      ..translate(_panOffset.dx, _panOffset.dy)
-      ..scale(visualScale);
+    final translation = Matrix4.translationValues(
+      _panOffset.dx,
+      _panOffset.dy,
+      0.0,
+    );
+    final scale = Matrix4.diagonal3Values(visualScale, visualScale, 1.0);
+    final matrix = translation..multiply(scale);
 
     return LayoutBuilder(
       builder: (context, constraints) {

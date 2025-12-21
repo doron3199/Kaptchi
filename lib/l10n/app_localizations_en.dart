@@ -300,5 +300,104 @@ class AppLocalizationsEn extends AppLocalizations {
   String get filterGroupStabilizers => 'Stabilizers';
 
   @override
+  String get mobileConnect => 'Mobile Connect';
+
+  @override
   String get filterGroupWhiteboard => 'Whiteboard';
+
+  @override
+  String get aboutKaptchi => 'About Kaptchi';
+
+  @override
+  String get whatIsKaptchi => 'What is Kaptchi?';
+
+  @override
+  String get whatIsKaptchiDescription =>
+      'Kaptchi is specifically designed to help visually impaired students see the whiteboard better. It transforms your setup into a personal vision aid with high-contrast filters, stabilization, and magnification, ensuring you never miss a detail in class.';
+
+  @override
+  String get singleMonitorTip => 'Single Monitor Tip';
+
+  @override
+  String get singleMonitorTipDescription =>
+      'If you only have one monitor and want to capture a specific window (like Zoom or Google Meet) without obstruction, we recommend installing the \"Virtual-Display-Driver\" from GitHub to create a virtual second screen.';
+
+  @override
+  String get getVirtualDisplayDriver => 'Get Virtual Display Driver';
+
+  @override
+  String get multiSourceCapable => 'Multi-Source Capable';
+
+  @override
+  String get multiSourceDescription =>
+      'Switch instantly between multiple cameras and screen capture sources.';
+
+  @override
+  String get smartFilters => 'Smart Filters';
+
+  @override
+  String get smartFiltersDescription =>
+      'Enhance legibility with \"Whiteboard\", \"Stabilization\", and \"Sharpening\" filters.';
+
+  @override
+  String get pdfExportDescription =>
+      'Capture snapshots to your gallery and export them directly as a PDF document.';
+
+  @override
+  String get mobileConnectDescription =>
+      'Use your phone as an external camera via the QR code connection.';
+
+  @override
+  String get howToUse => 'How to Use';
+
+  @override
+  String get step1 => 'Connect your cameras or ensure they are active.';
+
+  @override
+  String get step2 => 'Select a camera source from the list on the left.';
+
+  @override
+  String get step3 =>
+      'Use the sidebar in the camera view to apply filters like \"Whiteboard\" for better contrast.';
+
+  @override
+  String get step4 =>
+      'Take snapshots using the shutter button. They appear in the gallery.';
+
+  @override
+  String get step5 =>
+      'Go to the home screen to review your gallery and export to PDF.';
+
+  @override
+  String get visitGithub => 'Visit GitHub Repository';
+
+  @override
+  String get madeWithLove => 'Made with ❤️ by the Kaptchi Team';
+
+  @override
+  String get aboutTooltip => 'About';
+
+  @override
+  String get ipSelectionTooltip =>
+      'Select the IP address of your Wi-Fi or Local Network connection.\nUsually starts with 192.168.x.x or 10.x.x.x.\nEnsure your phone is on the same network.';
+
+  @override
+  String get screenCapture => 'Screen Capture';
+
+  @override
+  String captureMonitor(Object monitorName) {
+    return 'Capture $monitorName';
+  }
+
+  @override
+  String get captureWindow => 'Capture Window...';
+
+  @override
+  String get selectWindowToCapture => 'Select Window to Capture';
+
+  @override
+  String get failedToStartScreenCapture => 'Failed to start screen capture';
+
+  @override
+  String get couldNotOpenLink => 'Could not open link';
 }
