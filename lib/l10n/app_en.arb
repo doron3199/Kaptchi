@@ -154,6 +154,7 @@
   "filterBlurLegacy": "Blur (Legacy)",
   "filterInvertColors": "Invert Colors",
   "filterWhiteboardLegacy": "Whiteboard (Legacy)",
+  "filterThresholdSensitivity": "Threshold:",
   "filterGroupStabilizers": "Stabilizers",
   "mobileConnect": "Mobile Connect",
   "filterGroupWhiteboard": "Whiteboard",

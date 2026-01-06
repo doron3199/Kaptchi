@@ -297,6 +297,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get filterWhiteboardLegacy => 'Whiteboard (Legacy)';
 
   @override
+  String get filterThresholdSensitivity => 'Threshold:';
+
+  @override
   String get filterGroupStabilizers => 'Stabilizers';
 
   @override

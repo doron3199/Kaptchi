@@ -6,13 +6,20 @@ class FilterItem {
   final int id;
   final String name;
   bool isActive;
+  Map<String, double> parameters;
 
-  FilterItem({required this.id, required this.name, this.isActive = false});
+  FilterItem({
+    required this.id,
+    required this.name,
+    this.isActive = false,
+    Map<String, double>? parameters,
+  }) : parameters = parameters ?? {};
 
   Map<String, dynamic> toJson() => {
     'id': id,
     'name': name,
     'isActive': isActive,
+    'parameters': parameters,
   };
 
   factory FilterItem.fromJson(Map<String, dynamic> json) {
@@ -20,6 +27,9 @@ class FilterItem {
       id: json['id'],
       name: json['name'],
       isActive: json['isActive'],
+      parameters: json['parameters'] != null
+          ? Map<String, double>.from(json['parameters'])
+          : {},
     );
   }
 }
@@ -70,7 +80,12 @@ class FiltersService extends ChangeNotifier {
     FilterItem(id: 11, name: 'filterPersonRemoval', isActive: false),
     FilterItem(id: 3, name: 'filterBlurLegacy', isActive: false),
     FilterItem(id: 1, name: 'filterInvertColors', isActive: false),
-    FilterItem(id: 2, name: 'filterWhiteboardLegacy', isActive: false),
+    FilterItem(
+      id: 2,
+      name: 'filterWhiteboardLegacy',
+      isActive: false,
+      parameters: {'threshold': 15.0},
+    ),
   ];
 
   final List<FilterGroup> _filterGroups = [
@@ -212,5 +227,21 @@ class FiltersService extends ChangeNotifier {
 
   List<int> getActiveFilterIds() {
     return _filters.where((f) => f.isActive).map((f) => f.id).toList();
+  }
+
+  /// Update a parameter for a specific filter by ID
+  void updateParameter(int filterId, String key, double value) {
+    final filterIndex = _filters.indexWhere((f) => f.id == filterId);
+    if (filterIndex != -1) {
+      _filters[filterIndex].parameters[key] = value;
+      saveFilters();
+      notifyListeners();
+    }
+  }
+
+  /// Get a filter by ID
+  FilterItem? getFilterById(int id) {
+    final index = _filters.indexWhere((f) => f.id == id);
+    return index != -1 ? _filters[index] : null;
   }
 }

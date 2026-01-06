@@ -295,6 +295,9 @@ class AppLocalizationsHe extends AppLocalizations {
   String get filterWhiteboardLegacy => 'לוח לבן (ישן)';
 
   @override
+  String get filterThresholdSensitivity => 'רגישות:';
+
+  @override
   String get filterGroupStabilizers => 'מייצבים';
 
   @override
