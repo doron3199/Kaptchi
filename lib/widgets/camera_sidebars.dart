@@ -15,6 +15,7 @@ class FilterSidebar extends StatefulWidget {
   final Function(FilterGroup) onAddGroup;
   final Function(String, FilterGroup) onEditGroup;
   final Function(String) onDeleteGroup;
+  final Function(int, String, double)? onParameterChanged;
 
   const FilterSidebar({
     super.key,
@@ -28,6 +29,7 @@ class FilterSidebar extends StatefulWidget {
     required this.onAddGroup,
     required this.onEditGroup,
     required this.onDeleteGroup,
+    this.onParameterChanged,
   });
 
   @override
@@ -364,21 +366,72 @@ class _FilterSidebarState extends State<FilterSidebar> {
                           Card(
                             key: ValueKey(widget.filters[index].id),
                             color: Colors.grey[900],
-                            child: SwitchListTile(
-                              title: Text(
-                                _getLocalizedFilterName(
-                                  context,
-                                  widget.filters[index].name,
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                SwitchListTile(
+                                  title: Text(
+                                    _getLocalizedFilterName(
+                                      context,
+                                      widget.filters[index].name,
+                                    ),
+                                    style: const TextStyle(color: Colors.white),
+                                  ),
+                                  value: widget.filters[index].isActive,
+                                  onChanged: (bool value) =>
+                                      widget.onFilterToggle(index, value),
+                                  secondary: const Icon(
+                                    Icons.drag_handle,
+                                    color: Colors.white54,
+                                  ),
                                 ),
-                                style: const TextStyle(color: Colors.white),
-                              ),
-                              value: widget.filters[index].isActive,
-                              onChanged: (bool value) =>
-                                  widget.onFilterToggle(index, value),
-                              secondary: const Icon(
-                                Icons.drag_handle,
-                                color: Colors.white54,
-                              ),
+                                // Show parameter slider if filter is active and has parameters
+                                if (widget.filters[index].isActive &&
+                                    widget
+                                        .filters[index]
+                                        .parameters
+                                        .isNotEmpty &&
+                                    widget.onParameterChanged != null)
+                                  Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 16.0,
+                                      vertical: 4.0,
+                                    ),
+                                    child: Row(
+                                      children: [
+                                        Text(
+                                          AppLocalizations.of(
+                                            context,
+                                          )!.filterThresholdSensitivity,
+                                          style: const TextStyle(
+                                            color: Colors.white70,
+                                            fontSize: 12,
+                                          ),
+                                        ),
+                                        Expanded(
+                                          child: Slider(
+                                            value:
+                                                widget
+                                                    .filters[index]
+                                                    .parameters['threshold'] ??
+                                                15.0,
+                                            min: 2,
+                                            max: 30,
+                                            divisions: 28,
+                                            label:
+                                                '${(widget.filters[index].parameters['threshold'] ?? 15.0).toInt()}',
+                                            onChanged: (v) =>
+                                                widget.onParameterChanged!(
+                                                  widget.filters[index].id,
+                                                  'threshold',
+                                                  v,
+                                                ),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                              ],
                             ),
                           ),
                       ],

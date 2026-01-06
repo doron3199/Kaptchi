@@ -18,6 +18,11 @@ static float g_avg_brightness = -1.0f;
 // Person Removal Smooth Mask
 static cv::Mat g_person_prob_mask;
 
+// --- Filter Parameters ---
+#include <unordered_map>
+static std::unordered_map<int, float> g_filter_params;
+static std::mutex g_filter_params_mutex;
+
 
 // Helper to get absolute path to models
 std::string GetModelPath(const std::string& modelName) {
@@ -1076,9 +1081,17 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
         if (mode == 1) { // Invert
             cv::bitwise_not(bgr, bgr);
         } else if (mode == 2) { // Whiteboard Legacy
+            float c_value = 15.0f; // default threshold
+            {
+                std::lock_guard<std::mutex> lock(g_filter_params_mutex);
+                auto it = g_filter_params.find(2);
+                if (it != g_filter_params.end()) {
+                    c_value = it->second;
+                }
+            }
             cv::Mat gray;
             cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
-            cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, 10);
+            cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, (int)c_value);
             cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
         } else if (mode == 3) { // Blur Legacy
             cv::GaussianBlur(bgr, bgr, cv::Size(15, 15), 0);
@@ -1191,6 +1204,11 @@ extern "C" __declspec(dllexport) void SetLiveCropCorners(double* corners) {
         memcpy(g_live_crop_corners, corners, sizeof(g_live_crop_corners));
         g_live_crop_enabled = true;
     }
+}
+
+extern "C" __declspec(dllexport) void SetFilterParameter(int32_t filterId, float param1) {
+    std::lock_guard<std::mutex> lock(g_filter_params_mutex);
+    g_filter_params[filterId] = param1;
 }
 
 // FFI Exports

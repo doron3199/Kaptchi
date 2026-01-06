@@ -1432,6 +1432,10 @@ class _CameraScreenState extends State<CameraScreen>
               onAddGroup: FiltersService.instance.addGroup,
               onEditGroup: FiltersService.instance.editGroup,
               onDeleteGroup: FiltersService.instance.deleteGroup,
+              onParameterChanged: (filterId, key, value) {
+                FiltersService.instance.updateParameter(filterId, key, value);
+                NativeCameraService().setFilterParameter(filterId, value);
+              },
             ),
 
             // Overlay Widget (Feature 11) - Resizable with handles

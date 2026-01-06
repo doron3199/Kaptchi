@@ -90,6 +90,7 @@
   "filterBlurLegacy": "טשטוש (ישן)",
   "filterInvertColors": "היפוך צבעים",
   "filterWhiteboardLegacy": "לוח לבן (ישן)",
+  "filterThresholdSensitivity": "רגישות:",
   "filterGroupStabilizers": "מייצבים",
   "mobileConnect": "חבר מצלמת טלפון",
   "filterGroupWhiteboard": "לוח לבן",

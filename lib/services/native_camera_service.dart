@@ -41,6 +41,9 @@ typedef GetFrameHeight = int Function();
 typedef SetLiveCropCornersFunc = Void Function(Pointer<Double> corners);
 typedef SetLiveCropCorners = void Function(Pointer<Double> corners);
 
+typedef SetFilterParameterFunc = Void Function(Int32 filterId, Float param1);
+typedef SetFilterParameter = void Function(int filterId, double param1);
+
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
   factory NativeCameraService() => _instance;
@@ -59,6 +62,7 @@ class NativeCameraService {
   late GetFrameWidth _getFrameWidth;
   late GetFrameHeight _getFrameHeight;
   late SetLiveCropCorners _setLiveCropCorners;
+  late SetFilterParameter _setFilterParameter;
 
   bool _isInitialized = false;
 
@@ -108,6 +112,9 @@ class NativeCameraService {
         .asFunction();
     _setLiveCropCorners = _nativeLib
         .lookup<NativeFunction<SetLiveCropCornersFunc>>('SetLiveCropCorners')
+        .asFunction();
+    _setFilterParameter = _nativeLib
+        .lookup<NativeFunction<SetFilterParameterFunc>>('SetFilterParameter')
         .asFunction();
 
     _isInitialized = true;
@@ -211,6 +218,12 @@ class NativeCameraService {
         malloc.free(ptr);
       }
     }
+  }
+
+  /// Set a parameter value for a specific filter
+  void setFilterParameter(int filterId, double value) {
+    initialize();
+    _setFilterParameter(filterId, value);
   }
 
   // --- Screen Capture Methods ---

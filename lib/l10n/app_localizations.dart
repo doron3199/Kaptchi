@@ -632,6 +632,12 @@ abstract class AppLocalizations {
   /// **'Whiteboard (Legacy)'**
   String get filterWhiteboardLegacy;
 
+  /// No description provided for @filterThresholdSensitivity.
+  ///
+  /// In en, this message translates to:
+  /// **'Threshold:'**
+  String get filterThresholdSensitivity;
+
   /// No description provided for @filterGroupStabilizers.
   ///
   /// In en, this message translates to:
