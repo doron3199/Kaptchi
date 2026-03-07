@@ -1,5 +1,7 @@
 #include "native_camera.h"
 #include "screen_capture_source.h"
+#include "whiteboard_canvas.h"
+#include "whiteboard_enhance.h"
 #include <iostream>
 #include <cmath>
 #include <chrono>
@@ -9,6 +11,13 @@
 
 // Forward declaration
 void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count);
+
+static void join_with_timeout(std::thread& t, std::chrono::milliseconds ms) {
+    auto end = std::chrono::steady_clock::now() + ms;
+    while (t.joinable() && std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (t.joinable()) t.detach();
+}
 
 // --- Global State for Filters ---
 static cv::Mat g_prev_gray_stab;
@@ -44,15 +53,35 @@ ScreenCaptureSource* g_screen_capture = nullptr;
 
 // Forward declarations
 static void ApplyLivePerspectiveCrop(cv::Mat& frame);
+static cv::Mat GetYOLOPersonMask(const cv::Mat& frame);
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar) {
     if (g_native_camera) return;
     g_native_camera = new NativeCamera(texture_registrar);
-    
+
     // Initialize screen capture source
     if (!g_screen_capture) {
         g_screen_capture = new ScreenCaptureSource();
         g_screen_capture->Init(g_native_camera);
+    }
+}
+
+void ShutdownGlobalNativeCamera() {
+    if (g_screen_capture) {
+        if (g_screen_capture->IsCapturing()) {
+            g_screen_capture->StopCapture();
+        }
+        delete g_screen_capture;
+        g_screen_capture = nullptr;
+    }
+    if (g_whiteboard_canvas) {
+        delete g_whiteboard_canvas;
+        g_whiteboard_canvas = nullptr;
+    }
+    if (g_native_camera) {
+        g_native_camera->Stop();
+        delete g_native_camera;
+        g_native_camera = nullptr;
     }
 }
 
@@ -134,12 +163,8 @@ void NativeCamera::Stop() {
     }
     processing_cv_.notify_all();
 
-    if (capture_thread_.joinable()) {
-        capture_thread_.join();
-    }
-    if (processing_thread_.joinable()) {
-        processing_thread_.join();
-    }
+    join_with_timeout(capture_thread_, std::chrono::milliseconds(2000));
+    join_with_timeout(processing_thread_, std::chrono::milliseconds(2000));
     // capture_.release() is now handled inside the thread loop
 }
 
@@ -386,7 +411,59 @@ void NativeCamera::ProcessingThreadLoop() {
             has_new_frame_ = false;
         }
 
-        ProcessFrame(frame);
+        // Whiteboard canvas mode — incremental SLAM-like capture
+        if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
+            cv::Mat personMask = GetYOLOPersonMask(frame);
+            g_whiteboard_canvas->ProcessFrame(frame, personMask);
+
+            bool showing_canvas = false;
+            static cv::Mat last_canvas_frame;
+            
+            // If canvas view mode is active and we have content, replace the
+            // live frame with the canvas viewport.  The live feed is never
+            // blocked — GetViewport uses try_lock and is a no-op if busy.
+            if (g_whiteboard_canvas->IsCanvasViewMode() &&
+                g_whiteboard_canvas->HasContent()) {
+                
+                // Compute largest canvas-AR rect that fits inside the camera frame (letterbox)
+                cv::Size csz = g_whiteboard_canvas->GetCanvasSize();
+                const float kCanvasAR = (float)csz.width / (float)csz.height;
+                float frame_ar = (float)frame.cols / (float)frame.rows;
+                int cv_w, cv_h;
+                if (frame_ar > kCanvasAR) {
+                    cv_h = frame.rows;
+                    cv_w = (int)std::round(cv_h * kCanvasAR);
+                } else {
+                    cv_w = frame.cols;
+                    cv_h = (int)std::round(cv_w / kCanvasAR);
+                }
+                cv::Size canvas_view_size(cv_w, cv_h);
+
+                cv::Mat canvas_out;
+                bool got_lock = g_whiteboard_canvas->GetViewport(
+                    g_canvas_pan_x.load(), g_canvas_pan_y.load(),
+                    g_canvas_zoom.load(), canvas_view_size, canvas_out);
+
+                if (got_lock) {
+                    frame.setTo(cv::Scalar(255, 255, 255));
+                    int dx = (frame.cols - cv_w) / 2;
+                    int dy = (frame.rows - cv_h) / 2;
+                    canvas_out.copyTo(frame(cv::Rect(dx, dy, cv_w, cv_h)));
+                    frame.copyTo(last_canvas_frame);
+                    showing_canvas = true;
+                } else if (!last_canvas_frame.empty() && last_canvas_frame.size() == frame.size()) {
+                    // Lock failed (worker is busy drawing). Keep showing the last mapped canvas
+                    // instead of flashing back to the live camera feed.
+                    last_canvas_frame.copyTo(frame);
+                    showing_canvas = true;
+                }
+            }
+        }
+        
+        // Only apply camera filters if we are NOT showing the canvas
+        if (!g_whiteboard_enabled.load() || !g_whiteboard_canvas || !g_whiteboard_canvas->IsCanvasViewMode() || !g_whiteboard_canvas->HasContent()) {
+            ProcessFrame(frame);
+        }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -869,6 +946,118 @@ static bool g_yolo11_failed = false;
 static cv::Mat g_bg_model_float;
 static cv::Mat g_bg_model_8u;
 
+// Helper function to get person mask for panorama stitching
+// Returns a mask where person regions are 255, background is 0
+static cv::Mat GetYOLOPersonMask(const cv::Mat& frame) {
+    cv::Mat personMask = cv::Mat::zeros(frame.size(), CV_8UC1);
+    
+    if (g_yolo11_failed) return personMask;
+    
+    // Initialize YOLO if not done
+    if (!g_yolo11_initialized) {
+        try {
+            std::string modelPath = GetModelPath("yolo11n.onnx");
+            g_yolo11_net = cv::dnn::readNetFromONNX(modelPath);
+            g_yolo11_net.setPreferableBackend(cv::dnn::DNN_BACKEND_OPENCV);
+            g_yolo11_net.setPreferableTarget(cv::dnn::DNN_TARGET_CPU);
+            g_yolo11_initialized = !g_yolo11_net.empty();
+        } catch (const cv::Exception& e) {
+            std::cerr << "Failed to load YOLOv11 model: " << e.what() << std::endl;
+            g_yolo11_failed = true;
+            return personMask;
+        } catch (...) {
+            std::cerr << "Failed to load YOLOv11 model (Unknown error)." << std::endl;
+            g_yolo11_failed = true;
+            return personMask;
+        }
+    }
+
+    if (!g_yolo11_initialized) return personMask;
+
+    try {
+        const int input_w = 640;
+        const int input_h = 640;
+
+        cv::Mat blob = cv::dnn::blobFromImage(frame, 1.0 / 255.0, cv::Size(input_w, input_h), cv::Scalar(), true, false);
+        g_yolo11_net.setInput(blob);
+
+        std::vector<cv::Mat> outputs;
+        g_yolo11_net.forward(outputs, g_yolo11_net.getUnconnectedOutLayersNames());
+
+        if (outputs.empty()) return personMask;
+
+        cv::Mat output = outputs[0];
+        if (output.dims != 3) return personMask;
+
+        int dimensions = output.size[1];
+        int rows = output.size[2];
+
+        if (dimensions < 5) return personMask;
+
+        cv::Mat output2D = output.reshape(1, dimensions);
+        cv::Mat output2D_t;
+        cv::transpose(output2D, output2D_t);
+
+        float* data = (float*)output2D_t.data;
+        
+        std::vector<int> class_ids;
+        std::vector<float> confidences;
+        std::vector<cv::Rect> boxes;
+
+        float conf_threshold = 0.45f;
+        float nms_threshold = 0.5f;
+        
+        float x_factor = (float)frame.cols / (float)input_w;
+        float y_factor = (float)frame.rows / (float)input_h;
+
+        for (int i = 0; i < rows; ++i) {
+            float* row_ptr = data + i * dimensions;
+            float* scores_ptr = row_ptr + 4;
+            float person_score = scores_ptr[0]; // Person is class 0 in COCO
+
+            if (person_score > conf_threshold) {
+                float cx = row_ptr[0];
+                float cy = row_ptr[1];
+                float w = row_ptr[2];
+                float h = row_ptr[3];
+
+                int left = int((cx - 0.5 * w) * x_factor);
+                int top = int((cy - 0.5 * h) * y_factor);
+                int width = int(w * x_factor);
+                int height = int(h * y_factor);
+
+                boxes.push_back(cv::Rect(left, top, width, height));
+                confidences.push_back(person_score);
+                class_ids.push_back(0);
+            }
+        }
+
+        std::vector<int> indices;
+        cv::dnn::NMSBoxes(boxes, confidences, conf_threshold, nms_threshold, indices);
+
+        // Create person mask with expanded boxes
+        for (int idx : indices) {
+            cv::Rect box = boxes[idx];
+            // Expand box to ensure we cover person edges
+            int pad = 20;
+            cv::Rect padded_box;
+            padded_box.x = std::max(0, box.x - pad);
+            padded_box.y = std::max(0, box.y - pad);
+            padded_box.width = std::min(frame.cols - padded_box.x, box.width + 2 * pad);
+            padded_box.height = std::min(frame.rows - padded_box.y, box.height + 2 * pad);
+
+            cv::rectangle(personMask, padded_box, cv::Scalar(255), cv::FILLED);
+        }
+
+    } catch (const cv::Exception& e) {
+        std::cerr << "YOLO Person Mask Error: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "YOLO Person Mask Error (Unknown)" << std::endl;
+    }
+
+    return personMask;
+}
+
 static void ApplyYOLO11Detection(cv::Mat& frame) {
     if (g_yolo11_failed) return;
     if (!g_yolo11_initialized) {
@@ -1115,6 +1304,14 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
             ApplyCornerSmoothing(bgr);
         } else if (mode == 15) { // Smart Video Crop
             ApplySmartVideoCrop(bgr);
+        } else if (mode == 16) { // Whiteboard Enhance
+            float dog_threshold = 10.0f;
+            {
+                std::lock_guard<std::mutex> lock(g_filter_params_mutex);
+                auto it = g_filter_params.find(16);
+                if (it != g_filter_params.end()) dog_threshold = it->second;
+            }
+            bgr = WhiteboardEnhance(bgr, dog_threshold);
         }
     }
 }

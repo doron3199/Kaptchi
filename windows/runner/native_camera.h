@@ -72,3 +72,4 @@ private:
 };
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);
+void ShutdownGlobalNativeCamera();

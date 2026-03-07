@@ -262,7 +262,7 @@ class InfoScreen extends StatelessWidget {
           onTap: () async {
             final Uri url = Uri.parse('https://github.com/doron3199/Kaptchi');
             if (!await launchUrl(url)) {
-              // ignore: use_build_context_synchronously
+              if (!context.mounted) return;
               ScaffoldMessenger.of(
                 context,
               ).showSnackBar(SnackBar(content: Text(l10n.couldNotOpenLink)));

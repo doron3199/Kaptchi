@@ -1,7 +1,16 @@
 #include "screen_capture_source.h"
 #include "native_camera.h"
 #include <iostream>
+#include <chrono>
+#include <thread>
 #include <dwmapi.h>
+
+static void join_with_timeout(std::thread& t, std::chrono::milliseconds ms) {
+    auto end = std::chrono::steady_clock::now() + ms;
+    while (t.joinable() && std::chrono::steady_clock::now() < end)
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    if (t.joinable()) t.detach();
+}
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -327,11 +336,7 @@ bool ScreenCaptureSource::StartCapture(int monitorIndex, HWND targetWindow) {
 
 void ScreenCaptureSource::StopCapture() {
     is_capturing_ = false;
-    
-    if (capture_thread_.joinable()) {
-        capture_thread_.join();
-    }
-    
+    join_with_timeout(capture_thread_, std::chrono::milliseconds(1000));
     CleanupDXGI();
     std::cout << "[ScreenCapture] Stopped capturing" << std::endl;
 }

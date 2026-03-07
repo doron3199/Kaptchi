@@ -150,6 +150,7 @@
   "filterMovingAverage": "Moving Average",
   "filterSmartObstacleRemoval": "Smart Obstacle Removal",
   "filterSmartWhiteboard": "Smart Whiteboard",
+  "filterWhiteboardEnhance": "Whiteboard Enhance",
   "filterPersonRemoval": "Person Removal (AI)",
   "filterBlurLegacy": "Blur (Legacy)",
   "filterInvertColors": "Invert Colors",
@@ -186,5 +187,12 @@
   "selectWindowToCapture": "Select Window to Capture",
   "cancel": "Cancel",
   "failedToStartScreenCapture": "Failed to start screen capture",
-  "couldNotOpenLink": "Could not open link"
+  "couldNotOpenLink": "Could not open link",
+  "enablePanorama": "Enable Panorama Mode",
+  "disablePanorama": "Disable Panorama Mode",
+  "resetPanorama": "Reset Panorama",
+  "enableWhiteboard": "Enable Whiteboard Capture",
+  "disableWhiteboard": "Disable Whiteboard Capture",
+  "resetWhiteboard": "Reset Whiteboard",
+  "toggleCanvasView": "Toggle Canvas View"
 }

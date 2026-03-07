@@ -608,6 +608,12 @@ abstract class AppLocalizations {
   /// **'Smart Whiteboard'**
   String get filterSmartWhiteboard;
 
+  /// No description provided for @filterWhiteboardEnhance.
+  ///
+  /// In en, this message translates to:
+  /// **'Whiteboard Enhance'**
+  String get filterWhiteboardEnhance;
+
   /// No description provided for @filterPersonRemoval.
   ///
   /// In en, this message translates to:
@@ -823,6 +829,48 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Could not open link'**
   String get couldNotOpenLink;
+
+  /// No description provided for @enablePanorama.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable Panorama Mode'**
+  String get enablePanorama;
+
+  /// No description provided for @disablePanorama.
+  ///
+  /// In en, this message translates to:
+  /// **'Disable Panorama Mode'**
+  String get disablePanorama;
+
+  /// No description provided for @resetPanorama.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset Panorama'**
+  String get resetPanorama;
+
+  /// No description provided for @enableWhiteboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Enable Whiteboard Capture'**
+  String get enableWhiteboard;
+
+  /// No description provided for @disableWhiteboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Disable Whiteboard Capture'**
+  String get disableWhiteboard;
+
+  /// No description provided for @resetWhiteboard.
+  ///
+  /// In en, this message translates to:
+  /// **'Reset Whiteboard'**
+  String get resetWhiteboard;
+
+  /// No description provided for @toggleCanvasView.
+  ///
+  /// In en, this message translates to:
+  /// **'Toggle Canvas View'**
+  String get toggleCanvasView;
 }
 
 class _AppLocalizationsDelegate

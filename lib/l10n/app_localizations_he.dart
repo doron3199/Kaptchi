@@ -283,6 +283,9 @@ class AppLocalizationsHe extends AppLocalizations {
   String get filterSmartWhiteboard => 'לוח לבן חכם';
 
   @override
+  String get filterWhiteboardEnhance => 'שיפור לוח לבן';
+
+  @override
   String get filterPersonRemoval => 'הסרת אנשים (AI)';
 
   @override
@@ -399,4 +402,25 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get couldNotOpenLink => 'לא ניתן לפתוח קישור';
+
+  @override
+  String get enablePanorama => 'הפעל מצב פנורמה';
+
+  @override
+  String get disablePanorama => 'בטל מצב פנורמה';
+
+  @override
+  String get resetPanorama => 'אפס פנורמה';
+
+  @override
+  String get enableWhiteboard => 'הפעל לכידת לוח';
+
+  @override
+  String get disableWhiteboard => 'בטל לכידת לוח';
+
+  @override
+  String get resetWhiteboard => 'אפס לוח';
+
+  @override
+  String get toggleCanvasView => 'החלף תצוגת לוח';
 }

@@ -77,6 +77,7 @@ class FiltersService extends ChangeNotifier {
     FilterItem(id: 6, name: 'filterMovingAverage', isActive: false),
     FilterItem(id: 5, name: 'filterSmartObstacleRemoval', isActive: false),
     FilterItem(id: 4, name: 'filterSmartWhiteboard', isActive: false),
+    FilterItem(id: 16, name: 'filterWhiteboardEnhance', isActive: false, parameters: {'threshold': 10.0}),
     FilterItem(id: 11, name: 'filterPersonRemoval', isActive: false),
     FilterItem(id: 3, name: 'filterBlurLegacy', isActive: false),
     FilterItem(id: 1, name: 'filterInvertColors', isActive: false),
@@ -97,7 +98,7 @@ class FiltersService extends ChangeNotifier {
     FilterGroup(
       id: 'whiteboard',
       name: 'filterGroupWhiteboard',
-      filterIds: [6, 8, 4, 11, 1],
+      filterIds: [6, 8, 4, 16, 11, 1],
     ),
   ];
 

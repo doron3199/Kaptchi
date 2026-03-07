@@ -86,6 +86,7 @@
   "filterMovingAverage": "ממוצע נע",
   "filterSmartObstacleRemoval": "הסרת מכשולים חכמה",
   "filterSmartWhiteboard": "לוח לבן חכם",
+  "filterWhiteboardEnhance": "שיפור לוח לבן",
   "filterPersonRemoval": "הסרת אנשים (AI)",
   "filterBlurLegacy": "טשטוש (ישן)",
   "filterInvertColors": "היפוך צבעים",
@@ -122,5 +123,12 @@
   "selectWindowToCapture": "בחר חלון ללכידה",
   "cancel": "ביטול",
   "failedToStartScreenCapture": "נכשל בהפעלת לכידת מסך",
-  "couldNotOpenLink": "לא ניתן לפתוח קישור"
+  "couldNotOpenLink": "לא ניתן לפתוח קישור",
+  "enablePanorama": "הפעל מצב פנורמה",
+  "disablePanorama": "בטל מצב פנורמה",
+  "resetPanorama": "אפס פנורמה",
+  "enableWhiteboard": "הפעל לכידת לוח",
+  "disableWhiteboard": "בטל לכידת לוח",
+  "resetWhiteboard": "אפס לוח",
+  "toggleCanvasView": "החלף תצוגת לוח"
 }

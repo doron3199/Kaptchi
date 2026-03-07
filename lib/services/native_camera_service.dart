@@ -1,4 +1,4 @@
-import 'dart:ffi';
+import 'dart:ffi' hide Size;
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
@@ -44,6 +44,58 @@ typedef SetLiveCropCorners = void Function(Pointer<Double> corners);
 typedef SetFilterParameterFunc = Void Function(Int32 filterId, Float param1);
 typedef SetFilterParameter = void Function(int filterId, double param1);
 
+// Panorama FFI types
+typedef SetPanoramaEnabledFunc = Void Function(Bool enabled);
+typedef SetPanoramaEnabled = void Function(bool enabled);
+
+typedef ResetPanoramaFunc = Void Function();
+typedef ResetPanorama = void Function();
+
+typedef SetPanoramaViewportFunc =
+    Void Function(Float panX, Float panY, Float zoom);
+typedef SetPanoramaViewport =
+    void Function(double panX, double panY, double zoom);
+
+typedef GetPanoramaCanvasSizeFunc =
+    Void Function(Pointer<Int32> width, Pointer<Int32> height);
+typedef GetPanoramaCanvasSize =
+    void Function(Pointer<Int32> width, Pointer<Int32> height);
+
+typedef IsPanoramaEnabledFunc = Bool Function();
+typedef IsPanoramaEnabled = bool Function();
+
+// Canvas (whiteboard) FFI types
+typedef SetCanvasViewModeFunc = Void Function(Bool mode);
+typedef SetCanvasViewMode = void Function(bool mode);
+
+typedef IsCanvasViewModeFunc = Bool Function();
+typedef IsCanvasViewMode = bool Function();
+
+typedef GetCanvasTextureIdFunc = Int64 Function();
+typedef GetCanvasTextureId = int Function();
+
+typedef SetWhiteboardDebugFunc = Void Function(Bool enabled);
+typedef SetWhiteboardDebug = void Function(bool enabled);
+
+typedef SetCanvasEnhanceThresholdFunc = Void Function(Float threshold);
+typedef SetCanvasEnhanceThreshold = void Function(double threshold);
+
+// Sub-canvas navigation FFI types
+typedef GetSubCanvasCountFunc = Int32 Function();
+typedef GetSubCanvasCount = int Function();
+
+typedef GetActiveSubCanvasIndexFunc = Int32 Function();
+typedef GetActiveSubCanvasIndex = int Function();
+
+typedef SetActiveSubCanvasFunc = Void Function(Int32 idx);
+typedef SetActiveSubCanvas = void Function(int idx);
+
+typedef GetSortedSubCanvasIndexFunc = Int32 Function(Int32 pos);
+typedef GetSortedSubCanvasIndex = int Function(int pos);
+
+typedef GetSortedPositionFunc = Int32 Function(Int32 idx);
+typedef GetSortedPosition = int Function(int idx);
+
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
   factory NativeCameraService() => _instance;
@@ -63,6 +115,27 @@ class NativeCameraService {
   late GetFrameHeight _getFrameHeight;
   late SetLiveCropCorners _setLiveCropCorners;
   late SetFilterParameter _setFilterParameter;
+
+  // Panorama bindings
+  late SetPanoramaEnabled _setPanoramaEnabled;
+  late ResetPanorama _resetPanorama;
+  late SetPanoramaViewport _setPanoramaViewport;
+  late GetPanoramaCanvasSize _getPanoramaCanvasSize;
+  late IsPanoramaEnabled _isPanoramaEnabled;
+
+  // Canvas (whiteboard) bindings
+  late SetCanvasViewMode _setCanvasViewMode;
+  late IsCanvasViewMode _isCanvasViewMode;
+  late GetCanvasTextureId _getCanvasTextureId;
+  late SetWhiteboardDebug _setWhiteboardDebug;
+  late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
+
+  // Sub-canvas navigation bindings
+  late GetSubCanvasCount _getSubCanvasCount;
+  late GetActiveSubCanvasIndex _getActiveSubCanvasIndex;
+  late SetActiveSubCanvas _setActiveSubCanvas;
+  late GetSortedSubCanvasIndex _getSortedSubCanvasIndex;
+  late GetSortedPosition _getSortedPosition;
 
   bool _isInitialized = false;
 
@@ -115,6 +188,65 @@ class NativeCameraService {
         .asFunction();
     _setFilterParameter = _nativeLib
         .lookup<NativeFunction<SetFilterParameterFunc>>('SetFilterParameter')
+        .asFunction();
+
+    // Panorama bindings
+    _setPanoramaEnabled = _nativeLib
+        .lookup<NativeFunction<SetPanoramaEnabledFunc>>('SetPanoramaEnabled')
+        .asFunction();
+    _resetPanorama = _nativeLib
+        .lookup<NativeFunction<ResetPanoramaFunc>>('ResetPanorama')
+        .asFunction();
+    _setPanoramaViewport = _nativeLib
+        .lookup<NativeFunction<SetPanoramaViewportFunc>>('SetPanoramaViewport')
+        .asFunction();
+    _getPanoramaCanvasSize = _nativeLib
+        .lookup<NativeFunction<GetPanoramaCanvasSizeFunc>>(
+          'GetPanoramaCanvasSize',
+        )
+        .asFunction();
+    _isPanoramaEnabled = _nativeLib
+        .lookup<NativeFunction<IsPanoramaEnabledFunc>>('IsPanoramaEnabled')
+        .asFunction();
+
+    // Canvas (whiteboard) bindings
+    _setCanvasViewMode = _nativeLib
+        .lookup<NativeFunction<SetCanvasViewModeFunc>>('SetCanvasViewMode')
+        .asFunction();
+    _isCanvasViewMode = _nativeLib
+        .lookup<NativeFunction<IsCanvasViewModeFunc>>('IsCanvasViewMode')
+        .asFunction();
+    _getCanvasTextureId = _nativeLib
+        .lookup<NativeFunction<GetCanvasTextureIdFunc>>('GetCanvasTextureId')
+        .asFunction();
+    _setWhiteboardDebug = _nativeLib
+        .lookup<NativeFunction<SetWhiteboardDebugFunc>>('SetWhiteboardDebug')
+        .asFunction();
+    _setCanvasEnhanceThreshold = _nativeLib
+        .lookup<NativeFunction<SetCanvasEnhanceThresholdFunc>>(
+          'SetCanvasEnhanceThreshold',
+        )
+        .asFunction();
+
+    // Sub-canvas navigation bindings
+    _getSubCanvasCount = _nativeLib
+        .lookup<NativeFunction<GetSubCanvasCountFunc>>('GetSubCanvasCount')
+        .asFunction();
+    _getActiveSubCanvasIndex = _nativeLib
+        .lookup<NativeFunction<GetActiveSubCanvasIndexFunc>>(
+          'GetActiveSubCanvasIndex',
+        )
+        .asFunction();
+    _setActiveSubCanvas = _nativeLib
+        .lookup<NativeFunction<SetActiveSubCanvasFunc>>('SetActiveSubCanvas')
+        .asFunction();
+    _getSortedSubCanvasIndex = _nativeLib
+        .lookup<NativeFunction<GetSortedSubCanvasIndexFunc>>(
+          'GetSortedSubCanvasIndex',
+        )
+        .asFunction();
+    _getSortedPosition = _nativeLib
+        .lookup<NativeFunction<GetSortedPositionFunc>>('GetSortedPosition')
         .asFunction();
 
     _isInitialized = true;
@@ -224,6 +356,113 @@ class NativeCameraService {
   void setFilterParameter(int filterId, double value) {
     initialize();
     _setFilterParameter(filterId, value);
+  }
+
+  // --- Panorama Methods ---
+
+  /// Enable or disable panorama mode
+  void setPanoramaEnabled(bool enabled) {
+    initialize();
+    _setPanoramaEnabled(enabled);
+  }
+
+  /// Reset the panorama canvas
+  void resetPanorama() {
+    initialize();
+    _resetPanorama();
+  }
+
+  /// Set panorama viewport parameters
+  /// [panX], [panY]: normalized position (0.0 = left/top, 1.0 = right/bottom)
+  /// [zoom]: 1.0 = fit viewport, >1.0 = zoomed in
+  void setPanoramaViewport(double panX, double panY, double zoom) {
+    initialize();
+    _setPanoramaViewport(panX, panY, zoom);
+  }
+
+  /// Get the current panorama canvas size
+  Size getPanoramaCanvasSize() {
+    initialize();
+    final widthPtr = malloc.allocate<Int32>(4);
+    final heightPtr = malloc.allocate<Int32>(4);
+    try {
+      _getPanoramaCanvasSize(widthPtr, heightPtr);
+      return Size(widthPtr.value.toDouble(), heightPtr.value.toDouble());
+    } finally {
+      malloc.free(widthPtr);
+      malloc.free(heightPtr);
+    }
+  }
+
+  /// Check if panorama mode is enabled
+  bool isPanoramaEnabled() {
+    initialize();
+    return _isPanoramaEnabled();
+  }
+
+  // --- Canvas (Whiteboard) Methods ---
+
+  /// Enable or disable the canvas view (shows assembled canvas instead of live feed)
+  void setCanvasViewMode(bool mode) {
+    initialize();
+    _setCanvasViewMode(mode);
+  }
+
+  /// Returns true when the canvas viewport is currently displayed
+  bool isCanvasViewMode() {
+    initialize();
+    return _isCanvasViewMode();
+  }
+
+  /// Returns the Flutter texture ID for the canvas (Phase 2; -1 = not available)
+  int getCanvasTextureId() {
+    initialize();
+    return _getCanvasTextureId();
+  }
+
+  /// Toggle OpenCV debug popup windows for the whiteboard pipeline
+  void setWhiteboardDebug(bool enabled) {
+    initialize();
+    _setWhiteboardDebug(enabled);
+  }
+
+  /// Set the DoG noise-suppression threshold for WhiteboardEnhance (1–30).
+  void setCanvasEnhanceThreshold(double threshold) {
+    initialize();
+    _setCanvasEnhanceThreshold(threshold);
+  }
+
+  // --- Sub-canvas Navigation Methods ---
+
+  /// Returns the number of active sub-canvases
+  int getSubCanvasCount() {
+    initialize();
+    return _getSubCanvasCount();
+  }
+
+  /// Returns the index of the currently displayed sub-canvas (-1 if none)
+  int getActiveSubCanvasIndex() {
+    initialize();
+    return _getActiveSubCanvasIndex();
+  }
+
+  /// Switch the displayed sub-canvas to [idx]
+  void setActiveSubCanvas(int idx) {
+    initialize();
+    _setActiveSubCanvas(idx);
+  }
+
+  /// Return the vector index of the sub-canvas at sorted position [pos]
+  /// (sorted spatially by origin.y then origin.x). Returns -1 if out of range.
+  int getSortedSubCanvasIndex(int pos) {
+    initialize();
+    return _getSortedSubCanvasIndex(pos);
+  }
+
+  /// Return the sorted position of the given vector index. Returns -1 if invalid.
+  int getSortedPosition(int idx) {
+    initialize();
+    return _getSortedPosition(idx);
   }
 
   // --- Screen Capture Methods ---

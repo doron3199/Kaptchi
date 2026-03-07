@@ -96,6 +96,22 @@ class _CameraScreenState extends State<CameraScreen>
   // Live Perspective Crop State
   bool _isLiveCropActive = false;
 
+  // Whiteboard Canvas Mode State
+  bool _isWhiteboardMode = false;
+  bool _isCanvasViewMode = false;
+  bool _isWhiteboardDebug = false;
+  double _canvasEnhanceThreshold = 5.0;
+  double _canvasPanX = 0.5;
+  double _canvasPanY = 0.5;
+  double _canvasZoom = 1.0;
+  Timer? _canvasPollTimer;
+  // Notifier for canvas navigation state — updated by the poll timer without
+  // a full setState rebuild (prevents live-view flicker).
+  final _canvasNavNotifier = ValueNotifier<({int count, int active})>((
+    count: 0,
+    active: 0,
+  ));
+
   // Flash Animation State
   late AnimationController _flashController;
   late Animation<double> _flashAnimation;
@@ -108,6 +124,30 @@ class _CameraScreenState extends State<CameraScreen>
         _updateFilters();
       });
     }
+  }
+
+  void _startCanvasPollTimer() {
+    _canvasPollTimer?.cancel();
+    _canvasPollTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+      if (!mounted || !Platform.isWindows) return;
+      final count = NativeCameraService().getSubCanvasCount();
+      final activeVec = NativeCameraService().getActiveSubCanvasIndex();
+      // Convert raw vector index to spatial sorted position
+      final sortedPos = activeVec < 0
+          ? 0
+          : NativeCameraService().getSortedPosition(activeVec);
+      final activeIdx = sortedPos < 0 ? 0 : sortedPos;
+      final cur = _canvasNavNotifier.value;
+      if (count != cur.count || activeIdx != cur.active) {
+        _canvasNavNotifier.value = (count: count, active: activeIdx);
+      }
+    });
+  }
+
+  void _stopCanvasPollTimer() {
+    _canvasPollTimer?.cancel();
+    _canvasPollTimer = null;
+    _canvasNavNotifier.value = (count: 0, active: 0);
   }
 
   Future<void> _loadPdfPath() async {
@@ -695,6 +735,8 @@ class _CameraScreenState extends State<CameraScreen>
     FiltersService.instance.removeListener(_onFiltersChanged);
     GalleryService.instance.removeListener(_onGalleryChange);
 
+    _canvasPollTimer?.cancel();
+    _canvasNavNotifier.dispose();
     _flashController.dispose();
     super.dispose();
   }
@@ -1084,7 +1126,39 @@ class _CameraScreenState extends State<CameraScreen>
       textDirection: TextDirection.ltr,
       child: Scaffold(
         appBar: AppBar(
-          title: Text(AppLocalizations.of(context)!.cameraMode),
+          title: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(AppLocalizations.of(context)!.cameraMode),
+              if (Platform.isWindows && _isWhiteboardMode)
+                ValueListenableBuilder<({int count, int active})>(
+                  valueListenable: _canvasNavNotifier,
+                  builder: (ctx, nav, _) {
+                    if (nav.count == 0) return const SizedBox.shrink();
+                    return Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 2,
+                        ),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.withAlpha(200),
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Text(
+                          '${nav.active + 1}/${nav.count}',
+                          style: const TextStyle(
+                            fontSize: 12,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+            ],
+          ),
           leading: IconButton(
             icon: Icon(_isLeftSidebarOpen ? Icons.chevron_left : Icons.tune),
             tooltip: _isLeftSidebarOpen
@@ -1117,6 +1191,91 @@ class _CameraScreenState extends State<CameraScreen>
                 }
               },
             ),
+            // Whiteboard Capture Toggle
+            if (Platform.isWindows)
+              IconButton(
+                icon: Icon(
+                  _isWhiteboardMode
+                      ? Icons.document_scanner
+                      : Icons.document_scanner_outlined,
+                  color: _isWhiteboardMode ? Colors.blue : null,
+                ),
+                tooltip: _isWhiteboardMode
+                    ? AppLocalizations.of(context)!.disableWhiteboard
+                    : AppLocalizations.of(context)!.enableWhiteboard,
+                onPressed: () {
+                  setState(() {
+                    _isWhiteboardMode = !_isWhiteboardMode;
+                    if (_isWhiteboardMode) {
+                      // Reset canvas on enable so each session starts fresh
+                      NativeCameraService().resetPanorama();
+                      _canvasPanX = 0.5;
+                      _canvasPanY = 0.5;
+                      _canvasZoom = 1.0;
+                      _startCanvasPollTimer();
+                    } else {
+                      // Leaving whiteboard mode — also exit canvas view
+                      if (_isCanvasViewMode) {
+                        _isCanvasViewMode = false;
+                        NativeCameraService().setCanvasViewMode(false);
+                      }
+                      _stopCanvasPollTimer();
+                    }
+                    NativeCameraService().setPanoramaEnabled(_isWhiteboardMode);
+                  });
+                },
+              ),
+            // Canvas View Toggle (only visible when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  _isCanvasViewMode ? Icons.live_tv : Icons.image_outlined,
+                  color: _isCanvasViewMode ? Colors.green : null,
+                ),
+                tooltip: AppLocalizations.of(context)!.toggleCanvasView,
+                onPressed: () {
+                  setState(() {
+                    _isCanvasViewMode = !_isCanvasViewMode;
+                  });
+                  NativeCameraService().setCanvasViewMode(_isCanvasViewMode);
+                },
+              ),
+            // Reset Whiteboard (only visible when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: const Icon(Icons.refresh),
+                tooltip: AppLocalizations.of(context)!.resetWhiteboard,
+                onPressed: () {
+                  NativeCameraService().resetPanorama();
+                  setState(() {
+                    _canvasPanX = 0.5;
+                    _canvasPanY = 0.5;
+                    _canvasZoom = 1.0;
+                  });
+                  NativeCameraService().setPanoramaViewport(
+                    _canvasPanX,
+                    _canvasPanY,
+                    _canvasZoom,
+                  );
+                },
+              ),
+            // Debug toggle (only visible when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  Icons.bug_report,
+                  color: _isWhiteboardDebug ? Colors.orange : null,
+                ),
+                tooltip: _isWhiteboardDebug
+                    ? 'Hide debug windows'
+                    : 'Show debug windows',
+                onPressed: () {
+                  setState(() {
+                    _isWhiteboardDebug = !_isWhiteboardDebug;
+                  });
+                  NativeCameraService().setWhiteboardDebug(_isWhiteboardDebug);
+                },
+              ),
             IconButton(
               icon: const Icon(Icons.home),
               tooltip: AppLocalizations.of(context)!.backToHome,
@@ -1381,6 +1540,84 @@ class _CameraScreenState extends State<CameraScreen>
                             ),
                           ),
                         ),
+                        // Sub-canvas navigation arrows
+                        if (Platform.isWindows && _isCanvasViewMode)
+                          ValueListenableBuilder<({int count, int active})>(
+                            valueListenable: _canvasNavNotifier,
+                            builder: (ctx, nav, _) {
+                              if (nav.count <= 1)
+                                return const SizedBox.shrink();
+                              return Positioned.fill(
+                                child: Padding(
+                                  padding: const EdgeInsets.only(bottom: 80),
+                                  child: Row(
+                                    mainAxisAlignment:
+                                        MainAxisAlignment.spaceBetween,
+                                    crossAxisAlignment:
+                                        CrossAxisAlignment.center,
+                                    children: [
+                                      _SubCanvasArrowButton(
+                                        icon: Icons.chevron_left,
+                                        enabled: nav.active > 0,
+                                        onPressed: () {
+                                          final nextSorted = nav.active - 1;
+                                          final vecIdx = NativeCameraService()
+                                              .getSortedSubCanvasIndex(
+                                                nextSorted,
+                                              );
+                                          if (vecIdx < 0) return;
+                                          NativeCameraService()
+                                              .setActiveSubCanvas(vecIdx);
+                                          _canvasNavNotifier.value = (
+                                            count: nav.count,
+                                            active: nextSorted,
+                                          );
+                                        },
+                                      ),
+                                      // Canvas index indicator
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 4,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: Colors.black54,
+                                          borderRadius: BorderRadius.circular(
+                                            12,
+                                          ),
+                                        ),
+                                        child: Text(
+                                          '${nav.active + 1} / ${nav.count}',
+                                          style: const TextStyle(
+                                            color: Colors.white,
+                                            fontSize: 13,
+                                          ),
+                                        ),
+                                      ),
+                                      _SubCanvasArrowButton(
+                                        icon: Icons.chevron_right,
+                                        enabled: nav.active < nav.count - 1,
+                                        onPressed: () {
+                                          final nextSorted = nav.active + 1;
+                                          final vecIdx = NativeCameraService()
+                                              .getSortedSubCanvasIndex(
+                                                nextSorted,
+                                              );
+                                          if (vecIdx < 0) return;
+                                          NativeCameraService()
+                                              .setActiveSubCanvas(vecIdx);
+                                          _canvasNavNotifier.value = (
+                                            count: nav.count,
+                                            active: nextSorted,
+                                          );
+                                        },
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              );
+                            },
+                          ),
                       ],
                     ),
                   ),
@@ -1516,6 +1753,39 @@ class _CameraScreenState extends State<CameraScreen>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Semi-transparent arrow button used for sub-canvas navigation.
+class _SubCanvasArrowButton extends StatelessWidget {
+  final IconData icon;
+  final bool enabled;
+  final VoidCallback onPressed;
+
+  const _SubCanvasArrowButton({
+    required this.icon,
+    required this.enabled,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: enabled ? onPressed : null,
+      child: Container(
+        width: 48,
+        height: 80,
+        decoration: BoxDecoration(
+          color: enabled ? Colors.black54 : Colors.black26,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        child: Icon(
+          icon,
+          color: enabled ? Colors.white : Colors.white38,
+          size: 36,
         ),
       ),
     );

@@ -51,6 +51,10 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  // Shut down native threads before Flutter engine teardown so threads
+  // are stopped while the Win32 message pump is still running.
+  ShutdownGlobalNativeCamera();
+
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }

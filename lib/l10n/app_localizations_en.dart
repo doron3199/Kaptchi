@@ -285,6 +285,9 @@ class AppLocalizationsEn extends AppLocalizations {
   String get filterSmartWhiteboard => 'Smart Whiteboard';
 
   @override
+  String get filterWhiteboardEnhance => 'Whiteboard Enhance';
+
+  @override
   String get filterPersonRemoval => 'Person Removal (AI)';
 
   @override
@@ -403,4 +406,25 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get couldNotOpenLink => 'Could not open link';
+
+  @override
+  String get enablePanorama => 'Enable Panorama Mode';
+
+  @override
+  String get disablePanorama => 'Disable Panorama Mode';
+
+  @override
+  String get resetPanorama => 'Reset Panorama';
+
+  @override
+  String get enableWhiteboard => 'Enable Whiteboard Capture';
+
+  @override
+  String get disableWhiteboard => 'Disable Whiteboard Capture';
+
+  @override
+  String get resetWhiteboard => 'Reset Whiteboard';
+
+  @override
+  String get toggleCanvasView => 'Toggle Canvas View';
 }
