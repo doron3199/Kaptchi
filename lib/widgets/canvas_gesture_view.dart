@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import '../services/native_camera_service.dart';
 
@@ -53,10 +54,50 @@ class _CanvasGestureViewState extends State<CanvasGestureView> {
     _zoom = widget.initialZoom;
   }
 
+  @override
+  void didUpdateWidget(covariant CanvasGestureView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.initialPanX != widget.initialPanX ||
+        oldWidget.initialPanY != widget.initialPanY ||
+        oldWidget.initialZoom != widget.initialZoom) {
+      _panX = widget.initialPanX;
+      _panY = widget.initialPanY;
+      _zoom = widget.initialZoom;
+    }
+  }
+
   void _updateViewport() {
     if (!Platform.isWindows) return;
     NativeCameraService().setPanoramaViewport(_panX, _panY, _zoom);
     widget.onViewportChanged?.call((panX: _panX, panY: _panY, zoom: _zoom));
+  }
+
+  void _handlePointerSignal(PointerSignalEvent event) {
+    if (event is! PointerScrollEvent) return;
+
+    const double scrollPanSensitivity = 0.0015;
+    const double zoomInFactor = 1.1;
+    const double zoomOutFactor = 0.9;
+
+    if (event.scrollDelta.dx.abs() > event.scrollDelta.dy.abs() &&
+        event.scrollDelta.dx.abs() > 0.0) {
+      _panX += event.scrollDelta.dx * scrollPanSensitivity / _zoom;
+      _panX = _panX.clamp(0.0, 1.0);
+    } else if (event.scrollDelta.dy.abs() > 0.0) {
+      _zoom *= event.scrollDelta.dy > 0 ? zoomOutFactor : zoomInFactor;
+      _zoom = _zoom.clamp(1.0, 8.0);
+    }
+
+    _updateViewport();
+  }
+
+  void _applyPanDelta(Offset delta) {
+    const double panSensitivity = 0.002;
+    _panX -= delta.dx * panSensitivity / _zoom;
+    _panY -= delta.dy * panSensitivity / _zoom;
+    _panX = _panX.clamp(0.0, 1.0);
+    _panY = _panY.clamp(0.0, 1.0);
+    _updateViewport();
   }
 
   @override
@@ -78,44 +119,44 @@ class _CanvasGestureViewState extends State<CanvasGestureView> {
     }
 
     // Canvas view mode: intercept gestures for pan/zoom
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onScaleStart: (details) {
-        _lastFocalPoint = details.focalPoint;
-        _lastScaleDistance = null;
-      },
-      onScaleUpdate: (details) {
-        final size = context.size;
-        if (size == null || _lastFocalPoint == null) return;
+    return Listener(
+      onPointerSignal: _handlePointerSignal,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onPanUpdate: (details) {
+          _applyPanDelta(details.delta);
+        },
+        onScaleStart: (details) {
+          _lastFocalPoint = details.focalPoint;
+          _lastScaleDistance = null;
+        },
+        onScaleUpdate: (details) {
+          final size = context.size;
+          if (size == null || _lastFocalPoint == null) return;
 
-        // Pan: translate focal-point delta into normalized canvas movement
-        final delta = details.focalPoint - _lastFocalPoint!;
-        _lastFocalPoint = details.focalPoint;
+          // Pan: translate focal-point delta into normalized canvas movement
+          final delta = details.focalPoint - _lastFocalPoint!;
+          _lastFocalPoint = details.focalPoint;
 
-        // Larger zoom → smaller effective pan step
-        const double panSensitivity = 0.002;
-        _panX -= delta.dx * panSensitivity / _zoom;
-        _panY -= delta.dy * panSensitivity / _zoom;
-        _panX = _panX.clamp(0.0, 1.0);
-        _panY = _panY.clamp(0.0, 1.0);
+          _applyPanDelta(delta);
 
-        // Zoom: pinch scale
-        if (details.pointerCount >= 2) {
-          final newScale = details.scale;
-          if (_lastScaleDistance != null) {
-            _zoom *= newScale / _lastScaleDistance!;
-            _zoom = _zoom.clamp(1.0, 8.0);
+          // Zoom: pinch scale
+          if (details.pointerCount >= 2) {
+            final newScale = details.scale;
+            if (_lastScaleDistance != null) {
+              _zoom *= newScale / _lastScaleDistance!;
+              _zoom = _zoom.clamp(1.0, 8.0);
+            }
+            _lastScaleDistance = newScale;
+            _updateViewport();
           }
-          _lastScaleDistance = newScale;
-        }
-
-        _updateViewport();
-      },
-      onScaleEnd: (_) {
-        _lastFocalPoint = null;
-        _lastScaleDistance = null;
-      },
-      child: content,
+        },
+        onScaleEnd: (_) {
+          _lastFocalPoint = null;
+          _lastScaleDistance = null;
+        },
+        child: content,
+      ),
     );
   }
 }

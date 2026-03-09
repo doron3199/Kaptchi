@@ -47,6 +47,7 @@
 // ============================================================================
 
 #include "whiteboard_canvas.h"
+#include "native_camera.h"
 #include "whiteboard_enhance.h"
 #include <algorithm>
 #include <iostream>
@@ -109,14 +110,15 @@ WhiteboardCanvas::~WhiteboardCanvas() {
 void WhiteboardCanvas::ProcessFrame(const cv::Mat& frame, const cv::Mat& person_mask) {
     if (frame.empty()) return;
 
-    std::unique_lock<std::mutex> lock(queue_mutex_);
-    while ((int)work_queue_.size() >= kQueueDepth) {
-        work_queue_.pop();
-    }
     CanvasWorkItem item;
     frame.copyTo(item.frame);
     if (!person_mask.empty()) {
         person_mask.copyTo(item.person_mask);
+    }
+
+    std::unique_lock<std::mutex> lock(queue_mutex_);
+    while ((int)work_queue_.size() >= kQueueDepth) {
+        work_queue_.pop();
     }
     work_queue_.push(std::move(item));
     lock.unlock();
@@ -125,8 +127,7 @@ void WhiteboardCanvas::ProcessFrame(const cv::Mat& frame, const cv::Mat& person_
 
 bool WhiteboardCanvas::GetViewport(float panX, float panY, float zoom,
                                     cv::Size viewSize, cv::Mat& out_frame) {
-    std::unique_lock<std::mutex> lock(state_mutex_, std::try_to_lock);
-    if (!lock.owns_lock()) return false;
+    std::unique_lock<std::mutex> lock(state_mutex_);
 
     int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
     if (idx < 0 || idx >= (int)groups_.size()) return false;
@@ -156,6 +157,48 @@ bool WhiteboardCanvas::GetViewport(float panX, float panY, float zoom,
     if (roi.x + roi.width  > cw) roi.width  = cw - roi.x;
     if (roi.y + roi.height > ch) roi.height = ch - roi.y;
     cv::resize(group.render_cache(roi), out_frame, viewSize, 0, 0, cv::INTER_LINEAR);
+    return true;
+}
+
+bool WhiteboardCanvas::GetOverview(cv::Size viewSize, cv::Mat& out_frame) {
+    std::unique_lock<std::mutex> lock(state_mutex_);
+
+    int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (idx < 0 || idx >= (int)groups_.size()) return false;
+    auto& group = *groups_[idx];
+
+    if (group.cache_dirty) {
+        RebuildRenderCache(group);
+        group.cache_dirty = false;
+    }
+
+    if (group.render_cache.empty() || viewSize.width <= 0 || viewSize.height <= 0) {
+        return false;
+    }
+
+    out_frame = cv::Mat(viewSize.height, viewSize.width, CV_8UC3,
+                        cv::Scalar(255, 255, 255));
+
+    const float src_aspect = (float)group.render_cache.cols /
+                             (float)std::max(1, group.render_cache.rows);
+    const float dst_aspect = (float)viewSize.width /
+                             (float)std::max(1, viewSize.height);
+
+    int draw_w = viewSize.width;
+    int draw_h = viewSize.height;
+    if (src_aspect > dst_aspect) {
+        draw_h = std::max(1, (int)std::round(draw_w / src_aspect));
+    } else {
+        draw_w = std::max(1, (int)std::round(draw_h * src_aspect));
+    }
+
+    cv::Mat scaled;
+    cv::resize(group.render_cache, scaled, cv::Size(draw_w, draw_h),
+               0, 0, cv::INTER_AREA);
+
+    const int offset_x = (viewSize.width - draw_w) / 2;
+    const int offset_y = (viewSize.height - draw_h) / 2;
+    scaled.copyTo(out_frame(cv::Rect(offset_x, offset_y, draw_w, draw_h)));
     return true;
 }
 
@@ -201,10 +244,13 @@ void WhiteboardCanvas::SetCanvasViewMode(bool m) {
 cv::Size WhiteboardCanvas::GetCanvasSize() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
-    if (idx >= 0 && idx < (int)groups_.size()
-        && !groups_[idx]->render_cache.empty()) {
-        return cv::Size(groups_[idx]->render_cache.cols,
-                        groups_[idx]->render_cache.rows);
+    if (idx >= 0 && idx < (int)groups_.size()) {
+        const auto& group = *groups_[idx];
+        if (!group.render_cache.empty()) {
+            return cv::Size(group.render_cache.cols, group.render_cache.rows);
+        }
+        return cv::Size(std::max(1, group.max_px_x - group.min_px_x),
+                        std::max(1, group.max_px_y - group.min_px_y));
     }
     return cv::Size(frame_w_ > 0 ? frame_w_ : 1920, frame_h_ > 0 ? frame_h_ : 1080);
 }
@@ -287,7 +333,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     perf_stats_.stage1_motion_ms += std::chrono::duration<double, std::milli>(t_motion - t_start).count();
 
     // -------------------------------------------------------------------
-    // STAGE 2: Person whitewash
+    // STAGE 2: Person occlusion mask (used as a no-update zone)
     // -------------------------------------------------------------------
     cv::Mat gray;
     cv::cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
@@ -295,43 +341,35 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     bool has_person_mask = !person_mask.empty() && person_mask.size() == gray.size();
     cv::Mat person_mask_dilated;
 
-    cv::Mat process_frame = frame.clone();
     if (has_person_mask) {
-        cv::Mat float_mask;
-        person_mask.convertTo(float_mask, CV_32F, 1.0 / 255.0);
-        cv::GaussianBlur(float_mask, float_mask, cv::Size(0, 0), 8.0);
-        std::vector<cv::Mat> mask_ch = {float_mask, float_mask, float_mask};
-        cv::Mat float_mask_3ch;
-        cv::merge(mask_ch, float_mask_3ch);
-        cv::Mat float_bgr;
-        frame.convertTo(float_bgr, CV_32F);
-        cv::Mat blended = float_bgr.mul(1.0 - float_mask_3ch) + 255.0 * float_mask_3ch;
-        blended.convertTo(process_frame, CV_8UC3);
-
-        int pad = std::max(1, (int)(std::max(frame.cols, frame.rows) * 0.10f));
+        // FAST DILATION: Scale down person mask (1/8th scale)
+        cv::Mat small_mask;
+        cv::resize(person_mask, small_mask, cv::Size(), 0.125, 0.125, cv::INTER_NEAREST);
+        
+        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.10f));
         pad |= 1;
         cv::Mat k_dilate = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(pad, pad));
-        cv::dilate(person_mask, person_mask_dilated, k_dilate);
+        cv::dilate(small_mask, small_mask, k_dilate);
+        
+        // Upscale back
+        cv::resize(small_mask, person_mask_dilated, frame.size(), 0, 0, cv::INTER_NEAREST);
     }
 
     // -------------------------------------------------------------------
-    // STAGE 3: Enhance + Binarize
+    // STAGE 3: Enhance + Binarize (Optimized)
     // -------------------------------------------------------------------
-    float enh_threshold = g_canvas_enhance_threshold.load();
-    cv::Mat enhanced = WhiteboardEnhance(process_frame, enh_threshold);
+    // float enh_threshold = g_canvas_enhance_threshold.load();
+    // cv::Mat enhanced = WhiteboardEnhance(process_frame, enh_threshold);
 
-    cv::Mat enhanced_gray;
-    cv::cvtColor(enhanced, enhanced_gray, cv::COLOR_BGR2GRAY);
+    // cv::Mat enhanced_gray;
+    // cv::cvtColor(enhanced, enhanced_gray, cv::COLOR_BGR2GRAY);
 
     cv::Mat binary;
-    cv::adaptiveThreshold(enhanced_gray, binary, 255,
+    // Binarize directly from gray input
+    cv::adaptiveThreshold(gray, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
                           cv::THRESH_BINARY_INV, 51, 5);
     if (has_person_mask) binary.setTo(0, person_mask_dilated);
-
-    // Clean BGR for painting: original frame colors where strokes detected
-    cv::Mat enhanced_bgr(process_frame.size(), CV_8UC3, cv::Scalar(255, 255, 255));
-    process_frame.copyTo(enhanced_bgr, binary);
 
     // Crop top 15% and bottom 10%
     const int top_cut    = (int)(gray.rows * 0.15);
@@ -352,7 +390,6 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     std::vector<ContourShape> frame_contours;
     // Native full-frame contour extraction (YOLO bypass)
     frame_contours = ExtractContourShapes(binary, cv::Point2f(0, 0));
-    std::cout << "[Pipeline] Native frame contours: " << frame_contours.size() << "\n";
 
     std::lock_guard<std::mutex> state_lock(state_mutex_);
 
@@ -406,7 +443,12 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     }
 
     auto t_match = std::chrono::steady_clock::now();
-    perf_stats_.stage4_matching_ms += std::chrono::duration<double, std::milli>(t_match - t_enhance).count();
+    double current_matching_ms = std::chrono::duration<double, std::milli>(t_match - t_enhance).count();
+    perf_stats_.stage4_matching_ms += current_matching_ms;
+    
+    std::cout << "[Performance] Contours found: " << frame_contours.size() 
+              << ", Canvas contours compared: " << canvas_contours_.size() << "\n";
+    std::cout << "[Performance] Mapping (Contour Matching) took: " << current_matching_ms << " ms\n";
 
     // -------------------------------------------------------------------
     // STAGE 5: Paint to chunks or create a new group
@@ -415,7 +457,11 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         global_camera_pos_ = matched_pos;
         auto& group = *groups_[best_group_idx];
 
-        PaintStrokesToChunks(group, binary, enhanced_bgr, global_camera_pos_);
+        // Replace slow Enhance fetch with solid black strokes (BGR: 0, 0, 0)
+        cv::Mat enhanced_bgr(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
+        PaintStrokesToChunks(group, binary, enhanced_bgr, global_camera_pos_,
+                     person_mask_dilated);
         if (group.cache_dirty) canvas_contours_dirty_ = true;
 
         active_group_idx_ = best_group_idx;
@@ -428,7 +474,9 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                      + " chunks=" + std::to_string(group.chunks.size());
 
     } else if (groups_.empty() && stroke_pixel_count >= kMinStrokePixelsForNewSC) {
-        CreateSubCanvas(binary, enhanced_bgr, frame_contours);
+        // Optimized CreateSubCanvas with black strokes
+        cv::Mat enhanced_bgr(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+        CreateSubCanvas(binary, enhanced_bgr, frame_contours, person_mask_dilated);
         created_new_sc = true;
         match_status = "NEW GROUP (total=" + std::to_string(groups_.size()) + ")";
 
@@ -442,12 +490,13 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     std::cout << "[WhiteboardCanvas] " << match_status << std::endl;
 
     auto t_paint = std::chrono::steady_clock::now();
-    perf_stats_.stage5_painting_ms += std::chrono::duration<double, std::milli>(t_paint - t_match).count();
+    double current_painting_ms = std::chrono::duration<double, std::milli>(t_paint - t_match).count();
+    perf_stats_.stage5_painting_ms += current_painting_ms;
+    std::cout << "[Performance] Drawing (Painting) took: " << current_painting_ms << " ms\n";
     perf_stats_.frame_count++;
 
-    // Print stats every 60 seconds
-    auto elapsed_since_print = std::chrono::duration_cast<std::chrono::seconds>(t_paint - perf_stats_.last_print_time).count();
-    if (elapsed_since_print >= 60 && perf_stats_.frame_count > 0) {
+    // Print stats every 30 frames
+    if (perf_stats_.frame_count >= 30) {
         std::cout << "\n[Performance] Average over " << perf_stats_.frame_count << " frames:\n"
                   << "  Stage 1 (Motion gate):  " << (perf_stats_.stage1_motion_ms / perf_stats_.frame_count) << " ms\n"
                   << "  Stage 3 (Enhance/Bin):  " << (perf_stats_.stage3_enhance_ms / perf_stats_.frame_count) << " ms\n"
@@ -467,10 +516,19 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     // STAGE 6: Debug visualization
     // -------------------------------------------------------------------
     if (dbg) {
+        // Only do expensive debug ops inside this block
+        cv::Mat dbg_frame = frame.clone();
+        if (has_person_mask) {
+             // Optional: visual whitewash ONLY for debug view
+             dbg_frame.setTo(cv::Scalar(255, 255, 255), person_mask_dilated);
+        }
+
+        cv::Mat enhanced_bgr_dbg(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
         PipelineDebugState ds;
-        ds.frame              = process_frame;
+        ds.frame              = dbg_frame;
         ds.gray_clean         = gray;
-        ds.enhanced_bgr       = enhanced_bgr;
+        ds.enhanced_bgr       = enhanced_bgr_dbg;
         ds.binary             = binary;
         ds.person_mask        = person_mask;
         ds.motion_fraction    = motion_fraction;
@@ -561,15 +619,7 @@ void WhiteboardCanvas::EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, 
         chunk->grid_x = grid_x;
         chunk->grid_y = grid_y;
         group.chunks[hash] = std::move(chunk);
-        
-        // Update group bounds
-        int px_x = grid_x * kChunkSize;
-        int px_y = grid_y * kChunkSize;
-        if (px_x < group.min_px_x) group.min_px_x = px_x;
-        if (px_y < group.min_px_y) group.min_px_y = px_y;
-        if (px_x + kChunkSize > group.max_px_x) group.max_px_x = px_x + kChunkSize;
-        if (px_y + kChunkSize > group.max_px_y) group.max_px_y = px_y + kChunkSize;
-        
+
         group.cache_dirty = true;
     }
 }
@@ -579,7 +629,9 @@ void WhiteboardCanvas::EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, 
 // ============================================================================
 
 void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
-                                             const cv::Mat& enhanced_bgr, cv::Point2f camera_pos) {
+                                             const cv::Mat& enhanced_bgr,
+                                             cv::Point2f camera_pos,
+                                             const cv::Mat& no_update_mask) {
     // Performance optimization: work only within the bounding rect of actual strokes.
     cv::Rect bbox = cv::boundingRect(binary);
     if (bbox.empty()) return;
@@ -589,6 +641,21 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     int global_start_y = (int)std::round(camera_pos.y) + bbox.y;
     int global_end_x   = global_start_x + bbox.width;
     int global_end_y   = global_start_y + bbox.height;
+
+    // Keep the canvas height fixed to the first frame's height.
+    // We allow horizontal growth only, so vertically out-of-range pixels are clipped.
+    cv::Rect paint_bbox = bbox;
+    int clip_top = std::max(group.min_px_y - global_start_y, 0);
+    int clip_bottom = std::max(global_end_y - group.max_px_y, 0);
+    paint_bbox.y += clip_top;
+    paint_bbox.height -= (clip_top + clip_bottom);
+    global_start_y += clip_top;
+    global_end_y -= clip_bottom;
+
+    if (paint_bbox.height <= 0 || global_start_y >= global_end_y) return;
+
+    if (global_start_x < group.min_px_x) group.min_px_x = global_start_x;
+    if (global_end_x > group.max_px_x) group.max_px_x = global_end_x;
 
     // Chunk range that overlaps the bbox.
     int start_chunk_x = (int)std::floor((float)global_start_x / kChunkSize);
@@ -605,8 +672,8 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     // PASS 1 — Stitch chunk data into footprint Mats
     // -----------------------------------------------------------------------
 
-    cv::Mat footprint(bbox.height, bbox.width, CV_8UC3, cv::Scalar(255, 255, 255));
-    cv::Mat absence_foot(bbox.height, bbox.width, CV_8U, cv::Scalar(0));
+    cv::Mat footprint(paint_bbox.height, paint_bbox.width, CV_8UC3, cv::Scalar(255, 255, 255));
+    cv::Mat absence_foot(paint_bbox.height, paint_bbox.width, CV_8U, cv::Scalar(0));
 
     for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
         for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
@@ -629,8 +696,11 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
         }
     }
 
-    cv::Mat new_strokes = binary(bbox);
-    cv::Mat colors_bbox = enhanced_bgr(bbox);
+    cv::Mat new_strokes = binary(paint_bbox);
+    cv::Mat colors_bbox = enhanced_bgr(paint_bbox);
+    cv::Mat no_update_bbox = (!no_update_mask.empty() && no_update_mask.size() == binary.size())
+        ? no_update_mask(paint_bbox)
+        : cv::Mat(paint_bbox.height, paint_bbox.width, CV_8U, cv::Scalar(0));
 
     // Existing ink mask
     cv::Mat foot_gray, existing;
@@ -648,6 +718,9 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     cv::Mat prox_allow_mask;
     cv::bitwise_not(canvas_stroke_zone, prox_allow_mask);
 
+    cv::Mat update_allowed_mask;
+    cv::bitwise_not(no_update_bbox, update_allowed_mask);
+
     // -----------------------------------------------------------------------
     // LAYERS 2, 3, 4: Grid-based replace, ghost, and absence erasure
     // -----------------------------------------------------------------------
@@ -660,6 +733,12 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
             int cw = std::min(kGridCellSize, footprint.cols - gx);
             int ch = std::min(kGridCellSize, footprint.rows - gy);
             cv::Rect cell(gx, gy, cw, ch);
+
+            if (cv::countNonZero(no_update_bbox(cell)) > 0) {
+                // Occluded region: preserve existing pixels and absence history.
+                // The lecturer becomes a no-update zone instead of delete evidence.
+                continue;
+            }
 
             int new_count   = cv::countNonZero(new_strokes(cell));
             int exist_count = cv::countNonZero(existing(cell));
@@ -705,6 +784,7 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     cv::Mat ghost_allow;
     cv::bitwise_not(ghost_block, ghost_allow);
     cv::bitwise_and(prox_allow_mask, ghost_allow, prox_allow_mask);
+    cv::bitwise_and(prox_allow_mask, update_allowed_mask, prox_allow_mask);
 
     // new_only: allowed strokes
     cv::Mat new_only;
@@ -767,17 +847,30 @@ void WhiteboardCanvas::RebuildRenderCache(WhiteboardGroup& group) {
         group.render_cache = cv::Mat();
         return;
     }
-    
-    int width = group.max_px_x - group.min_px_x;
-    int height = group.max_px_y - group.min_px_y;
+
+    int width = std::max(1, group.max_px_x - group.min_px_x);
+    int height = std::max(1, group.max_px_y - group.min_px_y);
     group.render_cache = cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
-    
+
     for (const auto& pair : group.chunks) {
         const auto& chunk = pair.second;
-        int local_x = (chunk->grid_x * kChunkSize) - group.min_px_x;
-        int local_y = (chunk->grid_y * kChunkSize) - group.min_px_y;
-        
-        chunk->canvas.copyTo(group.render_cache(cv::Rect(local_x, local_y, kChunkSize, kChunkSize)));
+        int chunk_left = chunk->grid_x * kChunkSize;
+        int chunk_top = chunk->grid_y * kChunkSize;
+        int chunk_right = chunk_left + kChunkSize;
+        int chunk_bottom = chunk_top + kChunkSize;
+
+        int copy_left = std::max(chunk_left, group.min_px_x);
+        int copy_top = std::max(chunk_top, group.min_px_y);
+        int copy_right = std::min(chunk_right, group.max_px_x);
+        int copy_bottom = std::min(chunk_bottom, group.max_px_y);
+        if (copy_left >= copy_right || copy_top >= copy_bottom) continue;
+
+        cv::Rect src_roi(copy_left - chunk_left, copy_top - chunk_top,
+                         copy_right - copy_left, copy_bottom - copy_top);
+        cv::Rect dst_roi(copy_left - group.min_px_x, copy_top - group.min_px_y,
+                         copy_right - copy_left, copy_bottom - copy_top);
+
+        chunk->canvas(src_roi).copyTo(group.render_cache(dst_roi));
     }
 }
 
@@ -787,13 +880,22 @@ void WhiteboardCanvas::RebuildRenderCache(WhiteboardGroup& group) {
 
 void WhiteboardCanvas::CreateSubCanvas(const cv::Mat& binary,
                                         const cv::Mat& enhanced_bgr,
-                                        const std::vector<ContourShape>& seed_contours) {
+                                        const std::vector<ContourShape>& seed_contours,
+                                        const cv::Mat& no_update_mask) {
     auto group = std::make_unique<WhiteboardGroup>();
     group->debug_id = next_debug_id_++;
+    const int canvas_width = std::max(frame_w_, binary.cols);
+    const int canvas_height = std::max(frame_h_, binary.rows);
+
+    group->min_px_x = 0;
+    group->min_px_y = 0;
+    group->max_px_x = canvas_width;
+    group->max_px_y = canvas_height;
 
     // Seed at (0,0) global position
     global_camera_pos_ = cv::Point2f(0, 0);
-    PaintStrokesToChunks(*group, binary, enhanced_bgr, global_camera_pos_);
+    PaintStrokesToChunks(*group, binary, enhanced_bgr, global_camera_pos_,
+                         no_update_mask);
 
     int idx = (int)groups_.size();
     groups_.push_back(std::move(group));
@@ -921,28 +1023,34 @@ void WhiteboardCanvas::RenderDebugGrid(const PipelineDebugState& state) {
 
 void SetPanoramaEnabled(bool enabled) {
     if (enabled) {
-        if (!g_whiteboard_canvas) g_whiteboard_canvas = new WhiteboardCanvas();
+        if (!g_whiteboard_canvas) {
+            g_whiteboard_canvas = new WhiteboardCanvas();
+        } else {
+            g_whiteboard_canvas->SetCanvasViewMode(false);
+            g_whiteboard_canvas->Reset();
+        }
         g_whiteboard_enabled.store(true);
     } else {
         g_whiteboard_enabled.store(false);
         if (g_whiteboard_canvas) {
             g_whiteboard_canvas->SetCanvasViewMode(false);
             g_whiteboard_canvas->Reset();
-            delete g_whiteboard_canvas;
-            g_whiteboard_canvas = nullptr;
         }
     }
+    if (g_native_camera) g_native_camera->RefreshDisplayFrame();
     std::cout << "[WhiteboardCanvas] " << (enabled ? "Enabled" : "Disabled") << std::endl;
 }
 
 void ResetPanorama() {
     if (g_whiteboard_canvas) g_whiteboard_canvas->Reset();
+    if (g_native_camera) g_native_camera->RefreshDisplayFrame();
 }
 
 void SetPanoramaViewport(float panX, float panY, float zoom) {
     g_canvas_pan_x.store(panX);
     g_canvas_pan_y.store(panY);
     g_canvas_zoom.store(zoom);
+    if (g_native_camera) g_native_camera->RefreshDisplayFrame();
 }
 
 void GetPanoramaCanvasSize(int* width, int* height) {
@@ -960,6 +1068,7 @@ bool IsPanoramaEnabled()    { return g_whiteboard_enabled.load(); }
 
 void SetCanvasViewMode(bool mode) {
     if (g_whiteboard_canvas) g_whiteboard_canvas->SetCanvasViewMode(mode);
+    if (g_native_camera) g_native_camera->RefreshDisplayFrame();
 }
 
 bool IsCanvasViewMode() {
@@ -967,6 +1076,23 @@ bool IsCanvasViewMode() {
 }
 
 int64_t GetCanvasTextureId() { return -1; }  // Phase 2
+
+bool GetCanvasOverviewRgba(uint8_t* buffer, int width, int height) {
+    if (!g_whiteboard_canvas || !buffer || width <= 0 || height <= 0) {
+        return false;
+    }
+
+    cv::Mat overview_bgr;
+    if (!g_whiteboard_canvas->GetOverview(cv::Size(width, height), overview_bgr)) {
+        return false;
+    }
+
+    cv::Mat overview_rgba;
+    cv::cvtColor(overview_bgr, overview_rgba, cv::COLOR_BGR2RGBA);
+    cv::Mat buffer_view(height, width, CV_8UC4, buffer);
+    overview_rgba.copyTo(buffer_view);
+    return true;
+}
 
 void SetWhiteboardDebug(bool enabled) {
     g_whiteboard_debug.store(enabled);

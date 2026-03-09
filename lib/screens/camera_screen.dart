@@ -26,6 +26,8 @@ import '../widgets/camera_stream_view.dart';
 import '../widgets/resizable_overlay.dart';
 import '../services/gallery_service.dart';
 import '../services/filters_service.dart';
+import '../widgets/canvas_gesture_view.dart';
+import '../widgets/canvas_overview_bar.dart';
 import '../widgets/mobile_connection_dialog.dart';
 import '../widgets/video_source_sheet.dart';
 import '../widgets/zoomable_stream_view.dart';
@@ -100,10 +102,10 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
   bool _isWhiteboardDebug = false;
-  double _canvasEnhanceThreshold = 5.0;
   double _canvasPanX = 0.5;
   double _canvasPanY = 0.5;
   double _canvasZoom = 1.0;
+  int _canvasResetVersion = 0;
   Timer? _canvasPollTimer;
   // Notifier for canvas navigation state — updated by the poll timer without
   // a full setState rebuild (prevents live-view flicker).
@@ -148,6 +150,38 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasPollTimer?.cancel();
     _canvasPollTimer = null;
     _canvasNavNotifier.value = (count: 0, active: 0);
+  }
+
+  void _applyCanvasViewport(double panX, double panY, double zoom) {
+    setState(() {
+      _canvasPanX = panX.clamp(0.0, 1.0);
+      _canvasPanY = panY.clamp(0.0, 1.0);
+      _canvasZoom = zoom.clamp(1.0, 8.0);
+    });
+    NativeCameraService().setPanoramaViewport(
+      _canvasPanX,
+      _canvasPanY,
+      _canvasZoom,
+    );
+  }
+
+  void _setCanvasViewMode(bool enabled) {
+    setState(() {
+      _isCanvasViewMode = enabled;
+    });
+    NativeCameraService().setCanvasViewMode(enabled);
+    NativeCameraService().setPanoramaViewport(
+      _canvasPanX,
+      _canvasPanY,
+      _canvasZoom,
+    );
+  }
+
+  void _resetWhiteboardUiState() {
+    _canvasNavNotifier.value = (count: 0, active: 0);
+    setState(() {
+      _canvasResetVersion++;
+    });
   }
 
   Future<void> _loadPdfPath() async {
@@ -715,9 +749,6 @@ class _CameraScreenState extends State<CameraScreen>
 
   @override
   void dispose() {
-    // Capture state before async operations or state changes
-    final wasStreamMode = _isStreamMode;
-
     WidgetsBinding.instance.removeObserver(this);
     WakelockPlus.disable();
     _controller?.dispose();
@@ -728,7 +759,7 @@ class _CameraScreenState extends State<CameraScreen>
     _mediaServerSubscription?.cancel();
     _streamStoppedSubscription?.cancel();
 
-    if (Platform.isWindows && wasStreamMode) {
+    if (Platform.isWindows) {
       NativeCameraService().stop();
     }
 
@@ -1204,25 +1235,39 @@ class _CameraScreenState extends State<CameraScreen>
                     ? AppLocalizations.of(context)!.disableWhiteboard
                     : AppLocalizations.of(context)!.enableWhiteboard,
                 onPressed: () {
+                  final enableWhiteboard = !_isWhiteboardMode;
+                  if (!enableWhiteboard && _isCanvasViewMode) {
+                    _setCanvasViewMode(false);
+                  }
+
                   setState(() {
-                    _isWhiteboardMode = !_isWhiteboardMode;
+                    _isWhiteboardMode = enableWhiteboard;
                     if (_isWhiteboardMode) {
                       // Reset canvas on enable so each session starts fresh
                       NativeCameraService().resetPanorama();
                       _canvasPanX = 0.5;
                       _canvasPanY = 0.5;
                       _canvasZoom = 1.0;
-                      _startCanvasPollTimer();
-                    } else {
-                      // Leaving whiteboard mode — also exit canvas view
-                      if (_isCanvasViewMode) {
-                        _isCanvasViewMode = false;
-                        NativeCameraService().setCanvasViewMode(false);
-                      }
-                      _stopCanvasPollTimer();
+                      _canvasResetVersion++;
                     }
-                    NativeCameraService().setPanoramaEnabled(_isWhiteboardMode);
                   });
+
+                  if (enableWhiteboard) {
+                    _canvasNavNotifier.value = (count: 0, active: 0);
+                  }
+
+                  if (enableWhiteboard) {
+                    _startCanvasPollTimer();
+                    NativeCameraService().setPanoramaViewport(
+                      _canvasPanX,
+                      _canvasPanY,
+                      _canvasZoom,
+                    );
+                  } else {
+                    _stopCanvasPollTimer();
+                  }
+
+                  NativeCameraService().setPanoramaEnabled(enableWhiteboard);
                 },
               ),
             // Canvas View Toggle (only visible when whiteboard mode is active)
@@ -1234,10 +1279,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
                 tooltip: AppLocalizations.of(context)!.toggleCanvasView,
                 onPressed: () {
-                  setState(() {
-                    _isCanvasViewMode = !_isCanvasViewMode;
-                  });
-                  NativeCameraService().setCanvasViewMode(_isCanvasViewMode);
+                  _setCanvasViewMode(!_isCanvasViewMode);
                 },
               ),
             // Reset Whiteboard (only visible when whiteboard mode is active)
@@ -1247,16 +1289,8 @@ class _CameraScreenState extends State<CameraScreen>
                 tooltip: AppLocalizations.of(context)!.resetWhiteboard,
                 onPressed: () {
                   NativeCameraService().resetPanorama();
-                  setState(() {
-                    _canvasPanX = 0.5;
-                    _canvasPanY = 0.5;
-                    _canvasZoom = 1.0;
-                  });
-                  NativeCameraService().setPanoramaViewport(
-                    _canvasPanX,
-                    _canvasPanY,
-                    _canvasZoom,
-                  );
+                  _resetWhiteboardUiState();
+                  _applyCanvasViewport(0.5, 0.5, 1.0);
                 },
               ),
             // Debug toggle (only visible when whiteboard mode is active)
@@ -1305,69 +1339,125 @@ class _CameraScreenState extends State<CameraScreen>
             Positioned.fill(
               child: Column(
                 children: [
+                  if (Platform.isWindows && _isCanvasViewMode)
+                    CanvasOverviewBar(
+                      key: ValueKey('canvas_overview_$_canvasResetVersion'),
+                      panX: _canvasPanX,
+                      panY: _canvasPanY,
+                      zoom: _canvasZoom,
+                      resetVersion: _canvasResetVersion,
+                      onViewportChanged: (viewport) {
+                        _applyCanvasViewport(
+                          viewport.panX,
+                          viewport.panY,
+                          viewport.zoom,
+                        );
+                      },
+                    ),
                   Expanded(
                     child: Stack(
                       children: [
                         if (Platform.isWindows)
                           RepaintBoundary(
                             key: _zoomedViewKey,
-                            child: ZoomableStreamView(
-                              currentZoom: _currentZoom,
-                              viewOffset: _viewOffset,
-                              isDigitalZoomOverride: _isDigitalZoomOverride,
-                              lockedPhoneZoom: _lockedPhoneZoom,
-                              isStreamMode: _isStreamMode,
-                              phoneMaxZoom: _phoneMaxZoom,
-                              onTransformChanged: (zoom, offset, viewportSize) {
-                                setState(() {
-                                  _currentZoom = zoom;
-                                  _viewOffset = offset;
-                                  // viewportSize is no longer needed - we use screenshot capture
-                                });
-                              },
-                              onSendZoomCommand: _sendZoomCommand,
-                              child: _isStreamMode
-                                  ? Stack(
-                                      children: [
-                                        // Hidden RepaintBoundary for capture
-                                        Opacity(
-                                          opacity: 1.0,
-                                          child: RepaintBoundary(
-                                            key: _videoViewKey,
-                                            child: _buildStreamWidget(),
+                            child: Builder(
+                              builder: (context) {
+                                final windowsChild = _isStreamMode
+                                    ? Stack(
+                                        children: [
+                                          // Hidden RepaintBoundary for capture
+                                          Opacity(
+                                            opacity: 1.0,
+                                            child: RepaintBoundary(
+                                              key: _videoViewKey,
+                                              child: _buildStreamWidget(),
+                                            ),
                                           ),
+                                          // Processed overlay
+                                          ValueListenableBuilder<Uint8List?>(
+                                            valueListenable:
+                                                _processedImageNotifier,
+                                            builder: (
+                                              context,
+                                              processedImage,
+                                              child,
+                                            ) {
+                                              bool hasActiveFilters =
+                                                  FiltersService
+                                                      .instance
+                                                      .filters
+                                                      .any((f) => f.isActive);
+                                              if (processedImage != null &&
+                                                  hasActiveFilters) {
+                                                return Opacity(
+                                                  opacity: 0.995,
+                                                  child: Image.memory(
+                                                    processedImage,
+                                                    gaplessPlayback: true,
+                                                    fit: BoxFit.contain,
+                                                    width: double.infinity,
+                                                    height: double.infinity,
+                                                  ),
+                                                );
+                                              }
+                                              // Overlay is now rendered from main Stack widget
+                                              return const SizedBox.shrink();
+                                            },
+                                          ),
+                                        ],
+                                      )
+                                    : const NativeCameraView();
+
+                                return Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    ZoomableStreamView(
+                                      enabled: !_isCanvasViewMode,
+                                      currentZoom: _currentZoom,
+                                      viewOffset: _viewOffset,
+                                      isDigitalZoomOverride:
+                                          _isDigitalZoomOverride,
+                                      lockedPhoneZoom: _lockedPhoneZoom,
+                                      isStreamMode: _isStreamMode,
+                                      phoneMaxZoom: _phoneMaxZoom,
+                                      onTransformChanged: (
+                                        zoom,
+                                        offset,
+                                        viewportSize,
+                                      ) {
+                                        setState(() {
+                                          _currentZoom = zoom;
+                                          _viewOffset = offset;
+                                          // viewportSize is no longer needed - we use screenshot capture
+                                        });
+                                      },
+                                      onSendZoomCommand: _sendZoomCommand,
+                                      child: windowsChild,
+                                    ),
+                                    if (_isCanvasViewMode)
+                                      Positioned.fill(
+                                        child: CanvasGestureView(
+                                          key: const ValueKey(
+                                            'canvas_gesture_overlay',
+                                          ),
+                                          isCanvasViewMode: true,
+                                          canvasTextureId: -1,
+                                          initialPanX: _canvasPanX,
+                                          initialPanY: _canvasPanY,
+                                          initialZoom: _canvasZoom,
+                                          onViewportChanged: (viewport) {
+                                            _applyCanvasViewport(
+                                              viewport.panX,
+                                              viewport.panY,
+                                              viewport.zoom,
+                                            );
+                                          },
+                                          child: const SizedBox.expand(),
                                         ),
-                                        // Processed overlay
-                                        ValueListenableBuilder<Uint8List?>(
-                                          valueListenable:
-                                              _processedImageNotifier,
-                                          builder:
-                                              (context, processedImage, child) {
-                                                bool hasActiveFilters =
-                                                    FiltersService
-                                                        .instance
-                                                        .filters
-                                                        .any((f) => f.isActive);
-                                                if (processedImage != null &&
-                                                    hasActiveFilters) {
-                                                  return Opacity(
-                                                    opacity: 0.995,
-                                                    child: Image.memory(
-                                                      processedImage,
-                                                      gaplessPlayback: true,
-                                                      fit: BoxFit.contain,
-                                                      width: double.infinity,
-                                                      height: double.infinity,
-                                                    ),
-                                                  );
-                                                }
-                                                // Overlay is now rendered from main Stack widget
-                                                return const SizedBox.shrink();
-                                              },
-                                        ),
-                                      ],
-                                    )
-                                  : const NativeCameraView(),
+                                      ),
+                                  ],
+                                );
+                              },
                             ),
                           )
                         else if (_isInitialized)
@@ -1545,11 +1635,12 @@ class _CameraScreenState extends State<CameraScreen>
                           ValueListenableBuilder<({int count, int active})>(
                             valueListenable: _canvasNavNotifier,
                             builder: (ctx, nav, _) {
-                              if (nav.count <= 1)
+                              if (nav.count <= 1) {
                                 return const SizedBox.shrink();
+                              }
                               return Positioned.fill(
                                 child: Padding(
-                                  padding: const EdgeInsets.only(bottom: 80),
+                                  padding: const EdgeInsets.only(bottom: 110),
                                   child: Row(
                                     mainAxisAlignment:
                                         MainAxisAlignment.spaceBetween,

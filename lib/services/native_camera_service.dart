@@ -74,6 +74,17 @@ typedef IsCanvasViewMode = bool Function();
 typedef GetCanvasTextureIdFunc = Int64 Function();
 typedef GetCanvasTextureId = int Function();
 
+typedef GetCanvasOverviewRgbaFunc = Bool Function(
+  Pointer<Uint8> buffer,
+  Int32 width,
+  Int32 height,
+);
+typedef GetCanvasOverviewRgba = bool Function(
+  Pointer<Uint8> buffer,
+  int width,
+  int height,
+);
+
 typedef SetWhiteboardDebugFunc = Void Function(Bool enabled);
 typedef SetWhiteboardDebug = void Function(bool enabled);
 
@@ -127,6 +138,7 @@ class NativeCameraService {
   late SetCanvasViewMode _setCanvasViewMode;
   late IsCanvasViewMode _isCanvasViewMode;
   late GetCanvasTextureId _getCanvasTextureId;
+  late GetCanvasOverviewRgba _getCanvasOverviewRgba;
   late SetWhiteboardDebug _setWhiteboardDebug;
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
 
@@ -219,6 +231,11 @@ class NativeCameraService {
     _getCanvasTextureId = _nativeLib
         .lookup<NativeFunction<GetCanvasTextureIdFunc>>('GetCanvasTextureId')
         .asFunction();
+    _getCanvasOverviewRgba = _nativeLib
+      .lookup<NativeFunction<GetCanvasOverviewRgbaFunc>>(
+        'GetCanvasOverviewRgba',
+      )
+      .asFunction();
     _setWhiteboardDebug = _nativeLib
         .lookup<NativeFunction<SetWhiteboardDebugFunc>>('SetWhiteboardDebug')
         .asFunction();
@@ -418,6 +435,22 @@ class NativeCameraService {
   int getCanvasTextureId() {
     initialize();
     return _getCanvasTextureId();
+  }
+
+  /// Returns a low-resolution RGBA overview of the full canvas, or null if unavailable.
+  Uint8List? getCanvasOverviewRgba(int width, int height) {
+    initialize();
+    if (width <= 0 || height <= 0) return null;
+
+    final size = width * height * 4;
+    final ptr = malloc.allocate<Uint8>(size);
+    try {
+      final ok = _getCanvasOverviewRgba(ptr, width, height);
+      if (!ok) return null;
+      return Uint8List.fromList(ptr.asTypedList(size));
+    } finally {
+      malloc.free(ptr);
+    }
   }
 
   /// Toggle OpenCV debug popup windows for the whiteboard pipeline

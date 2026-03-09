@@ -49,7 +49,6 @@ class _NativeCameraViewState extends State<NativeCameraView> {
 
   @override
   void dispose() {
-    _service.stop();
     super.dispose();
   }
 

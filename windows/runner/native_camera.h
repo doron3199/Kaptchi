@@ -30,6 +30,7 @@ public:
     void GetFrameData(uint8_t* buffer, int32_t size);
     int32_t GetFrameWidth();
     int32_t GetFrameHeight();
+    void RefreshDisplayFrame();
 
     // External frame input (for screen capture, etc.)
     void PushExternalFrame(const cv::Mat& frame);
@@ -49,6 +50,7 @@ private:
     std::mutex mutex_;
     
     cv::Mat current_frame_;
+    cv::Mat last_source_frame_bgr_;
     std::vector<uint8_t> pixel_buffer_data_; 
     std::unique_ptr<FlutterDesktopPixelBuffer> flutter_pixel_buffer_;
     
@@ -70,6 +72,8 @@ private:
     std::atomic<bool> has_new_frame_ = false;
     void ProcessingThreadLoop();
 };
+
+extern NativeCamera* g_native_camera;
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);
 void ShutdownGlobalNativeCamera();

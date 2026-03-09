@@ -393,6 +393,45 @@ void NativeCamera::ProcessFrame(cv::Mat& frame) {
     ApplyFilterSequenceInternal(frame, filters_copy.data(), static_cast<int32_t>(filters_copy.size()));
 }
 
+void NativeCamera::RefreshDisplayFrame() {
+    cv::Mat source_bgr;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!last_source_frame_bgr_.empty()) {
+            last_source_frame_bgr_.copyTo(source_bgr);
+        }
+    }
+
+    if (source_bgr.empty()) return;
+
+    cv::Mat display_bgr = source_bgr.clone();
+    bool showing_canvas = false;
+
+    if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
+        if (g_whiteboard_canvas->IsCanvasViewMode() &&
+            g_whiteboard_canvas->HasContent()) {
+            cv::Mat canvas_out;
+            if (g_whiteboard_canvas->GetViewport(
+                    g_canvas_pan_x.load(), g_canvas_pan_y.load(),
+                    g_canvas_zoom.load(), display_bgr.size(), canvas_out)) {
+                display_bgr = canvas_out;
+                showing_canvas = true;
+            }
+        }
+    }
+
+    if (!showing_canvas) {
+        ProcessFrame(display_bgr);
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        cv::cvtColor(display_bgr, current_frame_, cv::COLOR_BGR2RGBA);
+    }
+
+    texture_registrar_->MarkTextureFrameAvailable(texture_id_);
+}
+
 void NativeCamera::ProcessingThreadLoop() {
     while (is_running_) {
         cv::Mat frame;
@@ -411,6 +450,11 @@ void NativeCamera::ProcessingThreadLoop() {
             has_new_frame_ = false;
         }
 
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            frame.copyTo(last_source_frame_bgr_);
+        }
+
         // Whiteboard canvas mode — incremental SLAM-like capture
         if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
             cv::Mat personMask = GetYOLOPersonMask(frame);
@@ -424,31 +468,13 @@ void NativeCamera::ProcessingThreadLoop() {
             // blocked — GetViewport uses try_lock and is a no-op if busy.
             if (g_whiteboard_canvas->IsCanvasViewMode() &&
                 g_whiteboard_canvas->HasContent()) {
-                
-                // Compute largest canvas-AR rect that fits inside the camera frame (letterbox)
-                cv::Size csz = g_whiteboard_canvas->GetCanvasSize();
-                const float kCanvasAR = (float)csz.width / (float)csz.height;
-                float frame_ar = (float)frame.cols / (float)frame.rows;
-                int cv_w, cv_h;
-                if (frame_ar > kCanvasAR) {
-                    cv_h = frame.rows;
-                    cv_w = (int)std::round(cv_h * kCanvasAR);
-                } else {
-                    cv_w = frame.cols;
-                    cv_h = (int)std::round(cv_w / kCanvasAR);
-                }
-                cv::Size canvas_view_size(cv_w, cv_h);
-
                 cv::Mat canvas_out;
                 bool got_lock = g_whiteboard_canvas->GetViewport(
                     g_canvas_pan_x.load(), g_canvas_pan_y.load(),
-                    g_canvas_zoom.load(), canvas_view_size, canvas_out);
+                    g_canvas_zoom.load(), frame.size(), canvas_out);
 
                 if (got_lock) {
-                    frame.setTo(cv::Scalar(255, 255, 255));
-                    int dx = (frame.cols - cv_w) / 2;
-                    int dy = (frame.rows - cv_h) / 2;
-                    canvas_out.copyTo(frame(cv::Rect(dx, dy, cv_w, cv_h)));
+                    canvas_out.copyTo(frame);
                     frame.copyTo(last_canvas_frame);
                     showing_canvas = true;
                 } else if (!last_canvas_frame.empty() && last_canvas_frame.size() == frame.size()) {

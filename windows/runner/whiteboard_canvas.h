@@ -24,6 +24,7 @@
 #include <vector>
 #include <unordered_map>
 #include <chrono>
+#include <future>
 
 // ---------------------------------------------------------------------------
 // Chunk -- one fixed-size tile of the virtual infinite whiteboard
@@ -77,6 +78,7 @@ public:
     // --- Viewport rendering ---
     bool GetViewport(float panX, float panY, float zoom,
                      cv::Size viewSize, cv::Mat& out_frame);
+    bool GetOverview(cv::Size viewSize, cv::Mat& out_frame);
 
     // --- State control ---
     void Reset();
@@ -115,7 +117,7 @@ private:
 
     // Contour matching
     static constexpr double kMaxShapeDist    = 0.35; // matchShapes threshold
-    static const int        kMinContourArea  = 80;   // px² — filter noise
+    static const int        kMinContourArea  = 40;   // px² — filter noise
     static const int        kMinShapeVotes   = 3;    // min matched pairs to accept shift
 
     // -----------------------------------------------------------------------
@@ -162,6 +164,7 @@ private:
         std::vector<cv::Point> contour;
         cv::Point2f            centroid;  // in canvas pixel coords
         double                 hu[7];
+        double                 log_hu[7]; // Pre-calculated log moments for O(1) comparisons
     };
     std::vector<ContourShape> canvas_contours_;
     bool canvas_contours_dirty_ = true;
@@ -220,12 +223,15 @@ private:
     // Chunk Grid management
     uint64_t GetChunkHash(int grid_x, int grid_y) const;
     void EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y);
-    void PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary, const cv::Mat& enhanced_bgr, cv::Point2f camera_pos);
+    void PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
+                              const cv::Mat& enhanced_bgr, cv::Point2f camera_pos,
+                              const cv::Mat& no_update_mask = cv::Mat());
     void RebuildRenderCache(WhiteboardGroup& group);
 
     // Create a new group (canvas) seeded with the current frame.
     void CreateSubCanvas(const cv::Mat& binary, const cv::Mat& enhanced_bgr,
-                         const std::vector<ContourShape>& seed_contours);
+                         const std::vector<ContourShape>& seed_contours,
+                         const cv::Mat& no_update_mask = cv::Mat());
     
     // Debug: 3x2 tile grid showing pipeline stages
     void RenderDebugGrid(const PipelineDebugState& state);
@@ -256,6 +262,7 @@ extern "C" {
     __declspec(dllexport) void    SetCanvasViewMode(bool mode);
     __declspec(dllexport) bool    IsCanvasViewMode();
     __declspec(dllexport) int64_t GetCanvasTextureId();
+    __declspec(dllexport) bool    GetCanvasOverviewRgba(uint8_t* buffer, int width, int height);
 
     __declspec(dllexport) int     GetSubCanvasCount();
     __declspec(dllexport) int     GetActiveSubCanvasIndex();

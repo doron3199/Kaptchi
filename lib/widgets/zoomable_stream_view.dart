@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 /// smooth, reliable gesture handling.
 class ZoomableStreamView extends StatefulWidget {
   final Widget child;
+  final bool enabled;
   final double currentZoom;
   final Offset viewOffset;
   final bool isDigitalZoomOverride;
@@ -20,6 +21,7 @@ class ZoomableStreamView extends StatefulWidget {
   const ZoomableStreamView({
     super.key,
     required this.child,
+    this.enabled = true,
     required this.currentZoom,
     required this.viewOffset,
     required this.isDigitalZoomOverride,
@@ -243,6 +245,7 @@ class _ZoomableStreamViewState extends State<ZoomableStreamView> {
     );
     final scale = Matrix4.diagonal3Values(visualScale, visualScale, 1.0);
     final matrix = translation..multiply(scale);
+    final effectiveMatrix = widget.enabled ? matrix : Matrix4.identity();
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -251,13 +254,14 @@ class _ZoomableStreamViewState extends State<ZoomableStreamView> {
         }
 
         return Listener(
-          onPointerSignal: _handlePointerSignal,
+          onPointerSignal: widget.enabled ? _handlePointerSignal : null,
           child: GestureDetector(
-            onScaleStart: _onScaleStart,
-            onScaleUpdate: _onScaleUpdate,
+            behavior: HitTestBehavior.opaque,
+            onScaleStart: widget.enabled ? _onScaleStart : null,
+            onScaleUpdate: widget.enabled ? _onScaleUpdate : null,
             child: ClipRect(
               child: Transform(
-                transform: matrix,
+                transform: effectiveMatrix,
                 alignment: Alignment.topLeft,
                 child: widget.child,
               ),
