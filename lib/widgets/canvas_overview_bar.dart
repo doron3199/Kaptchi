@@ -29,13 +29,15 @@ class CanvasOverviewBar extends StatefulWidget {
 
 class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
   static const int _previewPixelHeight = 96;
-  static const Duration _refreshInterval = Duration(milliseconds: 400);
+  static const Duration _refreshInterval = Duration(milliseconds: 900);
+  static const Duration _interactionQuietPeriod = Duration(milliseconds: 250);
 
   Timer? _refreshTimer;
   ui.Image? _overviewImage;
   Size _canvasSize = Size.zero;
   Size _frameSize = const Size(16, 9);
   bool _isRefreshing = false;
+  DateTime _lastViewportChange = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -54,6 +56,11 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
   @override
   void didUpdateWidget(covariant CanvasOverviewBar oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.panX != widget.panX ||
+        oldWidget.panY != widget.panY ||
+        oldWidget.zoom != widget.zoom) {
+      _lastViewportChange = DateTime.now();
+    }
     if (oldWidget.resetVersion != widget.resetVersion) {
       final previous = _overviewImage;
       _overviewImage = null;
@@ -68,21 +75,26 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
     _isRefreshing = true;
 
     try {
+      if (DateTime.now().difference(_lastViewportChange) <
+          _interactionQuietPeriod) {
+        return;
+      }
+
       final service = NativeCameraService();
       final rawCanvasSize = service.getPanoramaCanvasSize();
       final overviewAspect = rawCanvasSize.width > 0 && rawCanvasSize.height > 0
           ? rawCanvasSize.width / rawCanvasSize.height
-          : (_frameSize.height > 0 ? _frameSize.width / _frameSize.height : 16 / 9);
-      final previewPixelWidth =
-          (_previewPixelHeight * overviewAspect).clamp(1.0, 8192.0).round();
+          : (_frameSize.height > 0
+                ? _frameSize.width / _frameSize.height
+                : 16 / 9);
+      final previewPixelWidth = (_previewPixelHeight * overviewAspect)
+          .clamp(1.0, 8192.0)
+          .round();
 
       final bytes = service.getCanvasOverviewRgba(
         previewPixelWidth,
         _previewPixelHeight,
       );
-      final canvasSize = bytes != null
-          ? rawCanvasSize
-          : Size.zero;
       final frameWidth = service.getFrameWidth().toDouble();
       final frameHeight = service.getFrameHeight().toDouble();
 
@@ -101,10 +113,14 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
       }
 
       setState(() {
-        final previous = _overviewImage;
-        _overviewImage = nextImage;
-        previous?.dispose();
-        _canvasSize = canvasSize;
+        if (nextImage != null) {
+          final previous = _overviewImage;
+          _overviewImage = nextImage;
+          previous?.dispose();
+          if (rawCanvasSize.width > 0 && rawCanvasSize.height > 0) {
+            _canvasSize = rawCanvasSize;
+          }
+        }
         if (frameWidth > 0 && frameHeight > 0) {
           _frameSize = Size(frameWidth, frameHeight);
         }
@@ -154,14 +170,7 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
     final cx = (widget.panX * maxCx).clamp(0.0, maxCx);
     final cy = (widget.panY * maxCy).clamp(0.0, maxCy);
 
-    return (
-      roiW: roiW,
-      roiH: roiH,
-      maxCx: maxCx,
-      maxCy: maxCy,
-      cx: cx,
-      cy: cy,
-    );
+    return (roiW: roiW, roiH: roiH, maxCx: maxCx, maxCy: maxCy, cx: cx, cy: cy);
   }
 
   Rect _contentRect(Size size) {
@@ -178,11 +187,21 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
 
     if (srcAspect > dstAspect) {
       final drawHeight = size.width / srcAspect;
-      return Rect.fromLTWH(0, (size.height - drawHeight) / 2, size.width, drawHeight);
+      return Rect.fromLTWH(
+        0,
+        (size.height - drawHeight) / 2,
+        size.width,
+        drawHeight,
+      );
     }
 
     final drawWidth = size.height * srcAspect;
-    return Rect.fromLTWH((size.width - drawWidth) / 2, 0, drawWidth, size.height);
+    return Rect.fromLTWH(
+      (size.width - drawWidth) / 2,
+      0,
+      drawWidth,
+      size.height,
+    );
   }
 
   void _updatePanFromOverview(Offset localPosition, Size size) {
@@ -194,15 +213,22 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
     final metrics = _viewportMetrics();
     if (metrics.maxCx <= 0) return;
 
-    final localX = (localPosition.dx - contentRect.left)
-        .clamp(0.0, contentRect.width);
+    final localX = (localPosition.dx - contentRect.left).clamp(
+      0.0,
+      contentRect.width,
+    );
     final targetCenterX = (localX / contentRect.width) * _canvasSize.width;
-    final nextCx = (targetCenterX - (metrics.roiW / 2)).clamp(0.0, metrics.maxCx);
+    final nextCx = (targetCenterX - (metrics.roiW / 2)).clamp(
+      0.0,
+      metrics.maxCx,
+    );
     final nextPanX = nextCx / metrics.maxCx;
 
-    widget.onViewportChanged(
-      (panX: nextPanX, panY: widget.panY, zoom: widget.zoom),
-    );
+    widget.onViewportChanged((
+      panX: nextPanX,
+      panY: widget.panY,
+      zoom: widget.zoom,
+    ));
   }
 
   @override
@@ -221,17 +247,17 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
               final overlayRect = Rect.fromLTWH(
                 contentRect.left +
                     ((metrics.cx /
-                                (_canvasSize.width <= 0
-                                    ? 1
-                                    : _canvasSize.width)) *
-                            contentRect.width),
+                            (_canvasSize.width <= 0 ? 1 : _canvasSize.width)) *
+                        contentRect.width),
                 contentRect.top +
                     ((metrics.cy /
-                                (_canvasSize.height <= 0
-                                    ? 1
-                                    : _canvasSize.height)) *
-                            contentRect.height),
-                (_canvasSize.width <= 0 ? 1.0 : metrics.roiW / _canvasSize.width) *
+                            (_canvasSize.height <= 0
+                                ? 1
+                                : _canvasSize.height)) *
+                        contentRect.height),
+                (_canvasSize.width <= 0
+                        ? 1.0
+                        : metrics.roiW / _canvasSize.width) *
                     contentRect.width,
                 (_canvasSize.height <= 0
                         ? 1.0
@@ -267,7 +293,9 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
                           child: IgnorePointer(
                             child: Container(
                               decoration: BoxDecoration(
-                                color: Colors.blueAccent.withValues(alpha: 0.14),
+                                color: Colors.blueAccent.withValues(
+                                  alpha: 0.14,
+                                ),
                                 border: Border.all(
                                   color: Colors.blueAccent,
                                   width: 2,

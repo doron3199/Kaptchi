@@ -423,4 +423,10 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get toggleCanvasView => 'החלף תצוגת לוח';
+
+  @override
+  String get showRawView => 'הצג תצוגה גולמית';
+
+  @override
+  String get showStrokeView => 'הצג תצוגת קווים';
 }

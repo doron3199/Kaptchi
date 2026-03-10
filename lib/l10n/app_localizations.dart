@@ -871,6 +871,18 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Toggle Canvas View'**
   String get toggleCanvasView;
+
+  /// No description provided for @showRawView.
+  ///
+  /// In en, this message translates to:
+  /// **'Show Raw View'**
+  String get showRawView;
+
+  /// No description provided for @showStrokeView.
+  ///
+  /// In en, this message translates to:
+  /// **'Show Stroke View'**
+  String get showStrokeView;
 }
 
 class _AppLocalizationsDelegate

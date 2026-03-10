@@ -130,5 +130,7 @@
   "enableWhiteboard": "הפעל לכידת לוח",
   "disableWhiteboard": "בטל לכידת לוח",
   "resetWhiteboard": "אפס לוח",
-  "toggleCanvasView": "החלף תצוגת לוח"
+  "toggleCanvasView": "החלף תצוגת לוח",
+  "showRawView": "הצג תצוגה גולמית",
+  "showStrokeView": "הצג תצוגת קווים"
 }

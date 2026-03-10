@@ -71,6 +71,9 @@ typedef SetCanvasViewMode = void Function(bool mode);
 typedef IsCanvasViewModeFunc = Bool Function();
 typedef IsCanvasViewMode = bool Function();
 
+typedef SetCanvasRenderModeFunc = Void Function(Int32 mode);
+typedef SetCanvasRenderMode = void Function(int mode);
+
 typedef GetCanvasTextureIdFunc = Int64 Function();
 typedef GetCanvasTextureId = int Function();
 
@@ -137,6 +140,7 @@ class NativeCameraService {
   // Canvas (whiteboard) bindings
   late SetCanvasViewMode _setCanvasViewMode;
   late IsCanvasViewMode _isCanvasViewMode;
+  late SetCanvasRenderMode _setCanvasRenderMode;
   late GetCanvasTextureId _getCanvasTextureId;
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
   late SetWhiteboardDebug _setWhiteboardDebug;
@@ -228,6 +232,9 @@ class NativeCameraService {
     _isCanvasViewMode = _nativeLib
         .lookup<NativeFunction<IsCanvasViewModeFunc>>('IsCanvasViewMode')
         .asFunction();
+    _setCanvasRenderMode = _nativeLib
+      .lookup<NativeFunction<SetCanvasRenderModeFunc>>('SetCanvasRenderMode')
+      .asFunction();
     _getCanvasTextureId = _nativeLib
         .lookup<NativeFunction<GetCanvasTextureIdFunc>>('GetCanvasTextureId')
         .asFunction();
@@ -429,6 +436,13 @@ class NativeCameraService {
   bool isCanvasViewMode() {
     initialize();
     return _isCanvasViewMode();
+  }
+
+  /// Select which stitched whiteboard output to display.
+  /// [mode]: 0 = stroke view, 1 = raw native-frame mosaic.
+  void setCanvasRenderMode(int mode) {
+    initialize();
+    _setCanvasRenderMode(mode);
   }
 
   /// Returns the Flutter texture ID for the canvas (Phase 2; -1 = not available)

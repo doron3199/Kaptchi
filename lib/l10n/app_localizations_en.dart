@@ -427,4 +427,10 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get toggleCanvasView => 'Toggle Canvas View';
+
+  @override
+  String get showRawView => 'Show Raw View';
+
+  @override
+  String get showStrokeView => 'Show Stroke View';
 }

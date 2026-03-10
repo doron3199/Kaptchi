@@ -4,6 +4,7 @@
 
 #include "flutter_window.h"
 #include "utils.h"
+#include "whiteboard_canvas_process.h"
 
 int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
                       _In_ wchar_t *command_line, _In_ int show_command) {
@@ -17,10 +18,20 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
-  flutter::DartProject project(L"data");
-
   std::vector<std::string> command_line_arguments =
       GetCommandLineArguments();
+
+  for (size_t i = 0; i < command_line_arguments.size(); ++i) {
+    if (command_line_arguments[i] == "--whiteboard-helper") {
+      const std::string session_id =
+          (i + 1 < command_line_arguments.size()) ? command_line_arguments[i + 1] : "";
+      const int exit_code = RunWhiteboardCanvasHelperMain(session_id);
+      ::CoUninitialize();
+      return exit_code;
+    }
+  }
+
+  flutter::DartProject project(L"data");
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 

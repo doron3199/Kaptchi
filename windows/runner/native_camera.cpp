@@ -6,6 +6,7 @@
 #include <cmath>
 #include <chrono>
 #include <objbase.h>
+#include <opencv2/core/utils/logger.hpp>
 #include <opencv2/dnn.hpp>
 #include <windows.h> // For GetModuleFileName
 
@@ -27,6 +28,101 @@ static float g_avg_brightness = -1.0f;
 // Person Removal Smooth Mask
 static cv::Mat g_person_prob_mask;
 
+namespace {
+
+static constexpr int kYoloPerfLogMinFrames = 30;
+static const auto kYoloPerfLogMinInterval = std::chrono::seconds(10);
+static const auto kWhiteboardBridgeLogInterval = std::chrono::seconds(10);
+
+struct YoloPerfStats {
+    double inference_ms = 0.0;
+    int frames = 0;
+    int refreshes = 0;
+    int reuses = 0;
+    std::chrono::time_point<std::chrono::steady_clock> last_log =
+        std::chrono::steady_clock::now();
+};
+
+static YoloPerfStats g_yolo_perf_stats;
+
+struct WhiteboardBridgePerfStats {
+    int submitted_frames = 0;
+    int canvas_frames = 0;
+    int canvas_misses = 0;
+    std::chrono::time_point<std::chrono::steady_clock> last_log =
+        std::chrono::steady_clock::now();
+};
+
+static WhiteboardBridgePerfStats g_whiteboard_bridge_perf_stats;
+
+static double DurationMs(
+    const std::chrono::steady_clock::time_point& start,
+    const std::chrono::steady_clock::time_point& end) {
+    return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+static void MaybePrintYoloPerfLog() {
+    const auto now = std::chrono::steady_clock::now();
+    const bool enough_frames = g_yolo_perf_stats.frames >= kYoloPerfLogMinFrames;
+    const bool enough_time =
+        g_yolo_perf_stats.frames > 0 &&
+        (now - g_yolo_perf_stats.last_log) >= kYoloPerfLogMinInterval;
+
+    if (!enough_frames && !enough_time) return;
+
+    const double frames = static_cast<double>(std::max(1, g_yolo_perf_stats.frames));
+    const double refreshes = static_cast<double>(std::max(1, g_yolo_perf_stats.refreshes));
+    const double elapsed_seconds = std::max(
+        0.001,
+        std::chrono::duration<double>(now - g_yolo_perf_stats.last_log).count());
+    const double fps = frames / elapsed_seconds;
+
+    std::cout << "[WhiteboardYoloPerf] frames=" << g_yolo_perf_stats.frames
+              << " refreshes=" << g_yolo_perf_stats.refreshes
+              << " reused=" << g_yolo_perf_stats.reuses
+              << " fps=" << fps
+              << " avgMs/frame=" << (g_yolo_perf_stats.inference_ms / frames)
+              << " avgMs/refresh=" << (g_yolo_perf_stats.inference_ms / refreshes)
+              << std::endl;
+
+    g_yolo_perf_stats = YoloPerfStats();
+    g_yolo_perf_stats.last_log = now;
+}
+
+static void MaybePrintWhiteboardBridgePerfLog(bool remote_process,
+                                              bool canvas_view_mode,
+                                              bool has_content) {
+    const auto now = std::chrono::steady_clock::now();
+    const bool enough_time =
+        g_whiteboard_bridge_perf_stats.submitted_frames > 0 &&
+        (now - g_whiteboard_bridge_perf_stats.last_log) >= kWhiteboardBridgeLogInterval;
+
+    if (!enough_time) return;
+
+    const double elapsed_seconds = std::max(
+        0.001,
+        std::chrono::duration<double>(now - g_whiteboard_bridge_perf_stats.last_log).count());
+    const double submitted_fps =
+        static_cast<double>(g_whiteboard_bridge_perf_stats.submitted_frames) / elapsed_seconds;
+    const double canvas_fps =
+        static_cast<double>(g_whiteboard_bridge_perf_stats.canvas_frames) / elapsed_seconds;
+
+    std::cout << "[WhiteboardBridgePerf] remote=" << (remote_process ? 1 : 0)
+              << " canvasView=" << (canvas_view_mode ? 1 : 0)
+              << " hasContent=" << (has_content ? 1 : 0)
+              << " submitted=" << g_whiteboard_bridge_perf_stats.submitted_frames
+              << " canvasFrames=" << g_whiteboard_bridge_perf_stats.canvas_frames
+              << " misses=" << g_whiteboard_bridge_perf_stats.canvas_misses
+              << " fps(in)=" << submitted_fps
+              << " fps(out)=" << canvas_fps
+              << std::endl;
+
+    g_whiteboard_bridge_perf_stats = WhiteboardBridgePerfStats();
+    g_whiteboard_bridge_perf_stats.last_log = now;
+}
+
+} // namespace
+
 // --- Filter Parameters ---
 #include <unordered_map>
 static std::unordered_map<int, float> g_filter_params;
@@ -40,10 +136,7 @@ std::string GetModelPath(const std::string& modelName) {
     std::string::size_type pos = std::string(buffer).find_last_of("\\/");
     std::string dir = std::string(buffer).substr(0, pos);
     std::string fullPath = dir + "\\models\\" + modelName;
-    
-    std::cout << "[NativeCamera] Executable Dir: " << dir << std::endl;
-    std::cout << "[NativeCamera] Looking for model at: " << fullPath << std::endl;
-    
+
     return fullPath;
 }
 
@@ -53,10 +146,11 @@ ScreenCaptureSource* g_screen_capture = nullptr;
 
 // Forward declarations
 static void ApplyLivePerspectiveCrop(cv::Mat& frame);
-static cv::Mat GetYOLOPersonMask(const cv::Mat& frame);
+cv::Mat GetWhiteboardPersonMask(const cv::Mat& frame);
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar) {
     if (g_native_camera) return;
+    cv::utils::logging::setLogLevel(cv::utils::logging::LOG_LEVEL_ERROR);
     g_native_camera = new NativeCamera(texture_registrar);
 
     // Initialize screen capture source
@@ -94,7 +188,6 @@ NativeCamera::NativeCamera(flutter::TextureRegistrar* texture_registrar)
         }));
 
     texture_id_ = texture_registrar_->RegisterTexture(texture_variant_.get());
-    std::cout << "NativeCamera initialized. Texture ID: " << texture_id_ << std::endl;
     flutter_pixel_buffer_ = std::make_unique<FlutterDesktopPixelBuffer>();
     flutter_pixel_buffer_->width = 0;
     flutter_pixel_buffer_->height = 0;
@@ -406,18 +499,42 @@ void NativeCamera::RefreshDisplayFrame() {
 
     cv::Mat display_bgr = source_bgr.clone();
     bool showing_canvas = false;
+    static cv::Mat last_canvas_frame;
+    static cv::Mat canvas_hold_frame;
 
-    if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
-        if (g_whiteboard_canvas->IsCanvasViewMode() &&
-            g_whiteboard_canvas->HasContent()) {
+    const bool canvas_view_requested =
+        g_whiteboard_enabled.load() && g_whiteboard_canvas &&
+        g_whiteboard_canvas->IsCanvasViewMode();
+
+    if (canvas_view_requested) {
+        const bool has_canvas_content = g_whiteboard_canvas->HasContent();
+        if (has_canvas_content) {
             cv::Mat canvas_out;
-            if (g_whiteboard_canvas->GetViewport(
-                    g_canvas_pan_x.load(), g_canvas_pan_y.load(),
-                    g_canvas_zoom.load(), display_bgr.size(), canvas_out)) {
+            if (g_whiteboard_canvas->GetOverview(display_bgr.size(), canvas_out)) {
                 display_bgr = canvas_out;
+                canvas_out.copyTo(last_canvas_frame);
+                canvas_hold_frame.release();
+                showing_canvas = true;
+            } else if (!last_canvas_frame.empty() &&
+                       last_canvas_frame.size() == display_bgr.size()) {
+                last_canvas_frame.copyTo(display_bgr);
                 showing_canvas = true;
             }
         }
+
+        if (!showing_canvas) {
+            if (!has_canvas_content) {
+                last_canvas_frame.release();
+            }
+            if (canvas_hold_frame.empty() || canvas_hold_frame.size() != display_bgr.size()) {
+                source_bgr.copyTo(canvas_hold_frame);
+            }
+            canvas_hold_frame.copyTo(display_bgr);
+            showing_canvas = true;
+        }
+    } else {
+        last_canvas_frame.release();
+        canvas_hold_frame.release();
     }
 
     if (!showing_canvas) {
@@ -433,6 +550,9 @@ void NativeCamera::RefreshDisplayFrame() {
 }
 
 void NativeCamera::ProcessingThreadLoop() {
+    static cv::Mat last_canvas_frame;
+    static cv::Mat canvas_hold_frame;
+
     while (is_running_) {
         cv::Mat frame;
         {
@@ -457,37 +577,74 @@ void NativeCamera::ProcessingThreadLoop() {
 
         // Whiteboard canvas mode — incremental SLAM-like capture
         if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
-            cv::Mat personMask = GetYOLOPersonMask(frame);
+            cv::Mat personMask;
+            const bool canvas_view_requested = g_whiteboard_canvas->IsCanvasViewMode();
+            const bool remote_process = g_whiteboard_canvas->IsRemoteProcess();
+            if (!g_whiteboard_canvas->IsRemoteProcess()) {
+                const auto yolo_start = std::chrono::steady_clock::now();
+                personMask = GetWhiteboardPersonMask(frame);
+                const auto yolo_end = std::chrono::steady_clock::now();
+                g_yolo_perf_stats.inference_ms += DurationMs(yolo_start, yolo_end);
+                g_yolo_perf_stats.refreshes++;
+
+                g_yolo_perf_stats.frames++;
+                MaybePrintYoloPerfLog();
+            }
+
             g_whiteboard_canvas->ProcessFrame(frame, personMask);
+            g_whiteboard_bridge_perf_stats.submitted_frames++;
 
             bool showing_canvas = false;
-            static cv::Mat last_canvas_frame;
             
             // If canvas view mode is active and we have content, replace the
-            // live frame with the canvas viewport.  The live feed is never
-            // blocked — GetViewport uses try_lock and is a no-op if busy.
-            if (g_whiteboard_canvas->IsCanvasViewMode() &&
-                g_whiteboard_canvas->HasContent()) {
-                cv::Mat canvas_out;
-                bool got_lock = g_whiteboard_canvas->GetViewport(
-                    g_canvas_pan_x.load(), g_canvas_pan_y.load(),
-                    g_canvas_zoom.load(), frame.size(), canvas_out);
+            // live frame with the latest finished canvas. The whiteboard loop
+            // only consumes source frames; zoom/pan are handled locally by Flutter.
+            if (canvas_view_requested) {
+                const bool has_canvas_content = g_whiteboard_canvas->HasContent();
+                if (has_canvas_content) {
+                    cv::Mat canvas_out;
+                    const bool got_lock =
+                        g_whiteboard_canvas->GetOverview(frame.size(), canvas_out);
 
-                if (got_lock) {
-                    canvas_out.copyTo(frame);
-                    frame.copyTo(last_canvas_frame);
-                    showing_canvas = true;
-                } else if (!last_canvas_frame.empty() && last_canvas_frame.size() == frame.size()) {
-                    // Lock failed (worker is busy drawing). Keep showing the last mapped canvas
-                    // instead of flashing back to the live camera feed.
-                    last_canvas_frame.copyTo(frame);
+                    if (got_lock) {
+                        canvas_out.copyTo(frame);
+                        frame.copyTo(last_canvas_frame);
+                        canvas_hold_frame.release();
+                        g_whiteboard_bridge_perf_stats.canvas_frames++;
+                        showing_canvas = true;
+                    } else if (!last_canvas_frame.empty() &&
+                               last_canvas_frame.size() == frame.size()) {
+                        // Keep showing the last mapped canvas instead of falling back to live.
+                        last_canvas_frame.copyTo(frame);
+                        g_whiteboard_bridge_perf_stats.canvas_misses++;
+                        showing_canvas = true;
+                    }
+                }
+
+                if (!showing_canvas) {
+                    if (!has_canvas_content) {
+                        last_canvas_frame.release();
+                    }
+                    if (canvas_hold_frame.empty() || canvas_hold_frame.size() != frame.size()) {
+                        frame.copyTo(canvas_hold_frame);
+                    }
+                    canvas_hold_frame.copyTo(frame);
+                    g_whiteboard_bridge_perf_stats.canvas_misses++;
                     showing_canvas = true;
                 }
+            } else {
+                last_canvas_frame.release();
+                canvas_hold_frame.release();
             }
+
+            MaybePrintWhiteboardBridgePerfLog(
+                remote_process,
+                canvas_view_requested,
+                g_whiteboard_canvas->HasContent());
         }
         
         // Only apply camera filters if we are NOT showing the canvas
-        if (!g_whiteboard_enabled.load() || !g_whiteboard_canvas || !g_whiteboard_canvas->IsCanvasViewMode() || !g_whiteboard_canvas->HasContent()) {
+        if (!g_whiteboard_enabled.load() || !g_whiteboard_canvas || !g_whiteboard_canvas->IsCanvasViewMode()) {
             ProcessFrame(frame);
         }
 
@@ -974,7 +1131,7 @@ static cv::Mat g_bg_model_8u;
 
 // Helper function to get person mask for panorama stitching
 // Returns a mask where person regions are 255, background is 0
-static cv::Mat GetYOLOPersonMask(const cv::Mat& frame) {
+cv::Mat GetWhiteboardPersonMask(const cv::Mat& frame) {
     cv::Mat personMask = cv::Mat::zeros(frame.size(), CV_8UC1);
     
     if (g_yolo11_failed) return personMask;

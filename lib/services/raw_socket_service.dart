@@ -5,17 +5,17 @@ import 'package:flutter/foundation.dart';
 
 class RawSocketService {
   static final RawSocketService instance = RawSocketService._internal();
-  
+
   factory RawSocketService() {
     return instance;
   }
-  
+
   RawSocketService._internal();
 
   ServerSocket? _server;
   Socket? _clientSocket; // For Android client
   final List<Socket> _connectedClients = []; // For Windows server
-  
+
   // Callbacks
   Function(String command, Map<String, dynamic> data)? onControlMessage;
 
@@ -28,7 +28,9 @@ class RawSocketService {
       debugPrint("RawSocketService: Listening on port 4040...");
 
       _server!.listen((Socket client) {
-        debugPrint('RawSocketService: Connection from: ${client.remoteAddress.address}:${client.remotePort}');
+        debugPrint(
+          'RawSocketService: Connection from: ${client.remoteAddress.address}:${client.remotePort}',
+        );
         _connectedClients.add(client);
 
         client.listen(
@@ -57,8 +59,8 @@ class RawSocketService {
   // Android: Connect to Server
   Future<void> connect(String ip) async {
     if (_clientSocket != null) {
-        _clientSocket!.destroy();
-        _clientSocket = null;
+      _clientSocket!.destroy();
+      _clientSocket = null;
     }
 
     try {
@@ -88,10 +90,7 @@ class RawSocketService {
 
   // Send message (from Server to all clients, or Client to Server)
   void send(String type, Map<String, dynamic> payload) {
-    final msg = jsonEncode({
-      'type': type,
-      'payload': payload,
-    });
+    final msg = jsonEncode({'type': type, 'payload': payload});
 
     if (_clientSocket != null) {
       // Client sending to server
@@ -117,11 +116,11 @@ class RawSocketService {
       // Handle potential multiple JSON objects in one packet
       // This is a naive implementation, assuming clean JSONs or single messages
       // For better robustness, we should split by some delimiter or try to parse iteratively
-      
+
       // Simple attempt to handle concatenated JSONs like "{...}{...}"
       int braceCount = 0;
       int startIndex = 0;
-      
+
       for (int i = 0; i < message.length; i++) {
         if (message[i] == '{') {
           braceCount++;
@@ -140,57 +139,52 @@ class RawSocketService {
   }
 
   void _processSingleJson(String jsonStr) {
-      try {
-        Map<String, dynamic> data = jsonDecode(jsonStr);
-        String? type = data['type'];
-        var payload = data['payload'];
+    try {
+      Map<String, dynamic> data = jsonDecode(jsonStr);
+      String? type = data['type'];
+      var payload = data['payload'];
 
-        if (type == 'control') {
-          if (payload != null) {
-              String? command = payload['command'];
-              var data = payload['data'];
-              if (command != null && data != null) {
-                onControlMessage?.call(command, data);
-              }
+      if (type == 'control') {
+        if (payload != null) {
+          String? command = payload['command'];
+          var data = payload['data'];
+          if (command != null && data != null) {
+            onControlMessage?.call(command, data);
           }
         }
-      } catch (e) {
-        debugPrint("RawSocketService: Error processing JSON: $e");
       }
-  }
-  
-  void stop() {
-      _server?.close();
-      _server = null;
-      _clientSocket?.destroy();
-      _clientSocket = null;
-      for(var c in _connectedClients) {
-          c.destroy();
-      }
-      _connectedClients.clear();
+    } catch (e) {
+      debugPrint("RawSocketService: Error processing JSON: $e");
+    }
   }
 
-    // Helper to get local IP to show in UI
+  void stop() {
+    _server?.close();
+    _server = null;
+    _clientSocket?.destroy();
+    _clientSocket = null;
+    for (var c in _connectedClients) {
+      c.destroy();
+    }
+    _connectedClients.clear();
+  }
+
+  // Helper to get local IP to show in UI
   Future<List<({String name, String ip})>> getNetworkInterfaces() async {
     final List<({String name, String ip})> interfacesList = [];
     try {
-      debugPrint('DEBUG: Listing network interfaces...');
       final interfaces = await NetworkInterface.list(
-        includeLoopback: true, 
+        includeLoopback: true,
         includeLinkLocal: true,
-        type: InternetAddressType.IPv4
+        type: InternetAddressType.IPv4,
       );
 
       for (var interface in interfaces) {
-        debugPrint('DEBUG: Found interface: ${interface.name}');
         for (var addr in interface.addresses) {
-          debugPrint('DEBUG:   Address: ${addr.address}');
           if (addr.type == InternetAddressType.IPv4) {
             // Filter out link-local (APIPA) addresses which are usually useless for this
             if (!addr.address.startsWith('169.254')) {
-                interfacesList.add((name: interface.name, ip: addr.address));
-            } else {
-                debugPrint('DEBUG:   Skipping link-local address: ${addr.address}');
+              interfacesList.add((name: interface.name, ip: addr.address));
             }
           }
         }
@@ -198,11 +192,11 @@ class RawSocketService {
     } catch (e) {
       debugPrint('Error getting IPs: $e');
     }
-    
+
     if (interfacesList.isEmpty) {
       interfacesList.add((name: 'Loopback', ip: '127.0.0.1'));
     }
-    
+
     // Sort: Wi-Fi first, then Ethernet, then others. Also prioritize private ranges.
     interfacesList.sort((a, b) {
       // Helper to score IP ranges
@@ -212,7 +206,7 @@ class RawSocketService {
         if (ip.startsWith('172.')) return 1;
         return 0;
       }
-      
+
       final scoreA = score(a.ip);
       final scoreB = score(b.ip);
       if (scoreA > scoreB) return -1;
@@ -220,8 +214,11 @@ class RawSocketService {
 
       final nameA = a.name.toLowerCase();
       final nameB = b.name.toLowerCase();
-      
-      bool isWifi(String name) => name.contains('wi-fi') || name.contains('wlan') || name.contains('wireless');
+
+      bool isWifi(String name) =>
+          name.contains('wi-fi') ||
+          name.contains('wlan') ||
+          name.contains('wireless');
 
       // Prioritize Wi-Fi
       if (isWifi(nameA) && !isWifi(nameB)) return -1;
@@ -231,10 +228,7 @@ class RawSocketService {
       if (!nameA.contains('ethernet') && nameB.contains('ethernet')) return 1;
       return 0;
     });
-    
+
     return interfacesList;
   }
-
-
-
 }

@@ -2,7 +2,6 @@ import 'dart:io';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
-import '../services/native_camera_service.dart';
 
 /// Wraps the camera view with gesture-based pan/zoom for the whiteboard canvas.
 ///
@@ -19,7 +18,8 @@ class CanvasGestureView extends StatefulWidget {
   final double initialPanX;
   final double initialPanY;
   final double initialZoom;
-  final ValueChanged<({double panX, double panY, double zoom})>? onViewportChanged;
+  final ValueChanged<({double panX, double panY, double zoom})>?
+  onViewportChanged;
   final Widget child;
 
   const CanvasGestureView({
@@ -68,7 +68,6 @@ class _CanvasGestureViewState extends State<CanvasGestureView> {
 
   void _updateViewport() {
     if (!Platform.isWindows) return;
-    NativeCameraService().setPanoramaViewport(_panX, _panY, _zoom);
     widget.onViewportChanged?.call((panX: _panX, panY: _panY, zoom: _zoom));
   }
 
@@ -97,7 +96,6 @@ class _CanvasGestureViewState extends State<CanvasGestureView> {
     _panY -= delta.dy * panSensitivity / _zoom;
     _panX = _panX.clamp(0.0, 1.0);
     _panY = _panY.clamp(0.0, 1.0);
-    _updateViewport();
   }
 
   @override
@@ -123,9 +121,6 @@ class _CanvasGestureViewState extends State<CanvasGestureView> {
       onPointerSignal: _handlePointerSignal,
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
-        onPanUpdate: (details) {
-          _applyPanDelta(details.delta);
-        },
         onScaleStart: (details) {
           _lastFocalPoint = details.focalPoint;
           _lastScaleDistance = null;
@@ -148,8 +143,9 @@ class _CanvasGestureViewState extends State<CanvasGestureView> {
               _zoom = _zoom.clamp(1.0, 8.0);
             }
             _lastScaleDistance = newScale;
-            _updateViewport();
           }
+
+          _updateViewport();
         },
         onScaleEnd: (_) {
           _lastFocalPoint = null;

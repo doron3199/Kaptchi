@@ -57,8 +57,8 @@ private:
     std::vector<int> active_filters_;
 
     // Resolution settings
-    int target_width_ = 4096;
-    int target_height_ = 2160;
+    int target_width_ = 1920;
+    int target_height_ = 1080;
     int camera_index_ = 1;
 
     void CameraThreadLoop();
@@ -77,3 +77,4 @@ extern NativeCamera* g_native_camera;
 
 void InitGlobalNativeCamera(flutter::TextureRegistrar* texture_registrar);
 void ShutdownGlobalNativeCamera();
+cv::Mat GetWhiteboardPersonMask(const cv::Mat& frame);

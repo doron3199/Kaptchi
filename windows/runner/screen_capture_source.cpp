@@ -128,7 +128,6 @@ std::vector<MonitorInfo> ScreenCaptureSource::EnumerateMonitors() {
     device->Release();
     if (context) context->Release();
     
-    std::cout << "[ScreenCapture] Found " << monitors.size() << " monitor(s)" << std::endl;
     return monitors;
 }
 

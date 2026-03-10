@@ -14,6 +14,7 @@ add_executable(${BINARY_NAME} WIN32
   "native_camera.cpp"
   "screen_capture_source.cpp"
   "whiteboard_canvas.cpp"
+  "whiteboard_canvas_process.cpp"
   "whiteboard_enhance.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"

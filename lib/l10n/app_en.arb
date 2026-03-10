@@ -194,5 +194,7 @@
   "enableWhiteboard": "Enable Whiteboard Capture",
   "disableWhiteboard": "Disable Whiteboard Capture",
   "resetWhiteboard": "Reset Whiteboard",
-  "toggleCanvasView": "Toggle Canvas View"
+  "toggleCanvasView": "Toggle Canvas View",
+  "showRawView": "Show Raw View",
+  "showStrokeView": "Show Stroke View"
 }
