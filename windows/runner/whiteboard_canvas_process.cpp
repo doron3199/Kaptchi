@@ -24,8 +24,8 @@ constexpr size_t kMaxFrameBytes =
     static_cast<size_t>(kMaxFrameWidth) * static_cast<size_t>(kMaxFrameHeight) * 3;
 constexpr size_t kMaxMaskBytes =
     static_cast<size_t>(kMaxFrameWidth) * static_cast<size_t>(kMaxFrameHeight);
-constexpr int kMaxOverviewWidth = 1920;
-constexpr int kMaxOverviewHeight = 1080;
+constexpr int kMaxOverviewWidth = 4096;
+constexpr int kMaxOverviewHeight = 4096;
 constexpr size_t kMaxOverviewBytes =
     static_cast<size_t>(kMaxOverviewWidth) * static_cast<size_t>(kMaxOverviewHeight) * 3;
 constexpr DWORD kFrameSubmitLockTimeoutMs = 8;
@@ -278,11 +278,24 @@ public:
             }
 
             const bool has_content = canvas.HasContent();
-            const bool canvas_view_mode = canvas.IsCanvasViewMode();
+            if (has_content) {
+                cv::Size viewport_size = snapshot.viewport_size;
+                if (!IsValidFrameSize(viewport_size.width, viewport_size.height)) {
+                    viewport_size = latest_output_size;
+                }
 
-            if (has_content && latest_output_size.width > 0 && latest_output_size.height > 0) {
-                // Cap overview size to fit shared memory buffer.
-                cv::Size overview_size = latest_output_size;
+                if (IsValidFrameSize(viewport_size.width, viewport_size.height)) {
+                    cv::Mat viewport;
+                    if (canvas.GetViewport(snapshot.pan_x, snapshot.pan_y, snapshot.zoom,
+                                           viewport_size, viewport)) {
+                        last_viewport = viewport;
+                    }
+                }
+
+                cv::Size overview_size = snapshot.overview_size;
+                if (!IsValidOverviewSize(overview_size.width, overview_size.height)) {
+                    overview_size = latest_output_size;
+                }
                 if (overview_size.width > kMaxOverviewWidth || overview_size.height > kMaxOverviewHeight) {
                     const float scale = std::min(
                         static_cast<float>(kMaxOverviewWidth) / overview_size.width,
@@ -291,13 +304,15 @@ public:
                     overview_size.height = static_cast<int>(overview_size.height * scale);
                 }
 
-                cv::Mat overview;
-                if (canvas.GetOverviewBlocking(overview_size, overview)) {
-                    last_overview = overview;
-                    if (canvas_view_mode) {
-                        last_viewport = overview;
+                if (IsValidOverviewSize(overview_size.width, overview_size.height)) {
+                    cv::Mat overview;
+                    if (canvas.GetOverviewBlocking(overview_size, overview)) {
+                        last_overview = overview;
                     }
                 }
+            } else {
+                last_viewport.release();
+                last_overview.release();
             }
 
             WriteResults(canvas, last_viewport, last_overview);
@@ -434,6 +449,9 @@ private:
             std::memcpy(shared_->viewport_bgr, viewport.data, viewport_bytes);
             shared_->viewport_width = viewport.cols;
             shared_->viewport_height = viewport.rows;
+        } else {
+            shared_->viewport_width = 0;
+            shared_->viewport_height = 0;
         }
 
         if (!overview.empty() && IsValidOverviewSize(overview.cols, overview.rows)) {
@@ -441,6 +459,9 @@ private:
             std::memcpy(shared_->overview_bgr, overview.data, overview_bytes);
             shared_->overview_width = overview.cols;
             shared_->overview_height = overview.rows;
+        } else {
+            shared_->overview_width = 0;
+            shared_->overview_height = 0;
         }
 
         Unlock(mutex_.get());
@@ -593,13 +614,49 @@ bool WhiteboardCanvasHelperClient::Start() {
 
     STARTUPINFOW startup_info = {};
     startup_info.cb = sizeof(startup_info);
+    ScopedHandle child_stdin;
+    ScopedHandle child_stdout;
+    ScopedHandle child_stderr;
+    const HANDLE current_process = GetCurrentProcess();
+    auto duplicate_inheritable_handle = [&](DWORD std_handle_id, ScopedHandle& target) {
+        const HANDLE source = GetStdHandle(std_handle_id);
+        if (!source || source == INVALID_HANDLE_VALUE) {
+            return false;
+        }
+
+        HANDLE duplicated = nullptr;
+        if (!DuplicateHandle(current_process,
+                             source,
+                             current_process,
+                             &duplicated,
+                             0,
+                             TRUE,
+                             DUPLICATE_SAME_ACCESS)) {
+            return false;
+        }
+
+        target.reset(duplicated);
+        return true;
+    };
+    const bool has_stdout = duplicate_inheritable_handle(STD_OUTPUT_HANDLE, child_stdout);
+    const bool has_stderr = duplicate_inheritable_handle(STD_ERROR_HANDLE, child_stderr);
+    const bool has_stdin = duplicate_inheritable_handle(STD_INPUT_HANDLE, child_stdin);
+    const bool use_inherited_console_handles = has_stdout || has_stderr;
+    if (use_inherited_console_handles) {
+        startup_info.dwFlags |= STARTF_USESTDHANDLES;
+        startup_info.hStdInput = has_stdin ? child_stdin.get() : nullptr;
+        startup_info.hStdOutput = has_stdout ? child_stdout.get()
+                                             : (has_stderr ? child_stderr.get() : nullptr);
+        startup_info.hStdError = has_stderr ? child_stderr.get()
+                                            : (has_stdout ? child_stdout.get() : nullptr);
+    }
     PROCESS_INFORMATION process_info = {};
     if (!CreateProcessW(
             exe_path,
             command_line.data(),
             nullptr,
             nullptr,
-            FALSE,
+            use_inherited_console_handles ? TRUE : FALSE,
             0,
             nullptr,
             nullptr,
@@ -699,6 +756,8 @@ bool WhiteboardCanvasHelperClient::GetViewport(float panX, float panY, float zoo
         impl_->shared->pan_x = panX;
         impl_->shared->pan_y = panY;
         impl_->shared->zoom = zoom;
+        impl_->shared->viewport_req_width = viewSize.width;
+        impl_->shared->viewport_req_height = viewSize.height;
 
         int source_width = impl_->shared->viewport_width;
         int source_height = impl_->shared->viewport_height;
@@ -720,6 +779,7 @@ bool WhiteboardCanvasHelperClient::GetViewport(float panX, float panY, float zoo
             success = true;
         }
     });
+    impl_->SignalHelper();
     return success;
 }
 
@@ -729,6 +789,8 @@ bool WhiteboardCanvasHelperClient::GetOverview(cv::Size viewSize, cv::Mat& out_f
     bool success = false;
     impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
         impl_->RefreshCachedStateUnsafe();
+        impl_->shared->overview_req_width = viewSize.width;
+        impl_->shared->overview_req_height = viewSize.height;
 
         const int source_width = impl_->shared->overview_width;
         const int source_height = impl_->shared->overview_height;
@@ -743,6 +805,7 @@ bool WhiteboardCanvasHelperClient::GetOverview(cv::Size viewSize, cv::Mat& out_f
             success = true;
         }
     });
+    impl_->SignalHelper();
     return success;
 }
 

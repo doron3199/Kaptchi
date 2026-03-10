@@ -205,28 +205,46 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
   }
 
   void _updatePanFromOverview(Offset localPosition, Size size) {
-    if (_canvasSize.width <= 0) return;
+    if (_canvasSize.width <= 0 || _canvasSize.height <= 0) return;
 
     final contentRect = _contentRect(size);
     if (contentRect.width <= 0 || contentRect.height <= 0) return;
 
     final metrics = _viewportMetrics();
-    if (metrics.maxCx <= 0) return;
 
     final localX = (localPosition.dx - contentRect.left).clamp(
       0.0,
       contentRect.width,
     );
-    final targetCenterX = (localX / contentRect.width) * _canvasSize.width;
-    final nextCx = (targetCenterX - (metrics.roiW / 2)).clamp(
+    final localY = (localPosition.dy - contentRect.top).clamp(
       0.0,
-      metrics.maxCx,
+      contentRect.height,
     );
-    final nextPanX = nextCx / metrics.maxCx;
+
+    final targetCenterX = (localX / contentRect.width) * _canvasSize.width;
+    final targetCenterY = (localY / contentRect.height) * _canvasSize.height;
+
+    double nextPanX = widget.panX;
+    double nextPanY = widget.panY;
+
+    if (metrics.maxCx > 0) {
+      final nextCx = (targetCenterX - (metrics.roiW / 2)).clamp(
+        0.0,
+        metrics.maxCx,
+      );
+      nextPanX = nextCx / metrics.maxCx;
+    }
+    if (metrics.maxCy > 0) {
+      final nextCy = (targetCenterY - (metrics.roiH / 2)).clamp(
+        0.0,
+        metrics.maxCy,
+      );
+      nextPanY = nextCy / metrics.maxCy;
+    }
 
     widget.onViewportChanged((
       panX: nextPanX,
-      panY: widget.panY,
+      panY: nextPanY,
       zoom: widget.zoom,
     ));
   }
@@ -269,7 +287,7 @@ class _CanvasOverviewBarState extends State<CanvasOverviewBar> {
                 behavior: HitTestBehavior.opaque,
                 onTapDown: (details) =>
                     _updatePanFromOverview(details.localPosition, size),
-                onHorizontalDragUpdate: (details) =>
+                onPanUpdate: (details) =>
                     _updatePanFromOverview(details.localPosition, size),
                 child: ColoredBox(
                   color: Colors.white,

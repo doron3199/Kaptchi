@@ -2,9 +2,12 @@
 #include "screen_capture_source.h"
 #include "whiteboard_canvas.h"
 #include "whiteboard_enhance.h"
+#include <algorithm>
 #include <iostream>
 #include <cmath>
 #include <chrono>
+#include <sstream>
+#include <unordered_map>
 #include <objbase.h>
 #include <opencv2/core/utils/logger.hpp>
 #include <opencv2/dnn.hpp>
@@ -33,6 +36,8 @@ namespace {
 static constexpr int kYoloPerfLogMinFrames = 30;
 static const auto kYoloPerfLogMinInterval = std::chrono::seconds(10);
 static const auto kWhiteboardBridgeLogInterval = std::chrono::seconds(10);
+static const auto kDisplayTraceLogInterval = std::chrono::seconds(3);
+static const auto kFilterFrameTraceInterval = std::chrono::seconds(2);
 
 struct YoloPerfStats {
     double inference_ms = 0.0;
@@ -55,10 +60,169 @@ struct WhiteboardBridgePerfStats {
 
 static WhiteboardBridgePerfStats g_whiteboard_bridge_perf_stats;
 
+struct DisplayTraceStats {
+    int frames = 0;
+    int canvas_view_frames = 0;
+    int overview_success = 0;
+    int overview_fail = 0;
+    int fallback_frames = 0;
+    int source_empty = 0;
+    int blackish_frames = 0;
+    cv::Size last_size;
+    double last_mean_luma = 0.0;
+    double last_dark_ratio = 0.0;
+    std::chrono::time_point<std::chrono::steady_clock> last_log =
+        std::chrono::steady_clock::now();
+};
+
+static DisplayTraceStats g_display_trace_stats;
+static std::mutex g_display_trace_mutex;
+static std::unordered_map<int, std::chrono::time_point<std::chrono::steady_clock>>
+    g_filter_frame_trace_last_log;
+static std::mutex g_filter_frame_trace_mutex;
+
 static double DurationMs(
     const std::chrono::steady_clock::time_point& start,
     const std::chrono::steady_clock::time_point& end) {
     return std::chrono::duration<double, std::milli>(end - start).count();
+}
+
+static const char* FilterModeName(int mode) {
+    switch (mode) {
+        case 1: return "Invert";
+        case 2: return "WhiteboardLegacy";
+        case 3: return "BlurLegacy";
+        case 4: return "SmartWhiteboard";
+        case 5: return "SmartObstacle";
+        case 6: return "MovingAverage";
+        case 7: return "CLAHE";
+        case 8: return "Sharpening";
+        case 11: return "PersonRemoval";
+        case 12: return "ShakingStabilization";
+        case 13: return "LightStabilization";
+        case 14: return "CornerSmoothing";
+        case 15: return "SmartVideoCrop";
+        case 16: return "WhiteboardEnhance";
+        default: return "Unknown";
+    }
+}
+
+static bool ComputeFrameLumaStats(const cv::Mat& frame,
+                                  double& mean_luma,
+                                  double& min_luma,
+                                  double& max_luma,
+                                  double& dark_ratio) {
+    if (frame.empty()) return false;
+
+    cv::Mat sample;
+    if (frame.cols > 320 || frame.rows > 180) {
+        const double scale = std::min(320.0 / std::max(1, frame.cols),
+                                      180.0 / std::max(1, frame.rows));
+        cv::resize(frame, sample, cv::Size(), scale, scale, cv::INTER_AREA);
+    } else {
+        sample = frame;
+    }
+
+    cv::Mat gray;
+    if (sample.channels() == 4) {
+        cv::cvtColor(sample, gray, cv::COLOR_RGBA2GRAY);
+    } else if (sample.channels() == 3) {
+        cv::cvtColor(sample, gray, cv::COLOR_BGR2GRAY);
+    } else {
+        gray = sample;
+    }
+
+    mean_luma = cv::mean(gray)[0];
+    cv::minMaxLoc(gray, &min_luma, &max_luma);
+    cv::Mat dark_mask;
+    cv::compare(gray, 12, dark_mask, cv::CMP_LE);
+    dark_ratio = gray.total() > 0
+        ? static_cast<double>(cv::countNonZero(dark_mask)) /
+              static_cast<double>(gray.total())
+        : 0.0;
+    return true;
+}
+
+static void MaybeLogFilterFrameTrace(int mode, const cv::Mat& frame) {
+    if (frame.empty() || (mode != 2 && mode != 4 && mode != 16)) return;
+
+    const auto now = std::chrono::steady_clock::now();
+    {
+        std::lock_guard<std::mutex> lock(g_filter_frame_trace_mutex);
+        const auto it = g_filter_frame_trace_last_log.find(mode);
+        if (it != g_filter_frame_trace_last_log.end() &&
+            (now - it->second) < kFilterFrameTraceInterval) {
+            return;
+        }
+        g_filter_frame_trace_last_log[mode] = now;
+    }
+
+    double mean_luma = 0.0;
+    double min_luma = 0.0;
+    double max_luma = 0.0;
+    double dark_ratio = 0.0;
+    if (!ComputeFrameLumaStats(frame, mean_luma, min_luma, max_luma, dark_ratio)) {
+        return;
+    }
+
+    std::cout << "[FilterFrameTrace] mode=" << mode
+              << " name=" << FilterModeName(mode)
+              << " size=" << frame.cols << "x" << frame.rows
+              << " mean=" << mean_luma
+              << " min=" << min_luma
+              << " max=" << max_luma
+              << " darkRatio=" << dark_ratio
+              << std::endl;
+}
+
+static void NoteDisplayFrame(const char* stage,
+                             const cv::Mat& frame,
+                             bool canvas_view_requested,
+                             bool overview_success,
+                             bool used_fallback_frame,
+                             bool source_empty) {
+    std::lock_guard<std::mutex> lock(g_display_trace_mutex);
+    auto& stats = g_display_trace_stats;
+    stats.frames++;
+    if (canvas_view_requested) stats.canvas_view_frames++;
+    if (canvas_view_requested && overview_success) stats.overview_success++;
+    if (canvas_view_requested && !overview_success) stats.overview_fail++;
+    if (used_fallback_frame) stats.fallback_frames++;
+    if (source_empty) stats.source_empty++;
+
+    double mean_luma = 0.0;
+    double min_luma = 0.0;
+    double max_luma = 0.0;
+    double dark_ratio = 0.0;
+    if (ComputeFrameLumaStats(frame, mean_luma, min_luma, max_luma, dark_ratio)) {
+        stats.last_size = frame.size();
+        stats.last_mean_luma = mean_luma;
+        stats.last_dark_ratio = dark_ratio;
+        if (dark_ratio >= 0.98) {
+            stats.blackish_frames++;
+        }
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if ((now - stats.last_log) < kDisplayTraceLogInterval) {
+        return;
+    }
+
+    std::cout << "[NativeDisplayTrace] stage=" << stage
+              << " frames=" << stats.frames
+              << " canvasViewFrames=" << stats.canvas_view_frames
+              << " overviewOk=" << stats.overview_success
+              << " overviewFail=" << stats.overview_fail
+              << " fallback=" << stats.fallback_frames
+              << " sourceEmpty=" << stats.source_empty
+              << " blackish=" << stats.blackish_frames
+              << " lastSize=" << stats.last_size.width << "x" << stats.last_size.height
+              << " lastMean=" << stats.last_mean_luma
+              << " lastDarkRatio=" << stats.last_dark_ratio
+              << std::endl;
+
+    g_display_trace_stats = DisplayTraceStats();
+    g_display_trace_stats.last_log = now;
 }
 
 static void MaybePrintYoloPerfLog() {
@@ -124,7 +288,6 @@ static void MaybePrintWhiteboardBridgePerfLog(bool remote_process,
 } // namespace
 
 // --- Filter Parameters ---
-#include <unordered_map>
 static std::unordered_map<int, float> g_filter_params;
 static std::mutex g_filter_params_mutex;
 
@@ -316,9 +479,17 @@ void NativeCamera::SetResolution(int width, int height) {
 void NativeCamera::SetFilterSequence(int* filters, int count) {
     std::lock_guard<std::mutex> lock(mutex_);
     active_filters_.clear();
+    std::ostringstream stream;
+    stream << "[NativeCamera] Active filters=";
     for (int i = 0; i < count; i++) {
         active_filters_.push_back(filters[i]);
+        if (i > 0) stream << ", ";
+        stream << filters[i] << ':' << FilterModeName(filters[i]);
     }
+    if (count == 0) {
+        stream << "none";
+    }
+    std::cout << stream.str() << std::endl;
 }
 
 void NativeCamera::GetFrameData(uint8_t* buffer, int32_t size) {
@@ -495,30 +666,45 @@ void NativeCamera::RefreshDisplayFrame() {
         }
     }
 
-    if (source_bgr.empty()) return;
-
-    cv::Mat display_bgr = source_bgr.clone();
-    bool showing_canvas = false;
-    static cv::Mat last_canvas_frame;
-    static cv::Mat canvas_hold_frame;
-
     const bool canvas_view_requested =
         g_whiteboard_enabled.load() && g_whiteboard_canvas &&
         g_whiteboard_canvas->IsCanvasViewMode();
+
+    if (source_bgr.empty()) {
+        NoteDisplayFrame(
+            "RefreshDisplayFrame",
+            source_bgr,
+            canvas_view_requested,
+            false,
+            false,
+            true);
+        return;
+    }
+
+    cv::Mat display_bgr = source_bgr.clone();
+    bool showing_canvas = false;
+    bool overview_success = false;
+    bool used_fallback_frame = false;
+    static cv::Mat last_canvas_frame;
+    static cv::Mat canvas_hold_frame;
 
     if (canvas_view_requested) {
         const bool has_canvas_content = g_whiteboard_canvas->HasContent();
         if (has_canvas_content) {
             cv::Mat canvas_out;
-            if (g_whiteboard_canvas->GetOverview(display_bgr.size(), canvas_out)) {
+            if (g_whiteboard_canvas->GetOverview(
+                    display_bgr.size(),
+                    canvas_out)) {
                 display_bgr = canvas_out;
                 canvas_out.copyTo(last_canvas_frame);
                 canvas_hold_frame.release();
                 showing_canvas = true;
+                overview_success = true;
             } else if (!last_canvas_frame.empty() &&
                        last_canvas_frame.size() == display_bgr.size()) {
                 last_canvas_frame.copyTo(display_bgr);
                 showing_canvas = true;
+                used_fallback_frame = true;
             }
         }
 
@@ -531,6 +717,7 @@ void NativeCamera::RefreshDisplayFrame() {
             }
             canvas_hold_frame.copyTo(display_bgr);
             showing_canvas = true;
+            used_fallback_frame = true;
         }
     } else {
         last_canvas_frame.release();
@@ -545,6 +732,14 @@ void NativeCamera::RefreshDisplayFrame() {
         std::lock_guard<std::mutex> lock(mutex_);
         cv::cvtColor(display_bgr, current_frame_, cv::COLOR_BGR2RGBA);
     }
+
+    NoteDisplayFrame(
+        "RefreshDisplayFrame",
+        display_bgr,
+        canvas_view_requested,
+        overview_success,
+        used_fallback_frame,
+        false);
 
     texture_registrar_->MarkTextureFrameAvailable(texture_id_);
 }
@@ -580,6 +775,8 @@ void NativeCamera::ProcessingThreadLoop() {
             cv::Mat personMask;
             const bool canvas_view_requested = g_whiteboard_canvas->IsCanvasViewMode();
             const bool remote_process = g_whiteboard_canvas->IsRemoteProcess();
+            bool overview_success = false;
+            bool used_fallback_frame = false;
             if (!g_whiteboard_canvas->IsRemoteProcess()) {
                 const auto yolo_start = std::chrono::steady_clock::now();
                 personMask = GetWhiteboardPersonMask(frame);
@@ -597,14 +794,16 @@ void NativeCamera::ProcessingThreadLoop() {
             bool showing_canvas = false;
             
             // If canvas view mode is active and we have content, replace the
-            // live frame with the latest finished canvas. The whiteboard loop
-            // only consumes source frames; zoom/pan are handled locally by Flutter.
+            // live frame with the latest finished canvas viewport. The Flutter
+            // overview bar drives the panorama pan/zoom through SetPanoramaViewport.
             if (canvas_view_requested) {
                 const bool has_canvas_content = g_whiteboard_canvas->HasContent();
                 if (has_canvas_content) {
                     cv::Mat canvas_out;
                     const bool got_lock =
-                        g_whiteboard_canvas->GetOverview(frame.size(), canvas_out);
+                        g_whiteboard_canvas->GetOverview(
+                            frame.size(),
+                            canvas_out);
 
                     if (got_lock) {
                         canvas_out.copyTo(frame);
@@ -612,12 +811,14 @@ void NativeCamera::ProcessingThreadLoop() {
                         canvas_hold_frame.release();
                         g_whiteboard_bridge_perf_stats.canvas_frames++;
                         showing_canvas = true;
+                        overview_success = true;
                     } else if (!last_canvas_frame.empty() &&
                                last_canvas_frame.size() == frame.size()) {
                         // Keep showing the last mapped canvas instead of falling back to live.
                         last_canvas_frame.copyTo(frame);
                         g_whiteboard_bridge_perf_stats.canvas_misses++;
                         showing_canvas = true;
+                        used_fallback_frame = true;
                     }
                 }
 
@@ -631,6 +832,7 @@ void NativeCamera::ProcessingThreadLoop() {
                     canvas_hold_frame.copyTo(frame);
                     g_whiteboard_bridge_perf_stats.canvas_misses++;
                     showing_canvas = true;
+                    used_fallback_frame = true;
                 }
             } else {
                 last_canvas_frame.release();
@@ -641,6 +843,14 @@ void NativeCamera::ProcessingThreadLoop() {
                 remote_process,
                 canvas_view_requested,
                 g_whiteboard_canvas->HasContent());
+
+            NoteDisplayFrame(
+                "ProcessingThreadLoop",
+                frame,
+                canvas_view_requested,
+                overview_success,
+                used_fallback_frame,
+                false);
         }
         
         // Only apply camera filters if we are NOT showing the canvas
@@ -1465,10 +1675,12 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
             cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
             cv::adaptiveThreshold(gray, gray, 255, cv::ADAPTIVE_THRESH_GAUSSIAN_C, cv::THRESH_BINARY, 21, (int)c_value);
             cv::cvtColor(gray, bgr, cv::COLOR_GRAY2BGR);
+            MaybeLogFilterFrameTrace(mode, bgr);
         } else if (mode == 3) { // Blur Legacy
             cv::GaussianBlur(bgr, bgr, cv::Size(15, 15), 0);
         } else if (mode == 4) { // Smart Whiteboard
             ApplySmartWhiteboard(bgr);
+            MaybeLogFilterFrameTrace(mode, bgr);
         } else if (mode == 5) { // Smart Obstacle
             ApplySmartObstacleRemoval(bgr);
         } else if (mode == 6) { // Moving Average
@@ -1495,6 +1707,7 @@ void ApplyFilterSequenceInternal(cv::Mat& bgr, int32_t* modes, int32_t count) {
                 if (it != g_filter_params.end()) dog_threshold = it->second;
             }
             bgr = WhiteboardEnhance(bgr, dog_threshold);
+            MaybeLogFilterFrameTrace(mode, bgr);
         }
     }
 }
