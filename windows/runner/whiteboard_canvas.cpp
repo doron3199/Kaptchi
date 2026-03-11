@@ -4,8 +4,8 @@
 // PIPELINE OVERVIEW (runs on worker thread, once per accepted frame):
 //
 //   +---------------+
-//   | [1] Motion    |  Frame-diff vs previous. Skip if < 0.1% pixels changed
-//   |     Gate      |  (patience counter forces processing after 30 still frames)
+//   | [1] Motion    |  Frame-diff vs previous. Skip if motion is too small
+//   |     Gate      |  or too large; still frames force processing after 8 skips.
 //   +-------+-------+
 //           |
 //   +-------v-------+
@@ -444,7 +444,7 @@ void WhiteboardCanvas::Reset() {
     if (remote_process_ && helper_client_) {
         helper_client_->Reset();
         has_content_ = false;
-        has_smoothed_pos_ = false;
+    
         return;
     }
 
@@ -458,7 +458,7 @@ void WhiteboardCanvas::Reset() {
     active_group_idx_ = -1;
     view_group_idx_   = -1;
     global_camera_pos_ = cv::Point2f(0, 0);
-    has_smoothed_pos_ = false;
+
     prev_gray_ = cv::Mat();
     canvas_contours_.clear();
     canvas_contours_dirty_ = true;
@@ -474,6 +474,8 @@ void WhiteboardCanvas::Reset() {
     frame_h_ = 0;
     frames_since_warp_ = 0;
     matched_frame_counter_ = 0;
+    motion_frame_counter_ = 0;
+
     perf_stats_ = PerformanceStats();
     perf_stats_.last_print_time = std::chrono::steady_clock::now();
     WhiteboardLog("[WhiteboardCanvas] Reset");
@@ -653,10 +655,14 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     // -------------------------------------------------------------------
     // STAGE 1: Motion gate
     // -------------------------------------------------------------------
-    float motion_fraction = 1.0f;
+    float motion_fraction = 0.0f;
 
     if (kEnableMotionGate) {
         cv::Mat motion_gray;
+        const bool has_content = has_content_.load();
+        bool has_motion_reference = false;
+        bool motion_too_low = false;
+        bool motion_too_high = false;
         const float motion_scale = ComputeScaleForLongEdge(gray.size(), kMotionLongEdge);
         if (motion_scale < 0.999f) {
             cv::resize(gray, motion_gray, cv::Size(), motion_scale, motion_scale,
@@ -666,6 +672,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         }
 
         if (!prev_gray_.empty() && prev_gray_.size() == motion_gray.size()) {
+            has_motion_reference = true;
             cv::Mat diff;
             cv::absdiff(motion_gray, prev_gray_, diff);
             cv::threshold(diff, diff, 10, 255, cv::THRESH_BINARY);
@@ -675,9 +682,47 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
         motion_gray.copyTo(prev_gray_);
 
-        if (has_content_.load() && motion_fraction < kMinMotionFraction &&
-            frames_since_warp_ < kStillFramePatience) {
+        if (has_content && has_motion_reference) {
+            motion_too_low = motion_fraction < kMinMotionFraction &&
+                             frames_since_warp_ < kStillFramePatience;
+            motion_too_high = motion_fraction > kMaxMotionFraction;
+        }
+
+        if (motion_too_low) {
             frames_since_warp_++;
+        } else {
+            frames_since_warp_ = 0;
+        }
+
+        // Force-process every N frames regardless of motion
+        motion_frame_counter_++;
+        bool force_process = (kMotionForceInterval > 0)
+                           && (motion_frame_counter_ >= kMotionForceInterval);
+        if (force_process) {
+            motion_frame_counter_ = 0;
+        }
+
+        {
+            std::ostringstream stream;
+            stream << std::fixed << std::setprecision(4)
+                   << "[WhiteboardMotion] motion=" << motion_fraction
+                   << " pct=" << (motion_fraction * 100.0f)
+                   << " min=" << kMinMotionFraction
+                   << " max=" << kMaxMotionFraction
+                   << " hasPrev=" << (has_motion_reference ? 1 : 0)
+                   << " hasContent=" << (has_content ? 1 : 0)
+                   << " stillFrames=" << frames_since_warp_
+                   << " forceIn=" << (kMotionForceInterval - motion_frame_counter_)
+                   << " gate="
+                   << (force_process ? "forced"
+                                     : motion_too_low ? "below-min"
+                                      : motion_too_high ? "above-max"
+                                                        : has_motion_reference ? "pass"
+                                                                               : "warmup");
+            WhiteboardLog(stream.str());
+        }
+
+        if (!force_process && (motion_too_low || motion_too_high)) {
 
             auto t_motion = std::chrono::steady_clock::now();
             perf_stats_.stage1_motion_ms +=
@@ -690,13 +735,13 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                 ds.binary = cv::Mat(gray.size(), CV_8U, cv::Scalar(0));
                 ds.person_mask = person_mask;
                 ds.motion_fraction = motion_fraction;
-                ds.match_status = "motion-gated";
+                ds.match_status = motion_too_low
+                    ? "motion-gated-low"
+                    : "motion-gated-high";
                 RenderDebugGrid(ds);
             }
             return;
         }
-
-        frames_since_warp_ = 0;
     }
 
     auto t_motion = std::chrono::steady_clock::now();
@@ -788,52 +833,67 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
         for (const auto& cc : canvas_contours_) {
             for (const auto& fc : frame_contours) {
-                if (kEnableContourAreaFilter) {
-                    const double area_ratio = (cc.area > fc.area)
-                        ? cc.area / fc.area
-                        : fc.area / cc.area;
-                    if (area_ratio > kMaxAreaRatio) {
-                        continue;
-                    }
-                }
-
-                double dist = 0.0;
-                if (kEnableFastHuDistanceMatching) {
-                    for (int i = 0; i < 7; i++) {
-                        dist += std::abs(cc.log_hu[i] - fc.log_hu[i]);
-                    }
-                } else {
-                    dist = cv::matchShapes(cc.contour, fc.contour,
-                                           cv::CONTOURS_MATCH_I2, 0);
-                }
-
+                double dist = cv::matchShapes(cc.contour, fc.contour,
+                                              cv::CONTOURS_MATCH_I2, 0);
                 if (dist > kMaxShapeDist) continue;
                 accepted_pair_count++;
 
                 float dx = cc.centroid.x - fc.centroid.x;
                 float dy = cc.centroid.y - fc.centroid.y;
 
-                int bin_x = (int)std::round(dx / 10.0f) * 10;
-                int bin_y = (int)std::round(dy / 10.0f) * 10;
+                int bin_x = (int)std::round(dx / (float)kVoteBinSize) * kVoteBinSize;
+                int bin_y = (int)std::round(dy / (float)kVoteBinSize) * kVoteBinSize;
                 int64_t key = (static_cast<int64_t>(static_cast<uint32_t>(bin_x)) << 32)
                             | static_cast<uint32_t>(bin_y);
                 votes[key].push_back(cv::Point2f(dx, dy));
             }
         }
 
+        // Find the bin with most votes
+        int64_t best_key = 0;
         for (const auto& vote : votes) {
             const int vote_count = (int)vote.second.size();
-            if (vote_count <= best_votes) continue;
+            if (vote_count > best_votes) {
+                best_votes = vote_count;
+                best_key = vote.first;
+            }
+        }
 
-            best_votes = vote_count;
-            float sum_dx = 0.0f;
-            float sum_dy = 0.0f;
-            for (const auto& pt : vote.second) {
-                sum_dx += pt.x;
-                sum_dy += pt.y;
+        if (best_votes > 0) {
+            // Collect votes: optionally merge with 8 neighbor bins
+            std::vector<cv::Point2f> merged;
+            if (kEnableNeighborBinMerge) {
+                int center_bx = (int)(int32_t)(uint32_t)(best_key >> 32);
+                int center_by = (int)(int32_t)(uint32_t)(best_key & 0xFFFFFFFF);
+                for (int nx = -1; nx <= 1; nx++) {
+                    for (int ny = -1; ny <= 1; ny++) {
+                        int nbx = center_bx + nx * kVoteBinSize;
+                        int nby = center_by + ny * kVoteBinSize;
+                        int64_t nkey = (static_cast<int64_t>(static_cast<uint32_t>(nbx)) << 32)
+                                     | static_cast<uint32_t>(nby);
+                        auto it = votes.find(nkey);
+                        if (it != votes.end()) {
+                            merged.insert(merged.end(), it->second.begin(), it->second.end());
+                        }
+                    }
+                }
+                best_votes = (int)merged.size();
+            } else {
+                merged = votes[best_key];
             }
 
-            matched_pos = cv::Point2f(sum_dx / best_votes, sum_dy / best_votes);
+            // Median of merged pool (robust to outlier pairs)
+            std::vector<float> dxs, dys;
+            dxs.reserve(merged.size());
+            dys.reserve(merged.size());
+            for (const auto& pt : merged) {
+                dxs.push_back(pt.x);
+                dys.push_back(pt.y);
+            }
+            std::sort(dxs.begin(), dxs.end());
+            std::sort(dys.begin(), dys.end());
+            int mid = (int)merged.size() / 2;
+            matched_pos = cv::Point2f(dxs[mid], dys[mid]);
         }
 
         if (best_votes >= kMinShapeVotes) {
@@ -864,23 +924,40 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     // STAGE 5: Paint to chunks or create a new group
     // -------------------------------------------------------------------
     if (best_group_idx >= 0) {
-        if (kEnablePositionSmoothing) {
-            if (has_smoothed_pos_) {
-                global_camera_pos_ = cv::Point2f(
-                    kPositionEmaAlpha * matched_pos.x +
-                        (1.0f - kPositionEmaAlpha) * global_camera_pos_.x,
-                    kPositionEmaAlpha * matched_pos.y +
-                        (1.0f - kPositionEmaAlpha) * global_camera_pos_.y);
-            } else {
-                global_camera_pos_ = matched_pos;
-                has_smoothed_pos_ = true;
+        auto& group = *groups_[best_group_idx];
+
+        // --- Phase correlation: sub-pixel refinement ---
+        if (kEnablePhaseCorrelation) {
+            cv::Mat canvas_gray_roi = GetCanvasGrayRegion(
+                group, (int)std::round(matched_pos.x), (int)std::round(matched_pos.y),
+                frame.cols, frame.rows);
+            if (!canvas_gray_roi.empty() && canvas_gray_roi.size() == gray.size()) {
+                cv::Mat frame_f, canvas_f;
+                gray.convertTo(frame_f, CV_32F);
+                canvas_gray_roi.convertTo(canvas_f, CV_32F);
+                cv::Mat hann;
+                cv::createHanningWindow(hann, frame_f.size(), CV_32F);
+                cv::Point2d subpx = cv::phaseCorrelate(canvas_f, frame_f, hann);
+                // Only apply small corrections (< half bin size)
+                if (std::abs(subpx.x) < kVoteBinSize && std::abs(subpx.y) < kVoteBinSize) {
+                    matched_pos.x += (float)subpx.x;
+                    matched_pos.y += (float)subpx.y;
+                }
             }
-        } else {
-            global_camera_pos_ = matched_pos;
-            has_smoothed_pos_ = false;
         }
 
-        auto& group = *groups_[best_group_idx];
+        // --- Jump rejection ---
+        if (kEnableJumpRejection && matched_frame_counter_ > 0) {
+            float jump = (float)cv::norm(matched_pos - global_camera_pos_);
+            if (jump > kMaxJumpPx) {
+                WhiteboardLog("[WhiteboardCanvas] Jump rejected: "
+                              + std::to_string(jump) + "px (max="
+                              + std::to_string(kMaxJumpPx) + ")");
+                matched_pos = global_camera_pos_;
+            }
+        }
+
+        global_camera_pos_ = matched_pos;
 
         PaintStrokesToChunks(group, binary, stroke_paint_bgr, global_camera_pos_,
                      person_mask_dilated);
@@ -950,8 +1027,6 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                    << " avgCanvasContours=" << (perf_stats_.total_canvas_contours / frames)
                    << " avgCandidatePairs=" << (perf_stats_.total_candidate_pairs / frames)
                    << " avgAcceptedPairs=" << (perf_stats_.total_accepted_pairs / frames)
-                   << " fastHu=" << (kEnableFastHuDistanceMatching ? 1 : 0)
-                   << " smoothing=" << (kEnablePositionSmoothing ? 1 : 0)
                    << " maxDist=" << kMaxShapeDist;
             WhiteboardLog(stream.str());
         }
@@ -1051,25 +1126,7 @@ WhiteboardCanvas::ExtractContourShapes(const cv::Mat& binary,
         shape.area = area;
         std::copy(hu, hu + 7, shape.hu);
 
-        const double eps = std::numeric_limits<double>::epsilon();
-        for (int i = 0; i < 7; i++) {
-            const double h = hu[i];
-            const double abs_h = std::abs(h);
-            shape.log_hu[i] = abs_h > eps
-                ? ((h > 0.0 ? 1.0 : -1.0) * std::log10(abs_h))
-                : 0.0;
-        }
-
         result.push_back(std::move(shape));
-    }
-
-    if (kEnableContourCountCap && static_cast<int>(result.size()) > kMaxContours) {
-        std::partial_sort(
-            result.begin(), result.begin() + kMaxContours, result.end(),
-            [](const ContourShape& a, const ContourShape& b) {
-                return a.area > b.area;
-            });
-        result.resize(kMaxContours);
     }
 
     return result;
@@ -1088,9 +1145,10 @@ void WhiteboardCanvas::RebuildCanvasContours(WhiteboardGroup& group) {
     if (group.stroke_render_cache.empty()) return;
 
     // Binarize the canvas rendering at full resolution (matching frame contours).
+    // Stroke cache is inverted (white strokes on black), so use THRESH_BINARY.
     cv::Mat gray, canvas_bin;
     cv::cvtColor(group.stroke_render_cache, gray, cv::COLOR_BGR2GRAY);
-    cv::threshold(gray, canvas_bin, 200, 255, cv::THRESH_BINARY_INV);
+    cv::threshold(gray, canvas_bin, 50, 255, cv::THRESH_BINARY);
 
     cv::Point2f offset((float)group.stroke_min_px_x,
                        (float)group.stroke_min_px_y);
@@ -1100,6 +1158,48 @@ void WhiteboardCanvas::RebuildCanvasContours(WhiteboardGroup& group) {
         stream << "[Canvas] Rebuilt contours: " << canvas_contours_.size();
         WhiteboardLog(stream.str());
     }
+}
+
+// Reads a frame-sized gray region from the raw canvas chunks at the given
+// global pixel position.  Returns empty Mat if the region is not fully covered.
+cv::Mat WhiteboardCanvas::GetCanvasGrayRegion(WhiteboardGroup& group,
+                                               int global_x, int global_y,
+                                               int width, int height) {
+    int gx0 = global_x, gy0 = global_y;
+    int gx1 = gx0 + width, gy1 = gy0 + height;
+
+    int sc_x = (int)std::floor((float)gx0 / kChunkSize);
+    int sc_y = (int)std::floor((float)gy0 / kChunkSize);
+    int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkSize);
+    int ec_y = (int)std::floor((float)(gy1 - 1) / kChunkSize);
+
+    // Check all required chunks exist
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            if (group.chunks.find(GetChunkHash(cx, cy)) == group.chunks.end()) {
+                return cv::Mat();
+            }
+        }
+    }
+
+    cv::Mat region(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            int cpx = cx * kChunkSize, cpy = cy * kChunkSize;
+            int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
+            int ix1 = std::min(cpx + kChunkSize, gx1);
+            int iy1 = std::min(cpy + kChunkSize, gy1);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
+            cv::Rect out_roi(ix0 - gx0, iy0 - gy0, ix1 - ix0, iy1 - iy0);
+            group.chunks[GetChunkHash(cx, cy)]->raw_canvas(chunk_roi).copyTo(region(out_roi));
+        }
+    }
+
+    cv::Mat gray_region;
+    cv::cvtColor(region, gray_region, cv::COLOR_BGR2GRAY);
+    return gray_region;
 }
 
 // ============================================================================
@@ -1214,13 +1314,15 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     // -----------------------------------------------------------------------
     // LAYER 1: Proximity Suppression
     // -----------------------------------------------------------------------
-    cv::Mat canvas_stroke_zone;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,
-        cv::Size(2 * kProximityRadius + 1, 2 * kProximityRadius + 1));
-    cv::dilate(existing, canvas_stroke_zone, kernel);
+    cv::Mat prox_allow_mask(footprint.size(), CV_8U, cv::Scalar(255));
 
-    cv::Mat prox_allow_mask;
-    cv::bitwise_not(canvas_stroke_zone, prox_allow_mask);
+    if (kEnableProximitySuppression) {
+        cv::Mat canvas_stroke_zone;
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+            cv::Size(2 * kProximityRadius + 1, 2 * kProximityRadius + 1));
+        cv::dilate(existing, canvas_stroke_zone, kernel);
+        cv::bitwise_not(canvas_stroke_zone, prox_allow_mask);
+    }
 
     cv::Mat update_allowed_mask;
     cv::bitwise_not(no_update_bbox, update_allowed_mask);
@@ -1232,62 +1334,64 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     cv::Mat cell_erase_mask(footprint.size(), CV_8U, cv::Scalar(0));
     cv::Mat ghost_block(footprint.size(), CV_8U, cv::Scalar(0));
 
-    for (int gy = 0; gy < footprint.rows; gy += kGridCellSize) {
-        for (int gx = 0; gx < footprint.cols; gx += kGridCellSize) {
-            int cw = std::min(kGridCellSize, footprint.cols - gx);
-            int ch = std::min(kGridCellSize, footprint.rows - gy);
-            cv::Rect cell(gx, gy, cw, ch);
+    if (kEnableGridReplace || kEnableGhostBlock || kEnableAbsenceErasure) {
+        for (int gy = 0; gy < footprint.rows; gy += kGridCellSize) {
+            for (int gx = 0; gx < footprint.cols; gx += kGridCellSize) {
+                int cw = std::min(kGridCellSize, footprint.cols - gx);
+                int ch = std::min(kGridCellSize, footprint.rows - gy);
+                cv::Rect cell(gx, gy, cw, ch);
 
-            if (cv::countNonZero(no_update_bbox(cell)) > 0) {
-                // Occluded region: preserve existing pixels and absence history.
-                // The lecturer becomes a no-update zone instead of delete evidence.
-                continue;
-            }
-
-            int new_count   = cv::countNonZero(new_strokes(cell));
-            int exist_count = cv::countNonZero(existing(cell));
-
-            // Layer 4: Absence Erasure
-            if (exist_count >= kMinCellStrokePixels && new_count < kAbsenceEraseThr) {
-                // Not enough strokes in incoming frame -> increment absence
-                absence_foot(cell) += 1;
-                cv::Mat absence_roi = absence_foot(cell);
-                cv::Mat erase_flag = (absence_roi >= kAbsenceEraseFrames);
-                if (cv::countNonZero(erase_flag) > 0) {
-                    cell_erase_mask(cell).setTo(255);
-                    absence_roi.setTo(0); // reset after erase
+                if (cv::countNonZero(no_update_bbox(cell)) > 0) {
+                    continue;
                 }
-                continue; // no need to evaluate replace/ghost
-            } else {
-                absence_foot(cell).setTo(0); 
-            }
 
-            if (exist_count < kMinCellStrokePixels || new_count == 0) continue;
+                int new_count   = cv::countNonZero(new_strokes(cell));
+                int exist_count = cv::countNonZero(existing(cell));
 
-            cv::Mat inter;
-            cv::bitwise_and(new_strokes(cell), existing(cell), inter);
-            int inter_count = cv::countNonZero(inter);
-            int union_count = new_count + exist_count - inter_count;
-            
-            float iou = (union_count > 0) ? (float)inter_count / (float)union_count : 0.0f;
-            float overlap = (float)inter_count / (float)new_count;
+                // Layer 4: Absence Erasure
+                if (kEnableAbsenceErasure
+                    && exist_count >= kMinCellStrokePixels && new_count < kAbsenceEraseThr) {
+                    absence_foot(cell) += 1;
+                    cv::Mat absence_roi = absence_foot(cell);
+                    cv::Mat erase_flag = (absence_roi >= kAbsenceEraseFrames);
+                    if (cv::countNonZero(erase_flag) > 0) {
+                        cell_erase_mask(cell).setTo(255);
+                        absence_roi.setTo(0);
+                    }
+                    continue;
+                } else {
+                    absence_foot(cell).setTo(0);
+                }
 
-            // Layer 2: Grid Replace
-            if (iou < kCellReplaceIoU) {
-                cell_replace_mask(cell).setTo(255);
-                prox_allow_mask(cell).setTo(255); // Exempt from proximity block
-            }
-            // Layer 3: Ghost Block
-            else if (overlap > kCellGhostOverlap) {
-                ghost_block(cell).setTo(255);
+                if (exist_count < kMinCellStrokePixels || new_count == 0) continue;
+
+                cv::Mat inter;
+                cv::bitwise_and(new_strokes(cell), existing(cell), inter);
+                int inter_count = cv::countNonZero(inter);
+                int union_count = new_count + exist_count - inter_count;
+
+                float iou = (union_count > 0) ? (float)inter_count / (float)union_count : 0.0f;
+                float overlap = (float)inter_count / (float)new_count;
+
+                // Layer 2: Grid Replace
+                if (kEnableGridReplace && iou < kCellReplaceIoU) {
+                    cell_replace_mask(cell).setTo(255);
+                    prox_allow_mask(cell).setTo(255);
+                }
+                // Layer 3: Ghost Block
+                else if (kEnableGhostBlock && overlap > kCellGhostOverlap) {
+                    ghost_block(cell).setTo(255);
+                }
             }
         }
     }
 
     // Apply ghost block
-    cv::Mat ghost_allow;
-    cv::bitwise_not(ghost_block, ghost_allow);
-    cv::bitwise_and(prox_allow_mask, ghost_allow, prox_allow_mask);
+    if (kEnableGhostBlock) {
+        cv::Mat ghost_allow;
+        cv::bitwise_not(ghost_block, ghost_allow);
+        cv::bitwise_and(prox_allow_mask, ghost_allow, prox_allow_mask);
+    }
     cv::bitwise_and(prox_allow_mask, update_allowed_mask, prox_allow_mask);
 
     // new_only: allowed strokes
@@ -1355,15 +1459,70 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
                                              const cv::Mat& no_update_mask) {
     if (frame_bgr.empty()) return;
 
-    int global_start_x = (int)std::round(camera_pos.x);
-    int global_start_y = (int)std::round(camera_pos.y);
-    int global_end_x = global_start_x + frame_bgr.cols;
-    int global_end_y = global_start_y + frame_bgr.rows;
+    // --- Blur rejection: skip blurry frames ---
+    if (kEnableBlurRejection) {
+        cv::Mat gray_small;
+        cv::resize(frame_bgr, gray_small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+        cv::Mat gray_ch;
+        cv::cvtColor(gray_small, gray_ch, cv::COLOR_BGR2GRAY);
+        cv::Mat lap;
+        cv::Laplacian(gray_ch, lap, CV_64F);
+        cv::Scalar mu, sigma;
+        cv::meanStdDev(lap, mu, sigma);
+        double variance = sigma.val[0] * sigma.val[0];
+        if (variance < kBlurThreshold) {
+            WhiteboardLog("[RawPaint] Blurry frame rejected (var="
+                          + std::to_string(variance) + " thr="
+                          + std::to_string(kBlurThreshold) + ")");
+            return;
+        }
+    }
+
+    // --- Build a paint region with edge margin ---
+    const int margin = kRawEdgeMargin;
+    const int fw = frame_bgr.cols, fh = frame_bgr.rows;
+    // The sub-region of the frame that will actually be painted
+    cv::Rect inner(margin, margin,
+                   std::max(1, fw - 2 * margin),
+                   std::max(1, fh - 2 * margin));
+
+    int global_start_x = (int)std::round(camera_pos.x) + inner.x;
+    int global_start_y = (int)std::round(camera_pos.y) + inner.y;
+    int global_end_x = global_start_x + inner.width;
+    int global_end_y = global_start_y + inner.height;
 
     if (global_start_x < group.raw_min_px_x) group.raw_min_px_x = global_start_x;
     if (global_start_y < group.raw_min_px_y) group.raw_min_px_y = global_start_y;
     if (global_end_x > group.raw_max_px_x) group.raw_max_px_x = global_end_x;
     if (global_end_y > group.raw_max_px_y) group.raw_max_px_y = global_end_y;
+
+    // --- Build feather alpha mask (0-255) for the inner region ---
+    cv::Mat feather_alpha;
+    if (kEnableRawEdgeFeather && kRawFeatherWidth > 0) {
+        feather_alpha = cv::Mat(inner.height, inner.width, CV_8U, cv::Scalar(255));
+        const int fw_px = std::min(kRawFeatherWidth, std::min(inner.width, inner.height) / 2);
+        for (int i = 0; i < fw_px; i++) {
+            uchar val = (uchar)(255 * i / fw_px);
+            // Top row
+            feather_alpha.row(i).setTo(std::min(val, feather_alpha.at<uchar>(i, fw_px)));
+            // Bottom row
+            feather_alpha.row(inner.height - 1 - i).setTo(
+                std::min(val, feather_alpha.at<uchar>(inner.height - 1 - i, fw_px)));
+            // Left column
+            for (int y = 0; y < inner.height; y++)
+                feather_alpha.at<uchar>(y, i) = std::min(feather_alpha.at<uchar>(y, i), val);
+            // Right column
+            for (int y = 0; y < inner.height; y++)
+                feather_alpha.at<uchar>(y, inner.width - 1 - i) =
+                    std::min(feather_alpha.at<uchar>(y, inner.width - 1 - i), val);
+        }
+    }
+
+    cv::Mat inner_frame = frame_bgr(inner);
+    cv::Mat inner_no_update;
+    if (!no_update_mask.empty() && no_update_mask.size() == frame_bgr.size()) {
+        inner_no_update = no_update_mask(inner);
+    }
 
     int start_chunk_x = (int)std::floor((float)global_start_x / kChunkSize);
     int start_chunk_y = (int)std::floor((float)global_start_y / kChunkSize);
@@ -1384,20 +1543,43 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
             if (ix0 >= ix1 || iy0 >= iy1) continue;
 
             cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
-            cv::Rect frame_roi(ix0 - global_start_x, iy0 - global_start_y, ix1 - ix0, iy1 - iy0);
+            cv::Rect src_roi(ix0 - global_start_x, iy0 - global_start_y, ix1 - ix0, iy1 - iy0);
 
+            // Valid mask (exclude person)
             cv::Mat valid_mask;
-            if (!no_update_mask.empty() && no_update_mask.size() == frame_bgr.size()) {
-                cv::bitwise_not(no_update_mask(frame_roi), valid_mask);
+            if (!inner_no_update.empty()) {
+                cv::bitwise_not(inner_no_update(src_roi), valid_mask);
             } else {
-                valid_mask = cv::Mat(frame_roi.height, frame_roi.width, CV_8U, cv::Scalar(255));
+                valid_mask = cv::Mat(src_roi.height, src_roi.width, CV_8U, cv::Scalar(255));
             }
-
             if (cv::countNonZero(valid_mask) == 0) continue;
 
             uint64_t hash = GetChunkHash(cx, cy);
             auto& chunk = group.chunks[hash];
-            frame_bgr(frame_roi).copyTo(chunk->raw_canvas(chunk_roi), valid_mask);
+
+            if (kEnableRawEdgeFeather && !feather_alpha.empty()) {
+                // Alpha blend: dst = (src * alpha + dst * (255 - alpha)) / 255
+                cv::Mat src_patch = inner_frame(src_roi);
+                cv::Mat dst_patch = chunk->raw_canvas(chunk_roi);
+                cv::Mat alpha_patch = feather_alpha(src_roi);
+
+                cv::Mat src_f, dst_f, alpha_f;
+                src_patch.convertTo(src_f, CV_32FC3);
+                dst_patch.convertTo(dst_f, CV_32FC3);
+                alpha_patch.convertTo(alpha_f, CV_32F, 1.0 / 255.0);
+
+                // Expand alpha to 3 channels
+                cv::Mat alpha_3ch;
+                cv::merge(std::vector<cv::Mat>{alpha_f, alpha_f, alpha_f}, alpha_3ch);
+
+                cv::Mat blended_f = src_f.mul(alpha_3ch) + dst_f.mul(cv::Scalar(1, 1, 1) - alpha_3ch);
+                cv::Mat blended;
+                blended_f.convertTo(blended, CV_8UC3);
+                blended.copyTo(chunk->raw_canvas(chunk_roi), valid_mask);
+            } else {
+                inner_frame(src_roi).copyTo(chunk->raw_canvas(chunk_roi), valid_mask);
+            }
+
             group.raw_cache_dirty = true;
         }
     }
@@ -1433,6 +1615,9 @@ void WhiteboardCanvas::RebuildStrokeRenderCache(WhiteboardGroup& group) {
 
         chunk->stroke_canvas(src_roi).copyTo(group.stroke_render_cache(dst_roi));
     }
+
+    // Invert: black background with white strokes
+    cv::bitwise_not(group.stroke_render_cache, group.stroke_render_cache);
 }
 
 void WhiteboardCanvas::RebuildRawRenderCache(WhiteboardGroup& group) {
@@ -1493,7 +1678,8 @@ void WhiteboardCanvas::CreateSubCanvas(const cv::Mat& frame_bgr,
 
     // Seed at (0,0) global position
     global_camera_pos_ = cv::Point2f(0, 0);
-    has_smoothed_pos_ = false;
+
+
     PaintStrokesToChunks(*group, binary, enhanced_bgr, global_camera_pos_,
                          stroke_no_update_mask);
     PaintRawFrameToChunks(*group, frame_bgr, global_camera_pos_, raw_no_update_mask);

@@ -726,6 +726,10 @@ void NativeCamera::RefreshDisplayFrame() {
 
     if (!showing_canvas) {
         ProcessFrame(display_bgr);
+    } else if (g_whiteboard_canvas &&
+               g_whiteboard_canvas->GetRenderMode() == CanvasRenderMode::kRaw) {
+        // Apply user filters to the raw canvas view (same pipeline as live camera)
+        ProcessFrame(display_bgr);
     }
 
     {
@@ -853,8 +857,10 @@ void NativeCamera::ProcessingThreadLoop() {
                 false);
         }
         
-        // Only apply camera filters if we are NOT showing the canvas
+        // Apply camera filters: always for live view, and for raw canvas view
         if (!g_whiteboard_enabled.load() || !g_whiteboard_canvas || !g_whiteboard_canvas->IsCanvasViewMode()) {
+            ProcessFrame(frame);
+        } else if (g_whiteboard_canvas->GetRenderMode() == CanvasRenderMode::kRaw) {
             ProcessFrame(frame);
         }
 

@@ -121,101 +121,113 @@ private:
     // Tuning constants
     // -----------------------------------------------------------------------
 
-    // Flip these to false to bisect matching/sharpness regressions quickly.
     static constexpr bool kEnableMotionGate = true;
-    static constexpr bool kEnableContourAreaFilter = false;
-    static constexpr bool kEnableContourCountCap = false;
-    static constexpr bool kEnableFastHuDistanceMatching = false;
-    static constexpr bool kEnablePositionSmoothing = false;
+    static const int       kMotionForceInterval = 1;         // Process every N-th frame even with no motion. 0=disabled. Rec: 3-8.
+
+    // Alignment improvements (each can be toggled independently)
+    static constexpr bool  kEnableJumpRejection      = true;  // Reject matches that jump too far from previous position.
+    static constexpr bool  kEnableNeighborBinMerge     = true;  // Merge winning vote bin with 8 neighbors for robustness.
+    static constexpr bool  kEnablePhaseCorrelation     = true;  // Sub-pixel refinement via cv::phaseCorrelate after coarse match.
+
+    static constexpr float kMaxJumpPx              = 40.0f;  // Max allowed position jump (px). Rec: 30-60.
+    static const int       kVoteBinSize            = 5;       // Vote bin quantisation (px). Smaller = finer. Rec: 5-15.
 
     // Sub-canvas creation
-    static const int       kMinStrokePixelsForNewSC = 500;
-    static const int       kMotionLongEdge = 256;
-    static constexpr float kMinMotionFraction = 0.01f;
-    static constexpr float kPositionEmaAlpha = 0.4f;
-    static const int       kStillFramePatience = 8;
+    static const int       kMinStrokePixelsForNewSC = 500;   // Min whiteboard pixels to spawn a new canvas. Low: noisy starts, High: missed content. Rec: 300-1000.
+    static const int       kMotionLongEdge = 256;            // Downscale size for motion detection. Low: faster but blind to fine motion, High: slow. Rec: 128-512.
+    static constexpr float kMinMotionFraction = 0.01f;       // Min changed pixels to process frame. Low: processes noise, High: ignores slow movement. Rec: 0.005-0.03.
+    static constexpr float kMaxMotionFraction = 0.15f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
+    static const int       kStillFramePatience = 8;          // Wait N frames of stillness before allowing matching. Low: hasty/unstable, High: sluggish. Rec: 5-15.
 
     // Worker queue
-    static const int       kQueueDepth         = 1;
+    static const int       kQueueDepth         = 1;          // Buffer for incoming frames. Higher increases lag but prevents dropped frames. Rec: 1-2.
 
-    // Anti-ghosting layers
-    static const int       kProximityRadius     = 15;
-    static const int       kGridCellSize        = 100;
-    static const int       kMinCellStrokePixels = 50;
-    static constexpr float kCellReplaceIoU      = 0.20f;
-    static constexpr float kCellGhostOverlap    = 0.25f;
-    static const int       kAbsenceEraseFrames  = 5;
-    static const int       kAbsenceEraseThr     = 10;
+    // Anti-ghosting layers (each can be toggled independently)
+    static constexpr bool  kEnableProximitySuppression = true;  // Dilate existing ink to suppress nearby new strokes.
+    static constexpr bool  kEnableGridReplace          = true;  // Replace cell content when IoU is low (content changed).
+    static constexpr bool  kEnableGhostBlock           = true;  // Block painting cells where overlap is high (duplicate ghost).
+    static constexpr bool  kEnableAbsenceErasure       = true;  // Erase canvas cells when strokes disappear for N frames.
+
+    static const int       kProximityRadius     = 30;        // Pixel radius to suppress nearby matches. Low: duplicates, High: ignores dense content. Rec: 10-30.
+    static const int       kGridCellSize        = 100;       // Grid size for content density checks. Low: precise/slow, High: coarse. Rec: 100-400.
+    static const int       kMinCellStrokePixels = 50;         // Min pixels in cell to consider it "full". Low: over-sensitive, High: lets ghosts stay. Rec: 30-100.
+    static constexpr float kCellReplaceIoU      = 0.40f;       // Overlap threshold to replace old data. Low: messy layers, High: stubborn old data. Rec: 0.1-0.4.
+    static constexpr float kCellGhostOverlap    = 0.35f;       // Overlap threshold to flag a "ghost" stroke. Low: aggressive erasures, High: trails visible. Rec: 0.15-0.35.
+    static const int       kAbsenceEraseFrames  = 5;          // Count of frames where stroke is missing to erase. Low: flickering, High: slow erase. Rec: 3-10.
+    static const int       kAbsenceEraseThr     = 10;         // Intensity threshold for "missing" detection. Low: sensitive to shadows, High: ignores erasures. Rec: 5-20.
+
+    // Raw canvas quality (each can be toggled independently)
+    static constexpr bool  kEnableBlurRejection   = true;   // Skip painting raw frame when it's blurry (camera in motion).
+    static constexpr bool  kEnableRawEdgeFeather   = false;  // Fade out frame edges to blend seams in raw canvas.
+    static constexpr float kBlurThreshold          = 30.0f;  // Laplacian variance below this = blurry. Low: strict, High: permissive. Rec: 30-80.
+    static const int       kRawEdgeMargin          = 30;     // Pixels to crop from each edge of raw frame. Rec: 15-50.
+    static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (px). Rec: 20-60.
 
     // Contour matching
-    static constexpr double kMaxShapeDist    = 0.5; // matchShapes / fast-Hu threshold
-    static const int        kMinContourArea  = 30;   // px² — filter noise
-    static const int        kMinShapeVotes   = 3;    // min matched pairs to accept shift
-    static const int        kMaxContours     = 150;  // cap contour count per side
-    static constexpr double kMaxAreaRatio    = 4.0;  // max contour area ratio for matching
+    static constexpr double kMaxShapeDist    = 0.5; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
+    static const int        kMinContourArea  = 30;   // px² — filter noise. Low: keeps dust/artifacts, High: ignores small dots/letters. Rec: 10-100.
+    static const int        kMinShapeVotes   = 5;    // min matched pairs to accept shift. Low: unstable/random jumps, High: hard to lock on. Rec: 2-5.
 
     // -----------------------------------------------------------------------
     // Chunk Grid constants
     // -----------------------------------------------------------------------
-    static const int kChunkSize = 512;
-    static const int kDefaultCanvasWidth = 1920;
-    static const int kDefaultCanvasHeight = 1080;
+    static const int kChunkSize = 512;               // Size of internal memory tiles (px). Do not change without re-tuning. Rec: 512.
+    static const int kDefaultCanvasWidth = 1920;      // Initial view width if no content exists. Rec: 1280-1920.
+    static const int kDefaultCanvasHeight = 1080;     // Initial view height if no content exists. Rec: 720-1080.
 
     // -----------------------------------------------------------------------
     // Sub-canvas collection (protected by state_mutex_)
     // -----------------------------------------------------------------------
-    std::vector<std::unique_ptr<WhiteboardGroup>> groups_;
-    int active_group_idx_ = -1;
-    int view_group_idx_   = -1;
+    std::vector<std::unique_ptr<WhiteboardGroup>> groups_; // List of all captured whiteboard segments (sub-canvases).
+    int active_group_idx_ = -1;                      // Index of the canvas currently being painted into by the camera.
+    int view_group_idx_   = -1;                      // Index of the canvas currently shown on the UI screen.
     
-    cv::Point2f global_camera_pos_{0, 0}; // Top-left pixel of current frame in global space
-    bool has_smoothed_pos_ = false;
-    
-    int frame_w_ = 0;    // Frame dimensions (set from first input frame)
-    int frame_h_ = 0;
+    cv::Point2f global_camera_pos_{0, 0};            // Top-left pixel coordinate of current frame relative to canvas origin.
+    int frame_w_ = 0;    // Original camera frame width (cached from first frame).
+    int frame_h_ = 0;    // Original camera frame height (cached from first frame).
 
     // -----------------------------------------------------------------------
     // Worker thread and queue
     // -----------------------------------------------------------------------
-    std::thread              worker_thread_;
-    std::mutex               queue_mutex_;
-    std::condition_variable  queue_cv_;
-    std::queue<CanvasWorkItem> work_queue_;
-    std::atomic<bool>        stop_worker_{false};
-    std::unique_ptr<WhiteboardCanvasHelperClient> helper_client_;
-    bool                     remote_process_ = false;
+    std::thread              worker_thread_;         // Dedicated thread for CV heavy lifting (YOLO results -> Canvas).
+    std::mutex               queue_mutex_;           // Mutex protecting the work_queue_ from concurrent access.
+    std::condition_variable  queue_cv_;              // Signal for the worker thread when new frames arrive.
+    std::queue<CanvasWorkItem> work_queue_;          // Queue of frames and masks waiting for stitching.
+    std::atomic<bool>        stop_worker_{false};    // Lifecycle flag to shut down the worker thread safely.
+    std::unique_ptr<WhiteboardCanvasHelperClient> helper_client_; // Client for IPC/Remote processing offloading.
+    bool                     remote_process_ = false; // Whether matching is happening via helper_client vs local.
 
     // -----------------------------------------------------------------------
     // State mutex
     // -----------------------------------------------------------------------
-    mutable std::mutex state_mutex_;
+    mutable std::mutex state_mutex_;                 // Protects all canvas data (groups, chunks, pos) for UI rendering.
 
     // -----------------------------------------------------------------------
     // Motion gate
     // -----------------------------------------------------------------------
-    cv::Mat prev_gray_;
-    int     frames_since_warp_ = 0;
-    int     matched_frame_counter_ = 0;
+    cv::Mat prev_gray_;                              // Store for previous frame to compute frame-to-frame delta.
+    int     frames_since_warp_ = 0;                  // Frames elapsed since the last successful spatial lock/alignment.
+    int     matched_frame_counter_ = 0;              // Total count of frames that successfully matched to the canvas.
+    int     motion_frame_counter_ = 0;               // Counter for force-processing every N frames.
 
     // -----------------------------------------------------------------------
     // Canvas contour cache (rebuilt when new strokes are painted)
     // -----------------------------------------------------------------------
     struct ContourShape {
-        std::vector<cv::Point> contour;
-        cv::Point2f            centroid;  // in canvas pixel coords
-        double                 hu[7];
-        double                 log_hu[7]; // Pre-calculated log moments for O(1) comparisons
-        double                 area = 0.0;
+        std::vector<cv::Point> contour;              // Raw list of hull/outline points for the stroke.
+        cv::Point2f            centroid;             // Geometric center in canvas space.
+        double                 hu[7];                // Scale/Rotation invariant Hu Moments (raw).
+        double                 area = 0.0;           // Area of the contour in pixels.
     };
-    std::vector<ContourShape> canvas_contours_;
-    bool canvas_contours_dirty_ = true;
+    std::vector<ContourShape> canvas_contours_;      // Cached shapes of everything currently on the active canvas.
+    bool canvas_contours_dirty_ = true;              // Flag to trigger cache rebuild after new painting.
 
     // -----------------------------------------------------------------------
     // Atomic flags
     // -----------------------------------------------------------------------
-    std::atomic<bool> has_content_{false};
-    std::atomic<bool> canvas_view_mode_{false};
-    std::atomic<int>  render_mode_{static_cast<int>(CanvasRenderMode::kStroke)};
+    std::atomic<bool> has_content_{false};           // True if any strokes have been painted across all canvases.
+    std::atomic<bool> canvas_view_mode_{false};      // UI state: true when viewing the full panorama instead of live feed.
+    std::atomic<int>  render_mode_{static_cast<int>(CanvasRenderMode::kRaw)}; // Mode for canvas rendering (Strokes/Raw).
 
     // -----------------------------------------------------------------------
     // Debug
@@ -225,35 +237,35 @@ private:
         int         debug_id  = -1;
         bool        closed    = false;
     };
-    std::vector<ScDebugInfo> sc_debug_infos_;
-    int next_debug_id_ = 0;
+    std::vector<ScDebugInfo> sc_debug_infos_;        // Metadata for OpenCV debug windows.
+    int next_debug_id_ = 0;                          // Counter for unique debug window naming.
 
     struct PipelineDebugState {
-        cv::Mat frame;
-        cv::Mat gray_clean;
-        cv::Mat enhanced_bgr;
-        cv::Mat binary;
-        cv::Mat person_mask;
-        float   motion_fraction    = 0.0f;
-        int     stroke_pixel_count = 0;
-        cv::Point2f shift;
-        std::string match_status;
-        bool    created_new_sc     = false;
+        cv::Mat frame;                               // Raw frame for the debug grid.
+        cv::Mat gray_clean;                          // Grayscale input.
+        cv::Mat enhanced_bgr;                        // High-contrast normalized frame.
+        cv::Mat binary;                              // Thresholded stroke mask.
+        cv::Mat person_mask;                         // Mask to exclude people from matching.
+        float   motion_fraction    = 0.0f;           // Calculated frame motion % for current frame.
+        int     stroke_pixel_count = 0;              // Count of candidate stroke pixels found.
+        cv::Point2f shift;                           // Calculated alignment shift (dx, dy).
+        std::string match_status;                    // Text description of matching result (OK, Fail, etc).
+        bool    created_new_sc     = false;          // True if this frame triggered a sub-canvas split.
     };
 
     struct PerformanceStats {
-        double stage1_motion_ms = 0.0;
-        double stage3_enhance_ms = 0.0;
-        double stage4_matching_ms = 0.0;
-        double stage5_painting_ms = 0.0;
-        double total_frame_contours = 0.0;
-        double total_canvas_contours = 0.0;
-        double total_candidate_pairs = 0.0;
-        double total_accepted_pairs = 0.0;
-        double total_best_votes = 0.0;
-        int frame_count = 0;
-        int matched_frames = 0;
-        std::chrono::time_point<std::chrono::steady_clock> last_print_time;
+        double stage1_motion_ms = 0.0;               // Time spent on motion detection (ms).
+        double stage3_enhance_ms = 0.0;              // Time spent on image normalization/enhancement (ms).
+        double stage4_matching_ms = 0.0;             // Time spent on contour matching and alignment (ms).
+        double stage5_painting_ms = 0.0;             // Time spent writing pixels to memory chunks (ms).
+        double total_frame_contours = 0.0;           // Number of contours extracted from current frame.
+        double total_canvas_contours = 0.0;          // Number of contours searched on the canvas.
+        double total_candidate_pairs = 0.0;          // Count of shape pairs that passed initial filters.
+        double total_accepted_pairs = 0.0;           // Count of shape pairs that survived voting.
+        double total_best_votes = 0.0;               // Consensus count for the chosen alignment shift.
+        int frame_count = 0;                         // Total frame count processed.
+        int matched_frames = 0;                      // Total frames aligned successfully.
+        std::chrono::time_point<std::chrono::steady_clock> last_print_time; // Throttle for console logging.
     } perf_stats_;
 
     // -----------------------------------------------------------------------
@@ -266,6 +278,10 @@ private:
     std::vector<ContourShape> ExtractContourShapes(const cv::Mat& binary,
                                                    cv::Point2f roi_offset) const;
     void RebuildCanvasContours(WhiteboardGroup& group);
+
+    // Phase correlation: extract a gray region from canvas chunks at global position.
+    cv::Mat GetCanvasGrayRegion(WhiteboardGroup& group, int global_x, int global_y,
+                                int width, int height);
 
     
     // Chunk Grid management
