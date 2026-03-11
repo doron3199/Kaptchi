@@ -793,6 +793,32 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     if (bottom_cut < binary.rows)
         binary(cv::Rect(0, bottom_cut, binary.cols, binary.rows - bottom_cut)).setTo(0);
 
+    // Crop left and right edges
+    const int left_cut  = (int)(gray.cols * kFrameEdgeMarginLeftPct);
+    const int right_start = (int)(gray.cols * (1.0f - kFrameEdgeMarginRightPct));
+    if (left_cut > 0)
+        binary(cv::Rect(0, 0, left_cut, binary.rows)).setTo(0);
+    if (right_start < binary.cols)
+        binary(cv::Rect(right_start, 0, binary.cols - right_start, binary.rows)).setTo(0);
+
+    // Suppress long straight horizontal/vertical lines (frame edge artifacts)
+    if (kEnableLineSuppression) {
+        int h_len = std::max(3, (int)(binary.cols * kLineSuppressionLengthFrac));
+        int v_len = std::max(3, (int)(binary.rows * kLineSuppressionLengthFrac));
+
+        // Detect horizontal lines: morph-open with wide horizontal kernel
+        cv::Mat h_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(h_len, 1));
+        cv::Mat h_lines;
+        cv::morphologyEx(binary, h_lines, cv::MORPH_OPEN, h_kernel);
+        binary.setTo(0, h_lines);
+
+        // Detect vertical lines: morph-open with tall vertical kernel
+        cv::Mat v_kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(1, v_len));
+        cv::Mat v_lines;
+        cv::morphologyEx(binary, v_lines, cv::MORPH_OPEN, v_kernel);
+        binary.setTo(0, v_lines);
+    }
+
     int stroke_pixel_count = cv::countNonZero(binary);
 
     cv::Mat stroke_paint_bgr(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
@@ -961,7 +987,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
         PaintStrokesToChunks(group, binary, stroke_paint_bgr, global_camera_pos_,
                      person_mask_dilated);
-        PaintRawFrameToChunks(group, frame, global_camera_pos_, person_mask_dilated);
+        PaintRawFrameToChunks(group, frame, global_camera_pos_, person_mask_dilated, binary);
 
         active_group_idx_ = best_group_idx;
         has_content_ = true;
@@ -1300,7 +1326,34 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
         }
     }
 
-    cv::Mat new_strokes = binary(paint_bbox);
+    // -----------------------------------------------------------------------
+    // STROKE LOCALITY MASK: only paint within R px of real strokes
+    // -----------------------------------------------------------------------
+    cv::Mat new_strokes_raw = binary(paint_bbox);
+    cv::Mat new_strokes;
+
+    if (kEnableStrokeLocality) {
+        cv::Mat stroke_seed = new_strokes_raw.clone();
+
+        // Morphological open removes tiny noise blobs before dilation
+        if (kLocalityNoiseErode > 0) {
+            cv::Mat nk = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                cv::Size(kLocalityNoiseErode, kLocalityNoiseErode));
+            cv::morphologyEx(stroke_seed, stroke_seed, cv::MORPH_OPEN, nk);
+        }
+
+        // Dilate surviving strokes to create locality buffer zone
+        int d = 2 * kStrokeLocalityRadius + 1;
+        cv::Mat lk = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(d, d));
+        cv::Mat locality_mask;
+        cv::dilate(stroke_seed, locality_mask, lk);
+
+        // Keep only stroke pixels that fall within the locality zone
+        cv::bitwise_and(new_strokes_raw, locality_mask, new_strokes);
+    } else {
+        new_strokes = new_strokes_raw;
+    }
+
     cv::Mat colors_bbox = enhanced_bgr(paint_bbox);
     cv::Mat no_update_bbox = (!no_update_mask.empty() && no_update_mask.size() == binary.size())
         ? no_update_mask(paint_bbox)
@@ -1456,7 +1509,8 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
 void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
                                              const cv::Mat& frame_bgr,
                                              cv::Point2f camera_pos,
-                                             const cv::Mat& no_update_mask) {
+                                             const cv::Mat& no_update_mask,
+                                             const cv::Mat& binary) {
     if (frame_bgr.empty()) return;
 
     // --- Blur rejection: skip blurry frames ---
@@ -1524,6 +1578,26 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
         inner_no_update = no_update_mask(inner);
     }
 
+    // -----------------------------------------------------------------------
+    // STROKE LOCALITY MASK for raw canvas: only paint where strokes exist
+    // -----------------------------------------------------------------------
+    cv::Mat raw_locality_mask;
+    if (kEnableStrokeLocality && !binary.empty() && binary.size() == frame_bgr.size()) {
+        cv::Mat stroke_seed = binary(inner).clone();
+
+        // Morphological open removes tiny noise blobs
+        if (kLocalityNoiseErode > 0) {
+            cv::Mat nk = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+                cv::Size(kLocalityNoiseErode, kLocalityNoiseErode));
+            cv::morphologyEx(stroke_seed, stroke_seed, cv::MORPH_OPEN, nk);
+        }
+
+        // Dilate to create buffer zone around strokes
+        int d = 2 * kStrokeLocalityRadius + 1;
+        cv::Mat lk = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(d, d));
+        cv::dilate(stroke_seed, raw_locality_mask, lk);
+    }
+
     int start_chunk_x = (int)std::floor((float)global_start_x / kChunkSize);
     int start_chunk_y = (int)std::floor((float)global_start_y / kChunkSize);
     int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkSize);
@@ -1552,6 +1626,12 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
             } else {
                 valid_mask = cv::Mat(src_roi.height, src_roi.width, CV_8U, cv::Scalar(255));
             }
+
+            // Apply stroke locality: only paint raw pixels near strokes
+            if (!raw_locality_mask.empty()) {
+                cv::bitwise_and(valid_mask, raw_locality_mask(src_roi), valid_mask);
+            }
+
             if (cv::countNonZero(valid_mask) == 0) continue;
 
             uint64_t hash = GetChunkHash(cx, cy);
@@ -1682,7 +1762,7 @@ void WhiteboardCanvas::CreateSubCanvas(const cv::Mat& frame_bgr,
 
     PaintStrokesToChunks(*group, binary, enhanced_bgr, global_camera_pos_,
                          stroke_no_update_mask);
-    PaintRawFrameToChunks(*group, frame_bgr, global_camera_pos_, raw_no_update_mask);
+    PaintRawFrameToChunks(*group, frame_bgr, global_camera_pos_, raw_no_update_mask, binary);
 
     int idx = (int)groups_.size();
     groups_.push_back(std::move(group));

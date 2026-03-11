@@ -156,6 +156,19 @@ private:
     static const int       kAbsenceEraseFrames  = 5;          // Count of frames where stroke is missing to erase. Low: flickering, High: slow erase. Rec: 3-10.
     static const int       kAbsenceEraseThr     = 10;         // Intensity threshold for "missing" detection. Low: sensitive to shadows, High: ignores erasures. Rec: 5-20.
 
+    // Stroke locality mask (restrict painting to regions near actual strokes)
+    static constexpr bool  kEnableStrokeLocality    = true;   // Only paint within R px of detected strokes. Eliminates edge artifacts.
+    static const int       kStrokeLocalityRadius    = 30;     // Dilation radius around strokes (px). Low: tight/clips, High: wider/less filtering. Rec: 40-80.
+    static const int       kLocalityNoiseErode      = 3;      // Morph-open kernel to remove tiny noise before dilation. 0=disabled. Rec: 3-5.
+
+    // Straight-line suppression (removes long h/v lines from frame edges picked up by threshold)
+    static constexpr bool  kEnableLineSuppression       = true;   // Detect and remove long straight horizontal/vertical lines from binary.
+    static constexpr float kLineSuppressionLengthFrac   = 0.25f;  // Min line length as fraction of frame dim. Low: aggressive, High: only very long lines. Rec: 0.15-0.35.
+
+    // Frame edge margins (left/right binary suppression, complements existing top/bottom crop)
+    static constexpr float kFrameEdgeMarginLeftPct  = 0.03f;  // Fraction of width to crop from left. Rec: 0.02-0.05.
+    static constexpr float kFrameEdgeMarginRightPct = 0.03f;  // Fraction of width to crop from right. Rec: 0.02-0.05.
+
     // Raw canvas quality (each can be toggled independently)
     static constexpr bool  kEnableBlurRejection   = true;   // Skip painting raw frame when it's blurry (camera in motion).
     static constexpr bool  kEnableRawEdgeFeather   = false;  // Fade out frame edges to blend seams in raw canvas.
@@ -292,7 +305,8 @@ private:
                               const cv::Mat& no_update_mask = cv::Mat());
     void PaintRawFrameToChunks(WhiteboardGroup& group, const cv::Mat& frame_bgr,
                                cv::Point2f camera_pos,
-                               const cv::Mat& no_update_mask = cv::Mat());
+                               const cv::Mat& no_update_mask = cv::Mat(),
+                               const cv::Mat& binary = cv::Mat());
     void RebuildStrokeRenderCache(WhiteboardGroup& group);
     void RebuildRawRenderCache(WhiteboardGroup& group);
 
