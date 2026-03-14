@@ -29,6 +29,7 @@ import '../services/filters_service.dart';
 import '../widgets/mobile_connection_dialog.dart';
 import '../widgets/video_source_sheet.dart';
 import '../widgets/zoomable_stream_view.dart';
+import 'graph_debug_screen.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
@@ -1324,6 +1325,18 @@ class _CameraScreenState extends State<CameraScreen>
                   _resetWhiteboardUiState();
                   _applyCanvasViewport(0.5, 0.5, 1.0, immediate: true);
                 },
+              ),
+            // Graph debug view (only visible when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: const Icon(Icons.account_tree_outlined),
+                tooltip: 'Graph Debug',
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (_) => const GraphDebugScreen(),
+                  ),
+                ),
               ),
             // Debug toggle (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)

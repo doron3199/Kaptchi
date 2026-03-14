@@ -23,6 +23,7 @@ $RECYCLE.BIN/
 *.msp
 *.lnk
 windows/runner/local_paths.cmake
+windows/out/*
 
 # IntelliJ related
 *.iml
@@ -34,6 +35,9 @@ windows/runner/local_paths.cmake
 # VS Code which you may wish to be included in version control, so this line
 # is commented out by default.
 #.vscode/
+
+.vs/*
+windows/.vs/*
 
 # Flutter/Dart/Pub related
 **/doc/api/
