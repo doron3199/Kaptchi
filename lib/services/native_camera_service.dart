@@ -937,7 +937,7 @@ class NativeCameraService {
   List<GraphNodeInfo> _decodeGraphNodes(Pointer<Float> buffer, int actual) {
     final nodes = <GraphNodeInfo>[];
     for (int i = 0; i < actual; i++) {
-      final p = buffer + i * 14;
+      final p = buffer + i * 15;
       nodes.add(GraphNodeInfo(
         id: p[0].toInt(),
         bboxCanvas: Rect.fromLTWH(p[1], p[2], p[3], p[4]),
@@ -948,6 +948,7 @@ class NativeCameraService {
         createdFrame: p[10].toInt(),
         neighborCount: p[11].toInt(),
         canvasOrigin: Offset(p[12], p[13]),
+        matchDistance: p[14].toInt(),
       ));
     }
     return nodes;
@@ -960,7 +961,7 @@ class NativeCameraService {
   }) {
     if (count <= 0) return [];
 
-    final buffer = malloc.allocate<Float>(count * 14 * 4);
+    final buffer = malloc.allocate<Float>(count * 15 * 4);
     try {
       final actual = reader(buffer, count);
       AppLogger.graphDebug(

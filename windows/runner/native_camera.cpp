@@ -36,8 +36,6 @@ namespace {
 static constexpr int kYoloPerfLogMinFrames = 30;
 static const auto kYoloPerfLogMinInterval = std::chrono::seconds(10);
 static const auto kWhiteboardBridgeLogInterval = std::chrono::seconds(10);
-static const auto kDisplayTraceLogInterval = std::chrono::seconds(3);
-static const auto kFilterFrameTraceInterval = std::chrono::seconds(2);
 
 struct YoloPerfStats {
     double inference_ms = 0.0;
@@ -60,26 +58,6 @@ struct WhiteboardBridgePerfStats {
 
 static WhiteboardBridgePerfStats g_whiteboard_bridge_perf_stats;
 
-struct DisplayTraceStats {
-    int frames = 0;
-    int canvas_view_frames = 0;
-    int overview_success = 0;
-    int overview_fail = 0;
-    int fallback_frames = 0;
-    int source_empty = 0;
-    int blackish_frames = 0;
-    cv::Size last_size;
-    double last_mean_luma = 0.0;
-    double last_dark_ratio = 0.0;
-    std::chrono::time_point<std::chrono::steady_clock> last_log =
-        std::chrono::steady_clock::now();
-};
-
-static DisplayTraceStats g_display_trace_stats;
-static std::mutex g_display_trace_mutex;
-static std::unordered_map<int, std::chrono::time_point<std::chrono::steady_clock>>
-    g_filter_frame_trace_last_log;
-static std::mutex g_filter_frame_trace_mutex;
 
 static double DurationMs(
     const std::chrono::steady_clock::time_point& start,
@@ -107,72 +85,8 @@ static const char* FilterModeName(int mode) {
     }
 }
 
-static bool ComputeFrameLumaStats(const cv::Mat& frame,
-                                  double& mean_luma,
-                                  double& min_luma,
-                                  double& max_luma,
-                                  double& dark_ratio) {
-    if (frame.empty()) return false;
-
-    cv::Mat sample;
-    if (frame.cols > 320 || frame.rows > 180) {
-        const double scale = std::min(320.0 / std::max(1, frame.cols),
-                                      180.0 / std::max(1, frame.rows));
-        cv::resize(frame, sample, cv::Size(), scale, scale, cv::INTER_AREA);
-    } else {
-        sample = frame;
-    }
-
-    cv::Mat gray;
-    if (sample.channels() == 4) {
-        cv::cvtColor(sample, gray, cv::COLOR_RGBA2GRAY);
-    } else if (sample.channels() == 3) {
-        cv::cvtColor(sample, gray, cv::COLOR_BGR2GRAY);
-    } else {
-        gray = sample;
-    }
-
-    mean_luma = cv::mean(gray)[0];
-    cv::minMaxLoc(gray, &min_luma, &max_luma);
-    cv::Mat dark_mask;
-    cv::compare(gray, 12, dark_mask, cv::CMP_LE);
-    dark_ratio = gray.total() > 0
-        ? static_cast<double>(cv::countNonZero(dark_mask)) /
-              static_cast<double>(gray.total())
-        : 0.0;
-    return true;
-}
-
 static void MaybeLogFilterFrameTrace(int mode, const cv::Mat& frame) {
-    if (frame.empty() || (mode != 2 && mode != 4 && mode != 16)) return;
-
-    const auto now = std::chrono::steady_clock::now();
-    {
-        std::lock_guard<std::mutex> lock(g_filter_frame_trace_mutex);
-        const auto it = g_filter_frame_trace_last_log.find(mode);
-        if (it != g_filter_frame_trace_last_log.end() &&
-            (now - it->second) < kFilterFrameTraceInterval) {
-            return;
-        }
-        g_filter_frame_trace_last_log[mode] = now;
-    }
-
-    double mean_luma = 0.0;
-    double min_luma = 0.0;
-    double max_luma = 0.0;
-    double dark_ratio = 0.0;
-    if (!ComputeFrameLumaStats(frame, mean_luma, min_luma, max_luma, dark_ratio)) {
-        return;
-    }
-
-    std::cout << "[FilterFrameTrace] mode=" << mode
-              << " name=" << FilterModeName(mode)
-              << " size=" << frame.cols << "x" << frame.rows
-              << " mean=" << mean_luma
-              << " min=" << min_luma
-              << " max=" << max_luma
-              << " darkRatio=" << dark_ratio
-              << std::endl;
+    (void)mode; (void)frame;
 }
 
 static void NoteDisplayFrame(const char* stage,
@@ -181,108 +95,17 @@ static void NoteDisplayFrame(const char* stage,
                              bool overview_success,
                              bool used_fallback_frame,
                              bool source_empty) {
-    std::lock_guard<std::mutex> lock(g_display_trace_mutex);
-    auto& stats = g_display_trace_stats;
-    stats.frames++;
-    if (canvas_view_requested) stats.canvas_view_frames++;
-    if (canvas_view_requested && overview_success) stats.overview_success++;
-    if (canvas_view_requested && !overview_success) stats.overview_fail++;
-    if (used_fallback_frame) stats.fallback_frames++;
-    if (source_empty) stats.source_empty++;
-
-    double mean_luma = 0.0;
-    double min_luma = 0.0;
-    double max_luma = 0.0;
-    double dark_ratio = 0.0;
-    if (ComputeFrameLumaStats(frame, mean_luma, min_luma, max_luma, dark_ratio)) {
-        stats.last_size = frame.size();
-        stats.last_mean_luma = mean_luma;
-        stats.last_dark_ratio = dark_ratio;
-        if (dark_ratio >= 0.98) {
-            stats.blackish_frames++;
-        }
-    }
-
-    const auto now = std::chrono::steady_clock::now();
-    if ((now - stats.last_log) < kDisplayTraceLogInterval) {
-        return;
-    }
-
-    std::cout << "[NativeDisplayTrace] stage=" << stage
-              << " frames=" << stats.frames
-              << " canvasViewFrames=" << stats.canvas_view_frames
-              << " overviewOk=" << stats.overview_success
-              << " overviewFail=" << stats.overview_fail
-              << " fallback=" << stats.fallback_frames
-              << " sourceEmpty=" << stats.source_empty
-              << " blackish=" << stats.blackish_frames
-              << " lastSize=" << stats.last_size.width << "x" << stats.last_size.height
-              << " lastMean=" << stats.last_mean_luma
-              << " lastDarkRatio=" << stats.last_dark_ratio
-              << std::endl;
-
-    g_display_trace_stats = DisplayTraceStats();
-    g_display_trace_stats.last_log = now;
+    (void)stage; (void)frame; (void)canvas_view_requested;
+    (void)overview_success; (void)used_fallback_frame; (void)source_empty;
 }
 
 static void MaybePrintYoloPerfLog() {
-    const auto now = std::chrono::steady_clock::now();
-    const bool enough_frames = g_yolo_perf_stats.frames >= kYoloPerfLogMinFrames;
-    const bool enough_time =
-        g_yolo_perf_stats.frames > 0 &&
-        (now - g_yolo_perf_stats.last_log) >= kYoloPerfLogMinInterval;
-
-    if (!enough_frames && !enough_time) return;
-
-    const double frames = static_cast<double>(std::max(1, g_yolo_perf_stats.frames));
-    const double refreshes = static_cast<double>(std::max(1, g_yolo_perf_stats.refreshes));
-    const double elapsed_seconds = std::max(
-        0.001,
-        std::chrono::duration<double>(now - g_yolo_perf_stats.last_log).count());
-    const double fps = frames / elapsed_seconds;
-
-    std::cout << "[WhiteboardYoloPerf] frames=" << g_yolo_perf_stats.frames
-              << " refreshes=" << g_yolo_perf_stats.refreshes
-              << " reused=" << g_yolo_perf_stats.reuses
-              << " fps=" << fps
-              << " avgMs/frame=" << (g_yolo_perf_stats.inference_ms / frames)
-              << " avgMs/refresh=" << (g_yolo_perf_stats.inference_ms / refreshes)
-              << std::endl;
-
-    g_yolo_perf_stats = YoloPerfStats();
-    g_yolo_perf_stats.last_log = now;
 }
 
 static void MaybePrintWhiteboardBridgePerfLog(bool remote_process,
                                               bool canvas_view_mode,
                                               bool has_content) {
-    const auto now = std::chrono::steady_clock::now();
-    const bool enough_time =
-        g_whiteboard_bridge_perf_stats.submitted_frames > 0 &&
-        (now - g_whiteboard_bridge_perf_stats.last_log) >= kWhiteboardBridgeLogInterval;
-
-    if (!enough_time) return;
-
-    const double elapsed_seconds = std::max(
-        0.001,
-        std::chrono::duration<double>(now - g_whiteboard_bridge_perf_stats.last_log).count());
-    const double submitted_fps =
-        static_cast<double>(g_whiteboard_bridge_perf_stats.submitted_frames) / elapsed_seconds;
-    const double canvas_fps =
-        static_cast<double>(g_whiteboard_bridge_perf_stats.canvas_frames) / elapsed_seconds;
-
-    std::cout << "[WhiteboardBridgePerf] remote=" << (remote_process ? 1 : 0)
-              << " canvasView=" << (canvas_view_mode ? 1 : 0)
-              << " hasContent=" << (has_content ? 1 : 0)
-              << " submitted=" << g_whiteboard_bridge_perf_stats.submitted_frames
-              << " canvasFrames=" << g_whiteboard_bridge_perf_stats.canvas_frames
-              << " misses=" << g_whiteboard_bridge_perf_stats.canvas_misses
-              << " fps(in)=" << submitted_fps
-              << " fps(out)=" << canvas_fps
-              << std::endl;
-
-    g_whiteboard_bridge_perf_stats = WhiteboardBridgePerfStats();
-    g_whiteboard_bridge_perf_stats.last_log = now;
+    (void)remote_process; (void)canvas_view_mode; (void)has_content;
 }
 
 } // namespace
@@ -381,6 +204,9 @@ void NativeCamera::Start() {
         } else {
              current_frame_ = cv::Mat();
         }
+           last_source_frame_bgr_.release();
+           last_whiteboard_input_frame_bgr_.release();
+           last_person_mask_.release();
     }
     // Notify Flutter to redraw (with the black frame)
     if (texture_id_ != -1) {
@@ -433,7 +259,6 @@ void NativeCamera::StartProcessingOnly() {
     is_running_ = true;
     is_stream_ = false;
     processing_thread_ = std::thread(&NativeCamera::ProcessingThreadLoop, this);
-    std::cout << "[NativeCamera] Started processing thread only (for screen capture)" << std::endl;
 }
 
 void NativeCamera::SwitchCamera() {
@@ -510,6 +335,35 @@ int32_t NativeCamera::GetFrameWidth() {
 int32_t NativeCamera::GetFrameHeight() {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_frame_.empty() ? 0 : current_frame_.rows;
+}
+
+bool NativeCamera::CopyLatestWhiteboardInput(cv::Mat& frame_bgr, cv::Mat& person_mask) {
+    cv::Mat cached_frame;
+    cv::Mat cached_mask;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (last_whiteboard_input_frame_bgr_.empty()) {
+            return false;
+        }
+        last_whiteboard_input_frame_bgr_.copyTo(cached_frame);
+        if (!last_person_mask_.empty() &&
+            last_person_mask_.size() == last_whiteboard_input_frame_bgr_.size() &&
+            last_person_mask_.type() == CV_8UC1) {
+            last_person_mask_.copyTo(cached_mask);
+        }
+    }
+
+    if (cached_frame.empty()) {
+        return false;
+    }
+
+    if (cached_mask.empty()) {
+        cached_mask = GetWhiteboardPersonMask(cached_frame);
+    }
+
+    cached_frame.copyTo(frame_bgr);
+    cached_mask.copyTo(person_mask);
+    return !frame_bgr.empty() && !person_mask.empty();
 }
 
 void NativeCamera::PushExternalFrame(const cv::Mat& frame) {
@@ -781,15 +635,26 @@ void NativeCamera::ProcessingThreadLoop() {
             const bool remote_process = g_whiteboard_canvas->IsRemoteProcess();
             bool overview_success = false;
             bool used_fallback_frame = false;
-            if (!g_whiteboard_canvas->IsRemoteProcess()) {
+
+            if (!remote_process) {
                 const auto yolo_start = std::chrono::steady_clock::now();
                 personMask = GetWhiteboardPersonMask(frame);
                 const auto yolo_end = std::chrono::steady_clock::now();
                 g_yolo_perf_stats.inference_ms += DurationMs(yolo_start, yolo_end);
                 g_yolo_perf_stats.refreshes++;
-
                 g_yolo_perf_stats.frames++;
                 MaybePrintYoloPerfLog();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                frame.copyTo(last_whiteboard_input_frame_bgr_);
+                if (!personMask.empty() && personMask.size() == frame.size() &&
+                    personMask.type() == CV_8UC1) {
+                    personMask.copyTo(last_person_mask_);
+                } else {
+                    last_person_mask_.release();
+                }
             }
 
             g_whiteboard_canvas->ProcessFrame(frame, personMask);

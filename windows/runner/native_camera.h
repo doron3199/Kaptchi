@@ -31,6 +31,7 @@ public:
     int32_t GetFrameWidth();
     int32_t GetFrameHeight();
     void RefreshDisplayFrame();
+    bool CopyLatestWhiteboardInput(cv::Mat& frame_bgr, cv::Mat& person_mask);
 
     // External frame input (for screen capture, etc.)
     void PushExternalFrame(const cv::Mat& frame);
@@ -51,6 +52,8 @@ private:
     
     cv::Mat current_frame_;
     cv::Mat last_source_frame_bgr_;
+    cv::Mat last_whiteboard_input_frame_bgr_;
+    cv::Mat last_person_mask_;
     std::vector<uint8_t> pixel_buffer_data_; 
     std::unique_ptr<FlutterDesktopPixelBuffer> flutter_pixel_buffer_;
     

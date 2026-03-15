@@ -1298,6 +1298,9 @@ class _GraphDebugScreenState extends State<GraphDebugScreen> {
             _infoRow('Created', 'frame ${node.createdFrame}'),
             _infoRow('Last seen', 'frame ${node.lastSeenFrame}'),
             _infoRow('Neighbors', '${node.neighborCount}'),
+            _infoRow('Match dist', node.matchDistance < 0
+                ? 'n/a'
+                : '${node.matchDistance}'),
           ],
         ),
       ),

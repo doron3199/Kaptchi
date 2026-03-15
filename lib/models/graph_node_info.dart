@@ -10,6 +10,7 @@ class GraphNodeInfo {
   final int createdFrame;
   final int neighborCount;
   final Offset canvasOrigin;
+  final int matchDistance; // BFS hop distance from matched blob (0=matched, 1=neighbor, -1=not seen)
   final List<Offset> contour; // Contour points in canvas coordinates
 
   const GraphNodeInfo({
@@ -22,6 +23,7 @@ class GraphNodeInfo {
     required this.createdFrame,
     required this.neighborCount,
     required this.canvasOrigin,
+    this.matchDistance = -1,
     this.contour = const [],
   });
 
@@ -39,6 +41,7 @@ class GraphNodeInfo {
       createdFrame: createdFrame,
       neighborCount: neighborCount,
       canvasOrigin: canvasOrigin,
+      matchDistance: matchDistance,
       contour: contour.map((p) => Offset(p.dx + dx, p.dy + dy)).toList(),
     );
   }
