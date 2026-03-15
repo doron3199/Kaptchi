@@ -51,6 +51,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <numeric>
 #include <sstream>
 #include <string>
 #include <unordered_set>
@@ -222,6 +223,24 @@ static float ShortEdgeSimilarity(const cv::Rect& a, const cv::Rect& b) {
     return RatioSimilarity(
         static_cast<float>(std::min(a.width, a.height)),
         static_cast<float>(std::min(b.width, b.height)));
+}
+
+static cv::Point2f ComputeGravityCenter(const cv::Mat& mask) {
+    if (mask.empty()) return cv::Point2f(0, 0);
+    int sum_x = 0, sum_y = 0, count = 0;
+    for (int y = 0; y < mask.rows; ++y) {
+        for (int x = 0; x < mask.cols; ++x) {
+            if (mask.at<uchar>(y, x) > 0) {
+                sum_x += x;
+                sum_y += y;
+                ++count;
+            }
+        }
+    }
+    if (count > 0) {
+        return cv::Point2f(sum_x / (float)count, sum_y / (float)count);
+    }
+    return cv::Point2f(0, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -720,7 +739,7 @@ static cv::Mat BuildFrameStrokeRejectMask(const cv::Size& frame_size,
 
     cv::Mat reject_mask(frame_size, CV_8UC1, cv::Scalar(0));
     const int side_margin = std::min(frame_size.width,
-                                     std::max(1, frame_size.width / 20));
+                                     std::max(5, frame_size.width / 100));
     reject_mask(cv::Rect(0, 0, side_margin, frame_size.height)).setTo(255);
 
     const int right_start = std::max(0, frame_size.width - side_margin);
@@ -728,8 +747,8 @@ static cv::Mat BuildFrameStrokeRejectMask(const cv::Size& frame_size,
                          frame_size.width - right_start,
                          frame_size.height)).setTo(255);
 
-    const int lecturer_margin_x = std::max(1, frame_size.width / 20);
-    const int lecturer_margin_y = std::max(1, frame_size.height / 20);
+    const int lecturer_margin_x = std::max(5, frame_size.width / 100);
+    const int lecturer_margin_y = std::max(5, frame_size.height / 100);
     const cv::Rect expanded_lecturer = ExpandRectWithinFrame(
         lecturer_frame_rect,
         frame_size,
@@ -789,10 +808,12 @@ static cv::Mat BuildBinaryMask(const cv::Mat& gray,
         cv::Mat binary;
     cv::adaptiveThreshold(gray, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-cv::THRESH_BINARY_INV, 51, 3);
+cv::THRESH_BINARY_INV, 51, 4);
     binary.setTo(0, no_update_mask);
 
-
+    // Dilate to connect close strokes
+    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
+    cv::dilate(binary, binary, kernel);
     stroke_pixel_count = cv::countNonZero(binary);
     return binary;
 }
@@ -2190,17 +2211,22 @@ WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary,
     std::vector<FrameBlob> result;
     if (binary.empty()) return result;
 
-    // Dilate to cluster nearby connected components into single blobs
-    cv::Mat dilated;
-    int diam = 2 * kBlobDilateRadius + 1;
-    cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(diam, diam));
-    cv::dilate(binary, dilated, kernel);
-
-    // Connected components on dilated image
+    // 1. Find connected components on raw binary mask
     cv::Mat labels, stats, centroids;
-    int num_labels = cv::connectedComponentsWithStats(dilated, labels, stats, centroids);
+    int num_labels = cv::connectedComponentsWithStats(binary, labels, stats, centroids);
+    if (num_labels <= 1) return result;
 
-    // Skip the background label 0 and process each connected component
+    struct StrokeComponent {
+        int label;
+        cv::Rect bbox;
+        cv::Point2f centroid;
+        double area;
+        std::vector<cv::Point> contour;
+    };
+
+    std::vector<StrokeComponent> components;
+    components.reserve(num_labels - 1);
+
     for (int i = 1; i < num_labels; i++) {
         int area = stats.at<int>(i, cv::CC_STAT_AREA);
         if (area < kMinContourArea) continue;
@@ -2210,7 +2236,6 @@ WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary,
         int bw = stats.at<int>(i, cv::CC_STAT_WIDTH);
         int bh = stats.at<int>(i, cv::CC_STAT_HEIGHT);
 
-        // Clamp to frame bounds
         bx = std::max(0, bx);
         by = std::max(0, by);
         bw = std::min(bw, binary.cols - bx);
@@ -2218,24 +2243,15 @@ WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary,
         if (bw <= 0 || bh <= 0) continue;
 
         cv::Rect bbox(bx, by, bw, bh);
+        cv::Mat cc_mask = (labels(bbox) == i);
+        
+        cv::Point2f local_centroid = ComputeGravityCenter(cc_mask);
+        cv::Point2f global_centroid(local_centroid.x + (float)bx, local_centroid.y + (float)by);
 
-        // Extract tight mask from original (undilated) binary within this bbox
-        cv::Mat tight_mask = binary(bbox).clone();
-
-        // Also mask by the component label to isolate this specific CC
-        cv::Mat label_roi = labels(bbox);
-        cv::Mat cc_mask = (label_roi == i);
-        cv::bitwise_and(tight_mask, cc_mask, tight_mask);
-
-        int tight_area = cv::countNonZero(tight_mask);
-        if (tight_area < kMinContourArea) continue;
-
-        // Extract contour from tight mask for Hu moments
         std::vector<std::vector<cv::Point>> contours;
-        cv::findContours(tight_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+        cv::findContours(cc_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
         if (contours.empty()) continue;
 
-        // Pick largest contour
         int largest_idx = 0;
         double largest_area = 0;
         for (int ci = 0; ci < (int)contours.size(); ci++) {
@@ -2243,43 +2259,105 @@ WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary,
             if (ca > largest_area) { largest_area = ca; largest_idx = ci; }
         }
 
-        // Compute Hu moments
-        cv::Moments m = cv::moments(contours[largest_idx]);
-        if (std::abs(m.m00) < 1e-6) continue;
+        StrokeComponent sc;
+        sc.label = i;
+        sc.bbox = bbox;
+        sc.centroid = global_centroid;
+        sc.area = largest_area;
+        sc.contour = contours[largest_idx];
+        components.push_back(std::move(sc));
+    }
 
-        FrameBlob blob;
-        blob.bbox = bbox;
-        // Gravity center: average x/y of all mask pixels within bbox
-        int sum_x = 0, sum_y = 0, count = 0;
-        for (int y = 0; y < tight_mask.rows; ++y) {
-            for (int x = 0; x < tight_mask.cols; ++x) {
-                if (tight_mask.at<uchar>(y, x) > 0) {
-                    sum_x += x;
-                    sum_y += y;
-                    ++count;
+    if (components.empty()) return result;
+
+    // 2. Group components by centroid distance using Union-Find
+    std::vector<int> parent(components.size());
+    std::iota(parent.begin(), parent.end(), 0);
+    auto find = [&](auto& self, int i) -> int {
+        return (parent[i] == i) ? i : (parent[i] = self(self, parent[i]));
+    };
+    auto unite = [&](int i, int j) {
+        int r_i = find(find, i);
+        int r_j = find(find, j);
+        if (r_i != r_j) parent[r_i] = r_j;
+    };
+
+    for (size_t i = 0; i < components.size(); i++) {
+        for (size_t j = i + 1; j < components.size(); j++) {
+            float d = static_cast<float>(cv::norm(components[i].centroid - components[j].centroid));
+            if (d < kStrokeClusterRadius) {
+                unite((int)i, (int)j);
+            }
+        }
+    }
+
+    // 3. Merge clusters into final FrameBlobs
+    std::unordered_map<int, std::vector<int>> clusters;
+    for (int i = 0; i < (int)components.size(); i++) {
+        clusters[find(find, i)].push_back(i);
+    }
+
+    for (auto& cp : clusters) {
+        const auto& indices = cp.second;
+        
+        cv::Rect g_bbox = components[indices[0]].bbox;
+        for (size_t k = 1; k < indices.size(); k++) {
+            g_bbox |= components[indices[k]].bbox;
+        }
+
+        cv::Mat g_mask = cv::Mat::zeros(g_bbox.size(), CV_8UC1);
+        double max_area = -1.0;
+        int area_best_idx = -1;
+        float best_squareness = -1.0f;
+        int square_best_idx = -1;
+
+        for (int idx : indices) {
+            const auto& sc = components[idx];
+            cv::Rect rel_roi(sc.bbox.x - g_bbox.x, sc.bbox.y - g_bbox.y, sc.bbox.width, sc.bbox.height);
+            cv::Mat label_roi = labels(sc.bbox);
+            cv::Mat cc_mask = (label_roi == sc.label);
+            cc_mask.copyTo(g_mask(rel_roi), cc_mask);
+
+            // Track largest area for fallback
+            if (sc.area > max_area) {
+                max_area = sc.area;
+                area_best_idx = idx;
+            }
+
+            // Track squarest stroke with radius > threshold
+            float w = static_cast<float>(sc.bbox.width);
+            float h = static_cast<float>(sc.bbox.height);
+            float radius = std::max(w, h) * 0.5f;
+            if (radius > kSquareSelectionRadiusThreshold) {
+                float squareness = std::min(w, h) / std::max(w, h);
+                if (squareness > best_squareness) {
+                    best_squareness = squareness;
+                    square_best_idx = idx;
                 }
             }
         }
-        if (count > 0) {
-            blob.centroid = cv::Point2f(sum_x / (float)count + bx, sum_y / (float)count + by);
-        } else {
-            blob.centroid = cv::Point2f((float)(m.m10 / m.m00) + bx, (float)(m.m01 / m.m00) + by);
-        }
-        blob.binary_mask = tight_mask;
-        blob.contour = contours[largest_idx];
-        blob.area = largest_area;
+
+        const int final_best_idx = (square_best_idx != -1) ? square_best_idx : area_best_idx;
+        const auto& best_sc = components[final_best_idx];
+
+        FrameBlob blob;
+        blob.bbox = g_bbox;
+        blob.binary_mask = g_mask;
+        cv::Point2f local_g = ComputeGravityCenter(g_mask);
+        blob.centroid = local_g + cv::Point2f((float)g_bbox.x, (float)g_bbox.y);
+        blob.contour = best_sc.contour;
+        blob.area = best_sc.area;
+
+        cv::Moments m = cv::moments(blob.contour);
         cv::HuMoments(m, blob.hu);
 
-        // Extract color pixels
         if (!frame_bgr.empty()) {
-            blob.color_pixels = frame_bgr(bbox).clone();
+            blob.color_pixels = frame_bgr(g_bbox).clone();
         }
-
         result.push_back(std::move(blob));
     }
 
     BuildFrameBlobNeighborGraph(result, kKNeighbors);
-
     return result;
 }
 

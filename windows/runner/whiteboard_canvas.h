@@ -335,17 +335,18 @@ private:
     static const int        kGraphSeedCandidateLimit = 24;
 
     // Graph matching
-    static const int        kBlobDilateRadius = 10; // Dilate extracted blobs before matching to allow for better contour alignment and more forgiving matching.
+    static constexpr float  kStrokeClusterRadius = 75.0f; // Max centroid distance to cluster strokes together.
+    static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
     static const int        kKNeighbors = 5; // Number of nearest graph nodes to consider when matching a blob, and number of neighbors to store for each node.
     static constexpr double kFrameGraphAnchorShapeDist = 0.20;       // Maximum shape distance for a blob to be trusted as a frame-graph anchor.
     static const int        kFrameGraphAnchorNeighbors = 4;          // Number of nearby matched blobs used to estimate a new blob's canvas position.
 
     // Duplicate-avoidance toggles
-    static constexpr bool   kEnableMergeNearIdenticalBbox = true;           // Merge existing nodes when their bbox size and IoU are almost identical.
-    static constexpr bool   kEnableMergeOverlapShapeContainment = true;     // Merge existing nodes when overlap, shape distance, and containment all indicate a duplicate.
-    static constexpr bool   kEnableMergeShiftedDuplicate = true;            // Merge translated duplicates using centroid-aligned mask overlap.
-    static constexpr bool   kEnableCanonicalDuplicateRetention = true;      // Keep the strongest canonical node during merges instead of simply keeping the newest one.
+    static constexpr bool   kEnableMergeNearIdenticalBbox = false;           // Merge existing nodes when their bbox size and IoU are almost identical.
+    static constexpr bool   kEnableMergeOverlapShapeContainment = false;     // Merge existing nodes when overlap, shape distance, and containment all indicate a duplicate.
+    static constexpr bool   kEnableMergeShiftedDuplicate = false;            // Merge translated duplicates using centroid-aligned mask overlap.
+    static constexpr bool   kEnableCanonicalDuplicateRetention = false;      // Keep the strongest canonical node during merges instead of simply keeping the newest one.
     static constexpr bool   kEnableMergeCenterAlignedDuplicate = true;     // Merge nodes when center-aligned bitwise AND exceeds threshold (catches shifted duplicates).
     static constexpr bool   kEnableMergeSideAlignedDuplicate = true;       // Merge nodes when side-attached alignment bitwise AND exceeds threshold.
     static constexpr bool   kEnableFrameStrokeRejectFilter = true;          // Reject whole frame blobs that touch the side margins or padded lecturer area before graph admission.
@@ -375,8 +376,8 @@ private:
     static constexpr float kMaxPredictedJumpPx      = 400.0f; // Absolute cap on velocity-predicted jump
 
     // Candidate confirmation (new-stroke patience)
-    static constexpr bool   kEnableCandidateStaging = true;      // Temporary bypass: add anchored new blobs directly to the graph.
-    static const int       kCandidateConfirmFrames = 3;   // Frames a blob must appear before becoming a node
+    static constexpr bool   kEnableCandidateStaging = false;      // Temporary bypass: add anchored new blobs directly to the graph.
+    static const int       kCandidateConfirmFrames = 5;   // Frames a blob must appear before becoming a node
     static const int       kCandidateExpireFrames  = 3;   // Consecutive processed frames without confirmation before a candidate is discarded
     static constexpr float kCandidateMatchRadiusPx = 30.0f; // Max centroid distance to match blob to candidate
     static constexpr double kCandidateMatchShapeDist = 0.35; // Max shape distance to match blob to candidate
