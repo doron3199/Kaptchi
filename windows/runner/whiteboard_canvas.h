@@ -122,22 +122,21 @@ private:
     // -----------------------------------------------------------------------
 
     static constexpr bool kEnableMotionGate = true;
-    static const int       kMotionForceInterval = 1;         // Process every N-th frame even with no motion. 0=disabled. Rec: 3-8.
 
     // Alignment improvements (each can be toggled independently)
-    static constexpr bool  kEnableJumpRejection      = true;  // Reject matches that jump too far from previous position.
-    static constexpr bool  kEnableNeighborBinMerge     = true;  // Merge winning vote bin with 8 neighbors for robustness.
+    static constexpr bool  kEnableJumpRejection      = false;  // Reject matches that jump too far from previous position.
+    static constexpr bool  kEnableNeighborBinMerge     = false;  // Merge winning vote bin with 8 neighbors for robustness.
     static constexpr bool  kEnablePhaseCorrelation     = true;  // Sub-pixel refinement via cv::phaseCorrelate after coarse match.
 
     static constexpr float kMaxJumpPx              = 40.0f;  // Max allowed position jump (px). Rec: 30-60.
-    static const int       kVoteBinSize            = 5;       // Vote bin quantisation (px). Smaller = finer. Rec: 5-15.
 
     // Sub-canvas creation
     static const int       kMinStrokePixelsForNewSC = 500;   // Min whiteboard pixels to spawn a new canvas. Low: noisy starts, High: missed content. Rec: 300-1000.
     static const int       kMotionLongEdge = 256;            // Downscale size for motion detection. Low: faster but blind to fine motion, High: slow. Rec: 128-512.
-    static constexpr float kMinMotionFraction = 0.01f;       // Min changed pixels to process frame. Low: processes noise, High: ignores slow movement. Rec: 0.005-0.03.
-    static constexpr float kMaxMotionFraction = 0.15f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
+    static constexpr float kMinMotionFraction = 0.001f;       // Min changed pixels to process frame. Low: processes noise, High: ignores slow movement. Rec: 0.005-0.03.
+    static constexpr float kMaxMotionFraction = 0.09f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
     static const int       kStillFramePatience = 8;          // Wait N frames of stillness before allowing matching. Low: hasty/unstable, High: sluggish. Rec: 5-15.
+    static const int       kFailedMatchPatience = 10;        // Spawns new sub-canvas after N consecutive match failures.
 
     // Worker queue
     static const int       kQueueDepth         = 1;          // Buffer for incoming frames. Higher increases lag but prevents dropped frames. Rec: 1-2.
@@ -164,8 +163,9 @@ private:
     static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (px). Rec: 20-60.
 
     // Contour matching
-    static constexpr double kMaxShapeDist    = 0.5; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
-    static const int        kMinContourArea  = 30;   // px² — filter noise. Low: keeps dust/artifacts, High: ignores small dots/letters. Rec: 10-100.
+    static constexpr float  kRectangleThreshold = 2.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
+    static constexpr double kMaxShapeDist    = 2.0; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
+    static const int        kMinContourArea  = 25;   // px² — filter noise. Low: keeps dust/artifacts, High: ignores small dots/letters. Rec: 10-100.
     static const int        kMinShapeVotes   = 5;    // min matched pairs to accept shift. Low: unstable/random jumps, High: hard to lock on. Rec: 2-5.
 
     // -----------------------------------------------------------------------
@@ -206,9 +206,9 @@ private:
     // Motion gate
     // -----------------------------------------------------------------------
     cv::Mat prev_gray_;                              // Store for previous frame to compute frame-to-frame delta.
-    int     frames_since_warp_ = 0;                  // Frames elapsed since the last successful spatial lock/alignment.
     int     matched_frame_counter_ = 0;              // Total count of frames that successfully matched to the canvas.
-    int     motion_frame_counter_ = 0;               // Counter for force-processing every N frames.
+    int     consecutive_failed_matches_ = 0;         // Counter for consecutive match failures.
+    float   last_match_accuracy_ = 0.0f;             // Voting consensus (votes) of the last successful match.
 
     // -----------------------------------------------------------------------
     // Canvas contour cache (rebuilt when new strokes are painted)
@@ -287,6 +287,12 @@ private:
     // Chunk Grid management
     uint64_t GetChunkHash(int grid_x, int grid_y) const;
     void EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y);
+
+    // Matching helpers
+    bool MatchContours(const std::vector<ContourShape>& frame_contours,
+                       const std::vector<ContourShape>& canvas_contours,
+                       cv::Point2f& out_pos, int& out_votes, int binSize);
+
     void PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
                               const cv::Mat& enhanced_bgr, cv::Point2f camera_pos,
                               const cv::Mat& no_update_mask = cv::Mat());

@@ -472,9 +472,8 @@ void WhiteboardCanvas::Reset() {
     next_debug_id_ = 0;
     frame_w_ = 0;
     frame_h_ = 0;
-    frames_since_warp_ = 0;
     matched_frame_counter_ = 0;
-    motion_frame_counter_ = 0;
+    consecutive_failed_matches_ = 0;
 
     perf_stats_ = PerformanceStats();
     perf_stats_.last_print_time = std::chrono::steady_clock::now();
@@ -661,7 +660,6 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         cv::Mat motion_gray;
         const bool has_content = has_content_.load();
         bool has_motion_reference = false;
-        bool motion_too_low = false;
         bool motion_too_high = false;
         const float motion_scale = ComputeScaleForLongEdge(gray.size(), kMotionLongEdge);
         if (motion_scale < 0.999f) {
@@ -683,23 +681,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         motion_gray.copyTo(prev_gray_);
 
         if (has_content && has_motion_reference) {
-            motion_too_low = motion_fraction < kMinMotionFraction &&
-                             frames_since_warp_ < kStillFramePatience;
             motion_too_high = motion_fraction > kMaxMotionFraction;
-        }
-
-        if (motion_too_low) {
-            frames_since_warp_++;
-        } else {
-            frames_since_warp_ = 0;
-        }
-
-        // Force-process every N frames regardless of motion
-        motion_frame_counter_++;
-        bool force_process = (kMotionForceInterval > 0)
-                           && (motion_frame_counter_ >= kMotionForceInterval);
-        if (force_process) {
-            motion_frame_counter_ = 0;
         }
 
         {
@@ -711,18 +693,14 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                    << " max=" << kMaxMotionFraction
                    << " hasPrev=" << (has_motion_reference ? 1 : 0)
                    << " hasContent=" << (has_content ? 1 : 0)
-                   << " stillFrames=" << frames_since_warp_
-                   << " forceIn=" << (kMotionForceInterval - motion_frame_counter_)
                    << " gate="
-                   << (force_process ? "forced"
-                                     : motion_too_low ? "below-min"
-                                      : motion_too_high ? "above-max"
-                                                        : has_motion_reference ? "pass"
-                                                                               : "warmup");
+                   << (motion_too_high ? "above-max"
+                                      : has_motion_reference ? "pass"
+                                                             : "warmup");
             WhiteboardLog(stream.str());
         }
 
-        if (!force_process && (motion_too_low || motion_too_high)) {
+        if (motion_too_high) {
 
             auto t_motion = std::chrono::steady_clock::now();
             perf_stats_.stage1_motion_ms +=
@@ -735,9 +713,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                 ds.binary = cv::Mat(gray.size(), CV_8U, cv::Scalar(0));
                 ds.person_mask = person_mask;
                 ds.motion_fraction = motion_fraction;
-                ds.match_status = motion_too_low
-                    ? "motion-gated-low"
-                    : "motion-gated-high";
+                ds.match_status = "motion-gated-high";
                 RenderDebugGrid(ds);
             }
             return;
@@ -759,7 +735,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         cv::resize(person_mask, small_mask, cv::Size(), 0.25, 0.25,
                    cv::INTER_NEAREST);
 
-        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.10f));
+        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.15f));
         pad |= 1;
         cv::Mat k_dilate = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(pad, pad));
         cv::dilate(small_mask, small_mask, k_dilate);
@@ -817,7 +793,9 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     std::string match_status;
     bool created_new_sc = false;
     int candidate_pair_count = 0;
-    int accepted_pair_count = 0;
+    int accepted_pair_count = 0; // Note: currently not updated in tiered mode
+    bool tier_matched = false;
+    int final_bin_size = 10;
 
     if (canvas_contours_dirty_ && active_group_idx_ >= 0
         && active_group_idx_ < (int)groups_.size()) {
@@ -826,78 +804,27 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
     if (active_group_idx_ >= 0 && active_group_idx_ < (int)groups_.size()
         && !canvas_contours_.empty() && !frame_contours.empty()) {
-
+        
         candidate_pair_count = static_cast<int>(canvas_contours_.size() * frame_contours.size());
 
-        std::unordered_map<int64_t, std::vector<cv::Point2f>> votes;
+        int bin_sizes[] = {2, 5, 10 };
 
-        for (const auto& cc : canvas_contours_) {
-            for (const auto& fc : frame_contours) {
-                double dist = cv::matchShapes(cc.contour, fc.contour,
-                                              cv::CONTOURS_MATCH_I2, 0);
-                if (dist > kMaxShapeDist) continue;
-                accepted_pair_count++;
-
-                float dx = cc.centroid.x - fc.centroid.x;
-                float dy = cc.centroid.y - fc.centroid.y;
-
-                int bin_x = (int)std::round(dx / (float)kVoteBinSize) * kVoteBinSize;
-                int bin_y = (int)std::round(dy / (float)kVoteBinSize) * kVoteBinSize;
-                int64_t key = (static_cast<int64_t>(static_cast<uint32_t>(bin_x)) << 32)
-                            | static_cast<uint32_t>(bin_y);
-                votes[key].push_back(cv::Point2f(dx, dy));
+        for (int bin_size : bin_sizes) {
+            int tier_votes = 0;
+            cv::Point2f tier_pos;
+            if (MatchContours(frame_contours, canvas_contours_, tier_pos, tier_votes, bin_size)) {
+                if (tier_votes > kMinShapeVotes && bin_size > 2) continue; // skip larger bins if we already have a good match
+                best_votes = tier_votes;
+                matched_pos = tier_pos;
+                final_bin_size = bin_size;
+                tier_matched = true;
+                break;
             }
         }
 
-        // Find the bin with most votes
-        int64_t best_key = 0;
-        for (const auto& vote : votes) {
-            const int vote_count = (int)vote.second.size();
-            if (vote_count > best_votes) {
-                best_votes = vote_count;
-                best_key = vote.first;
-            }
-        }
-
-        if (best_votes > 0) {
-            // Collect votes: optionally merge with 8 neighbor bins
-            std::vector<cv::Point2f> merged;
-            if (kEnableNeighborBinMerge) {
-                int center_bx = (int)(int32_t)(uint32_t)(best_key >> 32);
-                int center_by = (int)(int32_t)(uint32_t)(best_key & 0xFFFFFFFF);
-                for (int nx = -1; nx <= 1; nx++) {
-                    for (int ny = -1; ny <= 1; ny++) {
-                        int nbx = center_bx + nx * kVoteBinSize;
-                        int nby = center_by + ny * kVoteBinSize;
-                        int64_t nkey = (static_cast<int64_t>(static_cast<uint32_t>(nbx)) << 32)
-                                     | static_cast<uint32_t>(nby);
-                        auto it = votes.find(nkey);
-                        if (it != votes.end()) {
-                            merged.insert(merged.end(), it->second.begin(), it->second.end());
-                        }
-                    }
-                }
-                best_votes = (int)merged.size();
-            } else {
-                merged = votes[best_key];
-            }
-
-            // Median of merged pool (robust to outlier pairs)
-            std::vector<float> dxs, dys;
-            dxs.reserve(merged.size());
-            dys.reserve(merged.size());
-            for (const auto& pt : merged) {
-                dxs.push_back(pt.x);
-                dys.push_back(pt.y);
-            }
-            std::sort(dxs.begin(), dxs.end());
-            std::sort(dys.begin(), dys.end());
-            int mid = (int)merged.size() / 2;
-            matched_pos = cv::Point2f(dxs[mid], dys[mid]);
-        }
-
-        if (best_votes >= kMinShapeVotes) {
+        if (tier_matched) {
             best_group_idx = active_group_idx_;
+            last_match_accuracy_ = (float)best_votes;
         }
     }
 
@@ -907,10 +834,15 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
     {
         std::ostringstream stream;
+        stream << "[Performance] Tiered Matching - Final Bin: " << (tier_matched ? std::to_string(final_bin_size) : "NONE")
+               << " Votes: " << best_votes << " Accuracy: " << last_match_accuracy_;
+        WhiteboardLog(stream.str());
+    }
+    {
+        std::ostringstream stream;
         stream << "[Performance] Contours found: " << frame_contours.size()
                << ", Canvas contours compared: " << canvas_contours_.size()
-               << ", Candidate pairs: " << candidate_pair_count
-               << ", Accepted pairs: " << accepted_pair_count;
+               << ", Candidate pairs: " << candidate_pair_count;
         WhiteboardLog(stream.str());
     }
     {
@@ -939,7 +871,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                 cv::createHanningWindow(hann, frame_f.size(), CV_32F);
                 cv::Point2d subpx = cv::phaseCorrelate(canvas_f, frame_f, hann);
                 // Only apply small corrections (< half bin size)
-                if (std::abs(subpx.x) < kVoteBinSize && std::abs(subpx.y) < kVoteBinSize) {
+                if (std::abs(subpx.x) < final_bin_size && std::abs(subpx.y) < final_bin_size) {
                     matched_pos.x += (float)subpx.x;
                     matched_pos.y += (float)subpx.y;
                 }
@@ -1110,6 +1042,18 @@ WhiteboardCanvas::ExtractContourShapes(const cv::Mat& binary,
         const double area = cv::contourArea(c);
         if (area < kMinContourArea) continue;
 
+        // --- Aspect Ratio Filter ---
+        // Exclude strokes that are too "rectangular" (elongated), often representing board edges.
+        cv::Rect bbox = cv::boundingRect(c);
+        if (bbox.width > 0 && bbox.height > 0) {
+            float aspect_ratio = (bbox.width > bbox.height) 
+                               ? (float)bbox.width / (float)bbox.height 
+                               : (float)bbox.height / (float)bbox.width;
+            if (aspect_ratio >= kRectangleThreshold) {
+                continue;
+            }
+        }
+
         // Centroid via moments
         cv::Moments m = cv::moments(c);
         if (std::abs(m.m00) < 1e-6) continue;
@@ -1130,6 +1074,82 @@ WhiteboardCanvas::ExtractContourShapes(const cv::Mat& binary,
     }
 
     return result;
+}
+
+bool WhiteboardCanvas::MatchContours(const std::vector<ContourShape>& frame_contours,
+                                     const std::vector<ContourShape>& canvas_contours,
+                                     cv::Point2f& out_pos, int& out_votes, int binSize) {
+    if (canvas_contours.empty() || frame_contours.empty()) return false;
+
+    std::unordered_map<int64_t, std::vector<cv::Point2f>> votes;
+
+    for (const auto& cc : canvas_contours) {
+        for (const auto& fc : frame_contours) {
+            double dist = cv::matchShapes(cc.contour, fc.contour,
+                                          cv::CONTOURS_MATCH_I2, 0);
+            if (dist > kMaxShapeDist) continue;
+
+            float dx = cc.centroid.x - fc.centroid.x;
+            float dy = cc.centroid.y - fc.centroid.y;
+
+            int bin_x = (int)std::round(dx / (float)binSize) * binSize;
+            int bin_y = (int)std::round(dy / (float)binSize) * binSize;
+            int64_t key = (static_cast<int64_t>(static_cast<uint32_t>(bin_x)) << 32)
+                        | static_cast<uint32_t>(bin_y);
+            votes[key].push_back(cv::Point2f(dx, dy));
+        }
+    }
+
+    // Find the bin with most votes
+    int best_votes = 0;
+    int64_t best_key = 0;
+    for (const auto& vote : votes) {
+        const int vote_count = (int)vote.second.size();
+        if (vote_count > best_votes) {
+            best_votes = vote_count;
+            best_key = vote.first;
+        }
+    }
+
+    if (best_votes < kMinShapeVotes) return false;
+
+    // Collect votes: optionally merge with 8 neighbor bins
+    std::vector<cv::Point2f> merged;
+    if (kEnableNeighborBinMerge) {
+        int center_bx = (int)(int32_t)(uint32_t)(best_key >> 32);
+        int center_by = (int)(int32_t)(uint32_t)(best_key & 0xFFFFFFFF);
+        for (int nx = -1; nx <= 1; nx++) {
+            for (int ny = -1; ny <= 1; ny++) {
+                int nbx = center_bx + nx * binSize;
+                int nby = center_by + ny * binSize;
+                int64_t nkey = (static_cast<int64_t>(static_cast<uint32_t>(nbx)) << 32)
+                             | static_cast<uint32_t>(nby);
+                auto it = votes.find(nkey);
+                if (it != votes.end()) {
+                    merged.insert(merged.end(), it->second.begin(), it->second.end());
+                }
+            }
+        }
+        best_votes = (int)merged.size();
+    } else {
+        merged = votes[best_key];
+    }
+
+    // Median of merged pool (robust to outlier pairs)
+    std::vector<float> dxs, dys;
+    dxs.reserve(merged.size());
+    dys.reserve(merged.size());
+    for (const auto& pt : merged) {
+        dxs.push_back(pt.x);
+        dys.push_back(pt.y);
+    }
+    std::sort(dxs.begin(), dxs.end());
+    std::sort(dys.begin(), dys.end());
+    int mid = (int)merged.size() / 2;
+    out_pos = cv::Point2f(dxs[mid], dys[mid]);
+    out_votes = best_votes;
+
+    return true;
 }
 
 // Rebuilds canvas_contours_ from the current stroke render cache of `group`.
