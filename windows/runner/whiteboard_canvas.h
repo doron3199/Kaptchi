@@ -38,7 +38,7 @@ enum class CanvasRenderMode : int {
 // Chunk -- one fixed-size tile of the virtual infinite whiteboard
 // ---------------------------------------------------------------------------
 struct Chunk {
-    cv::Mat stroke_canvas;   // CV_8UC3, white-initialized, exactly 512x512
+    cv::Mat stroke_canvas;   // CV_8UC3, white-initialized, kChunkWidth x chunk_height_
     cv::Mat absence_counter; // CV_8UC1, zero-initialized, tracking erase frames
     cv::Mat raw_canvas;      // CV_8UC3, white-initialized raw mosaic tile
     int grid_x;
@@ -51,20 +51,20 @@ struct Chunk {
 struct WhiteboardGroup {
     int debug_id = -1;
 
-    // Spatial hash of 512x512 chunks
+    // Spatial hash of kChunkWidth x chunk_height_ chunks
     std::unordered_map<uint64_t, std::unique_ptr<Chunk>> chunks;
 
     // Stroke view bounds (in pixels)
     int stroke_min_px_x = 0;
     int stroke_min_px_y = 0;
-    int stroke_max_px_x = 512;
-    int stroke_max_px_y = 512;
+    int stroke_max_px_x = 0;
+    int stroke_max_px_y = 0;
 
     // Raw view bounds (in pixels)
     int raw_min_px_x = 0;
     int raw_min_px_y = 0;
-    int raw_max_px_x = 512;
-    int raw_max_px_y = 512;
+    int raw_max_px_x = 0;
+    int raw_max_px_y = 0;
 
     // Rendered stitched outputs for UI viewport
     cv::Mat stroke_render_cache;
@@ -128,13 +128,13 @@ private:
     static constexpr bool  kEnableNeighborBinMerge     = false;  // Merge winning vote bin with 8 neighbors for robustness.
     static constexpr bool  kEnablePhaseCorrelation     = true;  // Sub-pixel refinement via cv::phaseCorrelate after coarse match.
 
-    static constexpr float kMaxJumpPx              = 40.0f;  // Max allowed position jump (px). Rec: 30-60.
+    static constexpr float kMaxJumpPx              = 40.0f;  // Max allowed position jump (px at reference res). Rec: 30-60.
 
     // Sub-canvas creation
-    static const int       kMinStrokePixelsForNewSC = 500;   // Min whiteboard pixels to spawn a new canvas. Low: noisy starts, High: missed content. Rec: 300-1000.
+    static const int       kMinStrokePixelsForNewSC = 500;   // Min whiteboard pixels to spawn a new canvas (at reference res). Rec: 300-1000.
     static const int       kMotionLongEdge = 256;            // Downscale size for motion detection. Low: faster but blind to fine motion, High: slow. Rec: 128-512.
     static constexpr float kMinMotionFraction = 0.001f;       // Min changed pixels to process frame. Low: processes noise, High: ignores slow movement. Rec: 0.005-0.03.
-    static constexpr float kMaxMotionFraction = 0.09f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
+    static constexpr float kMaxMotionFraction = 0.10f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
     static const int       kStillFramePatience = 8;          // Wait N frames of stillness before allowing matching. Low: hasty/unstable, High: sluggish. Rec: 5-15.
     static const int       kFailedMatchPatience = 10;        // Spawns new sub-canvas after N consecutive match failures.
 
@@ -147,9 +147,9 @@ private:
     static constexpr bool  kEnableGhostBlock           = true;  // Block painting cells where overlap is high (duplicate ghost).
     static constexpr bool  kEnableAbsenceErasure       = true;  // Erase canvas cells when strokes disappear for N frames.
 
-    static const int       kProximityRadius     = 30;        // Pixel radius to suppress nearby matches. Low: duplicates, High: ignores dense content. Rec: 10-30.
-    static const int       kGridCellSize        = 100;       // Grid size for content density checks. Low: precise/slow, High: coarse. Rec: 100-400.
-    static const int       kMinCellStrokePixels = 50;         // Min pixels in cell to consider it "full". Low: over-sensitive, High: lets ghosts stay. Rec: 30-100.
+    static const int       kProximityRadius     = 30;        // Pixel radius to suppress nearby matches (at reference res). Rec: 10-30.
+    static const int       kGridCellSize        = 100;       // Grid size for content density checks (at reference res). Rec: 100-400.
+    static const int       kMinCellStrokePixels = 50;         // Min pixels in cell to consider it "full" (at reference res). Rec: 30-100.
     static constexpr float kCellReplaceIoU      = 0.40f;       // Overlap threshold to replace old data. Low: messy layers, High: stubborn old data. Rec: 0.1-0.4.
     static constexpr float kCellGhostOverlap    = 0.35f;       // Overlap threshold to flag a "ghost" stroke. Low: aggressive erasures, High: trails visible. Rec: 0.15-0.35.
     static const int       kAbsenceEraseFrames  = 5;          // Count of frames where stroke is missing to erase. Low: flickering, High: slow erase. Rec: 3-10.
@@ -159,21 +159,25 @@ private:
     static constexpr bool  kEnableBlurRejection   = true;   // Skip painting raw frame when it's blurry (camera in motion).
     static constexpr bool  kEnableRawEdgeFeather   = false;  // Fade out frame edges to blend seams in raw canvas.
     static constexpr float kBlurThreshold          = 30.0f;  // Laplacian variance below this = blurry. Low: strict, High: permissive. Rec: 30-80.
-    static const int       kRawEdgeMargin          = 30;     // Pixels to crop from each edge of raw frame. Rec: 15-50.
-    static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (px). Rec: 20-60.
+    static const int       kRawEdgeMargin          = 30;     // Pixels to crop from each edge of raw frame (at reference res). Rec: 15-50.
+    static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (at reference res). Rec: 20-60.
 
     // Contour matching
     static constexpr float  kRectangleThreshold = 2.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
     static constexpr double kMaxShapeDist    = 2.0; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
-    static const int        kMinContourArea  = 25;   // px² — filter noise. Low: keeps dust/artifacts, High: ignores small dots/letters. Rec: 10-100.
+    static const int        kMinContourArea  = 25;   // px² — filter noise (at reference res). Rec: 10-100.
     static const int        kMinShapeVotes   = 5;    // min matched pairs to accept shift. Low: unstable/random jumps, High: hard to lock on. Rec: 2-5.
 
     // -----------------------------------------------------------------------
     // Chunk Grid constants
     // -----------------------------------------------------------------------
-    static const int kChunkSize = 512;               // Size of internal memory tiles (px). Do not change without re-tuning. Rec: 512.
-    static const int kDefaultCanvasWidth = 1920;      // Initial view width if no content exists. Rec: 1280-1920.
-    static const int kDefaultCanvasHeight = 1080;     // Initial view height if no content exists. Rec: 720-1080.
+    static const int kChunkWidth = 512;              // Width of internal memory tiles (px). Do not change without re-tuning. Rec: 512.
+    int chunk_height_ = 0;                           // Height of chunks = frame_h_, set on first frame.
+
+    // Resolution-relative helpers: scale a reference-res value to actual frame_h_
+    static const int kReferenceHeight = 1080;
+    int ScalePx(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight)); }
+    int ScaleArea(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight * frame_h_ / kReferenceHeight)); }
 
     // -----------------------------------------------------------------------
     // Sub-canvas collection (protected by state_mutex_)

@@ -472,6 +472,7 @@ void WhiteboardCanvas::Reset() {
     next_debug_id_ = 0;
     frame_w_ = 0;
     frame_h_ = 0;
+    chunk_height_ = 0;
     matched_frame_counter_ = 0;
     consecutive_failed_matches_ = 0;
 
@@ -548,14 +549,13 @@ cv::Size WhiteboardCanvas::GetCanvasSize() const {
         }
         int min_px_x = 0;
         int min_px_y = 0;
-        int max_px_x = frame_w_ > 0 ? frame_w_ : kDefaultCanvasWidth;
-        int max_px_y = frame_h_ > 0 ? frame_h_ : kDefaultCanvasHeight;
+        int max_px_x = std::max(1, frame_w_);
+        int max_px_y = std::max(1, frame_h_);
         GetRenderBoundsForMode(group, render_mode, min_px_x, min_px_y, max_px_x, max_px_y);
         return cv::Size(std::max(1, max_px_x - min_px_x),
                         std::max(1, max_px_y - min_px_y));
     }
-    return cv::Size(frame_w_ > 0 ? frame_w_ : kDefaultCanvasWidth,
-                    frame_h_ > 0 ? frame_h_ : kDefaultCanvasHeight);
+    return cv::Size(std::max(1, frame_w_), std::max(1, frame_h_));
 }
 
 int WhiteboardCanvas::GetSubCanvasCount() const {
@@ -735,7 +735,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         cv::resize(person_mask, small_mask, cv::Size(), 0.25, 0.25,
                    cv::INTER_NEAREST);
 
-        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.15f));
+        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.05));
         pad |= 1;
         cv::Mat k_dilate = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(pad, pad));
         cv::dilate(small_mask, small_mask, k_dilate);
@@ -747,11 +747,6 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     // -------------------------------------------------------------------
     // STAGE 3: Enhance + Binarize (Optimized)
     // -------------------------------------------------------------------
-    // float enh_threshold = g_canvas_enhance_threshold.load();
-    // cv::Mat enhanced = WhiteboardEnhance(process_frame, enh_threshold);
-
-    // cv::Mat enhanced_gray;
-    // cv::cvtColor(enhanced, enhanced_gray, cv::COLOR_BGR2GRAY);
 
     cv::Mat binary;
     cv::adaptiveThreshold(gray, binary, 255,
@@ -785,7 +780,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
     std::lock_guard<std::mutex> state_lock(state_mutex_);
 
-    if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; }
+    if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; chunk_height_ = frame_h_; }
 
     int         best_group_idx = -1;
     int         best_votes = 0;
@@ -881,10 +876,11 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         // --- Jump rejection ---
         if (kEnableJumpRejection && matched_frame_counter_ > 0) {
             float jump = (float)cv::norm(matched_pos - global_camera_pos_);
-            if (jump > kMaxJumpPx) {
+            const float max_jump_px = (float)ScalePx((int)kMaxJumpPx);
+            if (jump > max_jump_px) {
                 WhiteboardLog("[WhiteboardCanvas] Jump rejected: "
                               + std::to_string(jump) + "px (max="
-                              + std::to_string(kMaxJumpPx) + ")");
+                              + std::to_string(max_jump_px) + ")");
                 matched_pos = global_camera_pos_;
             }
         }
@@ -904,7 +900,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                      + ","     + std::to_string((int)global_camera_pos_.y) + ")"
                      + " chunks=" + std::to_string(group.chunks.size());
 
-    } else if (groups_.empty() && stroke_pixel_count >= kMinStrokePixelsForNewSC) {
+    } else if (groups_.empty() && stroke_pixel_count >= ScaleArea(kMinStrokePixelsForNewSC)) {
         CreateSubCanvas(
             frame,
             binary,
@@ -1040,7 +1036,7 @@ WhiteboardCanvas::ExtractContourShapes(const cv::Mat& binary,
 
     for (const auto& c : raw) {
         const double area = cv::contourArea(c);
-        if (area < kMinContourArea) continue;
+        if (area < ScaleArea(kMinContourArea)) continue;
 
         // --- Aspect Ratio Filter ---
         // Exclude strokes that are too "rectangular" (elongated), often representing board edges.
@@ -1188,10 +1184,10 @@ cv::Mat WhiteboardCanvas::GetCanvasGrayRegion(WhiteboardGroup& group,
     int gx0 = global_x, gy0 = global_y;
     int gx1 = gx0 + width, gy1 = gy0 + height;
 
-    int sc_x = (int)std::floor((float)gx0 / kChunkSize);
-    int sc_y = (int)std::floor((float)gy0 / kChunkSize);
-    int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkSize);
-    int ec_y = (int)std::floor((float)(gy1 - 1) / kChunkSize);
+    int sc_x = (int)std::floor((float)gx0 / kChunkWidth);
+    int sc_y = (int)std::floor((float)gy0 / chunk_height_);
+    int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkWidth);
+    int ec_y = (int)std::floor((float)(gy1 - 1) / chunk_height_);
 
     // Check all required chunks exist
     for (int cy = sc_y; cy <= ec_y; cy++) {
@@ -1205,10 +1201,10 @@ cv::Mat WhiteboardCanvas::GetCanvasGrayRegion(WhiteboardGroup& group,
     cv::Mat region(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
     for (int cy = sc_y; cy <= ec_y; cy++) {
         for (int cx = sc_x; cx <= ec_x; cx++) {
-            int cpx = cx * kChunkSize, cpy = cy * kChunkSize;
+            int cpx = cx * kChunkWidth, cpy = cy * chunk_height_;
             int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
-            int ix1 = std::min(cpx + kChunkSize, gx1);
-            int iy1 = std::min(cpy + kChunkSize, gy1);
+            int ix1 = std::min(cpx + kChunkWidth, gx1);
+            int iy1 = std::min(cpy + chunk_height_, gy1);
             if (ix0 >= ix1 || iy0 >= iy1) continue;
 
             cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
@@ -1236,9 +1232,9 @@ void WhiteboardCanvas::EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, 
     uint64_t hash = GetChunkHash(grid_x, grid_y);
     if (group.chunks.find(hash) == group.chunks.end()) {
         auto chunk = std::make_unique<Chunk>();
-        chunk->stroke_canvas = cv::Mat(kChunkSize, kChunkSize, CV_8UC3, cv::Scalar(255, 255, 255));
-        chunk->absence_counter = cv::Mat(kChunkSize, kChunkSize, CV_8U, cv::Scalar(0));
-        chunk->raw_canvas = cv::Mat(kChunkSize, kChunkSize, CV_8UC3, cv::Scalar(255, 255, 255));
+        chunk->stroke_canvas = cv::Mat(chunk_height_, kChunkWidth, CV_8UC3, cv::Scalar(255, 255, 255));
+        chunk->absence_counter = cv::Mat(chunk_height_, kChunkWidth, CV_8U, cv::Scalar(0));
+        chunk->raw_canvas = cv::Mat(chunk_height_, kChunkWidth, CV_8UC3, cv::Scalar(255, 255, 255));
         chunk->grid_x = grid_x;
         chunk->grid_y = grid_y;
         group.chunks[hash] = std::move(chunk);
@@ -1282,10 +1278,10 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     if (global_end_x > group.stroke_max_px_x) group.stroke_max_px_x = global_end_x;
 
     // Chunk range that overlaps the bbox.
-    int start_chunk_x = (int)std::floor((float)global_start_x / kChunkSize);
-    int start_chunk_y = (int)std::floor((float)global_start_y / kChunkSize);
-    int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkSize);
-    int end_chunk_y   = (int)std::floor((float)global_end_y   / kChunkSize);
+    int start_chunk_x = (int)std::floor((float)global_start_x / kChunkWidth);
+    int start_chunk_y = (int)std::floor((float)global_start_y / chunk_height_);
+    int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkWidth);
+    int end_chunk_y   = (int)std::floor((float)global_end_y   / chunk_height_);
 
     // Ensure every required chunk exists before we start reading from them.
     for (int cy = start_chunk_y; cy <= end_chunk_y; cy++)
@@ -1301,13 +1297,13 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
 
     for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
         for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
-            int chunk_px_x = cx * kChunkSize;
-            int chunk_px_y = cy * kChunkSize;
+            int chunk_px_x = cx * kChunkWidth;
+            int chunk_px_y = cy * chunk_height_;
 
             int ix0 = std::max(chunk_px_x, global_start_x);
             int iy0 = std::max(chunk_px_y, global_start_y);
-            int ix1 = std::min(chunk_px_x + kChunkSize, global_end_x);
-            int iy1 = std::min(chunk_px_y + kChunkSize, global_end_y);
+            int ix1 = std::min(chunk_px_x + kChunkWidth, global_end_x);
+            int iy1 = std::min(chunk_px_y + chunk_height_, global_end_y);
             if (ix0 >= ix1 || iy0 >= iy1) continue;
 
             cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
@@ -1339,7 +1335,7 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     if (kEnableProximitySuppression) {
         cv::Mat canvas_stroke_zone;
         cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,
-            cv::Size(2 * kProximityRadius + 1, 2 * kProximityRadius + 1));
+            cv::Size(2 * ScalePx(kProximityRadius) + 1, 2 * ScalePx(kProximityRadius) + 1));
         cv::dilate(existing, canvas_stroke_zone, kernel);
         cv::bitwise_not(canvas_stroke_zone, prox_allow_mask);
     }
@@ -1355,10 +1351,11 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
     cv::Mat ghost_block(footprint.size(), CV_8U, cv::Scalar(0));
 
     if (kEnableGridReplace || kEnableGhostBlock || kEnableAbsenceErasure) {
-        for (int gy = 0; gy < footprint.rows; gy += kGridCellSize) {
-            for (int gx = 0; gx < footprint.cols; gx += kGridCellSize) {
-                int cw = std::min(kGridCellSize, footprint.cols - gx);
-                int ch = std::min(kGridCellSize, footprint.rows - gy);
+        const int grid_cell_size = ScalePx(kGridCellSize);
+        for (int gy = 0; gy < footprint.rows; gy += grid_cell_size) {
+            for (int gx = 0; gx < footprint.cols; gx += grid_cell_size) {
+                int cw = std::min(grid_cell_size, footprint.cols - gx);
+                int ch = std::min(grid_cell_size, footprint.rows - gy);
                 cv::Rect cell(gx, gy, cw, ch);
 
                 if (cv::countNonZero(no_update_bbox(cell)) > 0) {
@@ -1370,7 +1367,7 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
 
                 // Layer 4: Absence Erasure
                 if (kEnableAbsenceErasure
-                    && exist_count >= kMinCellStrokePixels && new_count < kAbsenceEraseThr) {
+                    && exist_count >= ScalePx(kMinCellStrokePixels) && new_count < kAbsenceEraseThr) {
                     absence_foot(cell) += 1;
                     cv::Mat absence_roi = absence_foot(cell);
                     cv::Mat erase_flag = (absence_roi >= kAbsenceEraseFrames);
@@ -1383,7 +1380,7 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
                     absence_foot(cell).setTo(0);
                 }
 
-                if (exist_count < kMinCellStrokePixels || new_count == 0) continue;
+                if (exist_count < ScalePx(kMinCellStrokePixels) || new_count == 0) continue;
 
                 cv::Mat inter;
                 cv::bitwise_and(new_strokes(cell), existing(cell), inter);
@@ -1432,13 +1429,13 @@ void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Ma
 
     for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
         for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
-            int chunk_px_x = cx * kChunkSize;
-            int chunk_px_y = cy * kChunkSize;
+            int chunk_px_x = cx * kChunkWidth;
+            int chunk_px_y = cy * chunk_height_;
 
             int ix0 = std::max(chunk_px_x, global_start_x);
             int iy0 = std::max(chunk_px_y, global_start_y);
-            int ix1 = std::min(chunk_px_x + kChunkSize, global_end_x);
-            int iy1 = std::min(chunk_px_y + kChunkSize, global_end_y);
+            int ix1 = std::min(chunk_px_x + kChunkWidth, global_end_x);
+            int iy1 = std::min(chunk_px_y + chunk_height_, global_end_y);
             if (ix0 >= ix1 || iy0 >= iy1) continue;
 
             cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
@@ -1499,7 +1496,7 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
     }
 
     // --- Build a paint region with edge margin ---
-    const int margin = kRawEdgeMargin;
+    const int margin = ScalePx(kRawEdgeMargin);
     const int fw = frame_bgr.cols, fh = frame_bgr.rows;
     // The sub-region of the frame that will actually be painted
     cv::Rect inner(margin, margin,
@@ -1518,9 +1515,10 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
 
     // --- Build feather alpha mask (0-255) for the inner region ---
     cv::Mat feather_alpha;
-    if (kEnableRawEdgeFeather && kRawFeatherWidth > 0) {
+    const int raw_feather_width = ScalePx(kRawFeatherWidth);
+    if (kEnableRawEdgeFeather && raw_feather_width > 0) {
         feather_alpha = cv::Mat(inner.height, inner.width, CV_8U, cv::Scalar(255));
-        const int fw_px = std::min(kRawFeatherWidth, std::min(inner.width, inner.height) / 2);
+        const int fw_px = std::min(raw_feather_width, std::min(inner.width, inner.height) / 2);
         for (int i = 0; i < fw_px; i++) {
             uchar val = (uchar)(255 * i / fw_px);
             // Top row
@@ -1544,22 +1542,22 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
         inner_no_update = no_update_mask(inner);
     }
 
-    int start_chunk_x = (int)std::floor((float)global_start_x / kChunkSize);
-    int start_chunk_y = (int)std::floor((float)global_start_y / kChunkSize);
-    int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkSize);
-    int end_chunk_y   = (int)std::floor((float)global_end_y   / kChunkSize);
+    int start_chunk_x = (int)std::floor((float)global_start_x / kChunkWidth);
+    int start_chunk_y = (int)std::floor((float)global_start_y / chunk_height_);
+    int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkWidth);
+    int end_chunk_y   = (int)std::floor((float)global_end_y   / chunk_height_);
 
     for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
         for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
             EnsureChunkAllocated(group, cx, cy);
 
-            int chunk_px_x = cx * kChunkSize;
-            int chunk_px_y = cy * kChunkSize;
+            int chunk_px_x = cx * kChunkWidth;
+            int chunk_px_y = cy * chunk_height_;
 
             int ix0 = std::max(chunk_px_x, global_start_x);
             int iy0 = std::max(chunk_px_y, global_start_y);
-            int ix1 = std::min(chunk_px_x + kChunkSize, global_end_x);
-            int iy1 = std::min(chunk_px_y + kChunkSize, global_end_y);
+            int ix1 = std::min(chunk_px_x + kChunkWidth, global_end_x);
+            int iy1 = std::min(chunk_px_y + chunk_height_, global_end_y);
             if (ix0 >= ix1 || iy0 >= iy1) continue;
 
             cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
@@ -1617,10 +1615,10 @@ void WhiteboardCanvas::RebuildStrokeRenderCache(WhiteboardGroup& group) {
 
     for (const auto& pair : group.chunks) {
         const auto& chunk = pair.second;
-        int chunk_left = chunk->grid_x * kChunkSize;
-        int chunk_top = chunk->grid_y * kChunkSize;
-        int chunk_right = chunk_left + kChunkSize;
-        int chunk_bottom = chunk_top + kChunkSize;
+        int chunk_left = chunk->grid_x * kChunkWidth;
+        int chunk_top = chunk->grid_y * chunk_height_;
+        int chunk_right = chunk_left + kChunkWidth;
+        int chunk_bottom = chunk_top + chunk_height_;
 
         int copy_left = std::max(chunk_left, group.stroke_min_px_x);
         int copy_top = std::max(chunk_top, group.stroke_min_px_y);
@@ -1652,10 +1650,10 @@ void WhiteboardCanvas::RebuildRawRenderCache(WhiteboardGroup& group) {
 
     for (const auto& pair : group.chunks) {
         const auto& chunk = pair.second;
-        int chunk_left = chunk->grid_x * kChunkSize;
-        int chunk_top = chunk->grid_y * kChunkSize;
-        int chunk_right = chunk_left + kChunkSize;
-        int chunk_bottom = chunk_top + kChunkSize;
+        int chunk_left = chunk->grid_x * kChunkWidth;
+        int chunk_top = chunk->grid_y * chunk_height_;
+        int chunk_right = chunk_left + kChunkWidth;
+        int chunk_bottom = chunk_top + chunk_height_;
 
         int copy_left = std::max(chunk_left, group.raw_min_px_x);
         int copy_top = std::max(chunk_top, group.raw_min_px_y);

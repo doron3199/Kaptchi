@@ -34,8 +34,8 @@ constexpr DWORD kStateReadLockTimeoutMs = 8;
 constexpr DWORD kHelperStartTimeoutMs = 5000;
 constexpr DWORD kHelperLoopWaitMs = 15;
 constexpr int kNoSubCanvasRequest = -1;
-constexpr int kDefaultCanvasWidth = 1920;
-constexpr int kDefaultCanvasHeight = 1080;
+constexpr int kFallbackCanvasWidth = 1;
+constexpr int kFallbackCanvasHeight = 1;
 constexpr int kYoloPerfLogMinFrames = 30;
 const auto kYoloPerfLogMinInterval = std::chrono::seconds(10);
 
@@ -63,8 +63,8 @@ struct SharedState {
     LONG overview_req_width = 0;
     LONG overview_req_height = 0;
     LONG has_content = 0;
-    LONG canvas_width = kDefaultCanvasWidth;
-    LONG canvas_height = kDefaultCanvasHeight;
+    LONG canvas_width = kFallbackCanvasWidth;
+    LONG canvas_height = kFallbackCanvasHeight;
     LONG subcanvas_count = 0;
     LONG active_subcanvas = -1;
     LONG frame_available = 0;
@@ -232,7 +232,7 @@ public:
         HelperYoloPerfStats yolo_perf_stats;
         cv::Mat last_viewport;
         cv::Mat last_overview;
-        cv::Size latest_output_size(kDefaultCanvasWidth, kDefaultCanvasHeight);
+        cv::Size latest_output_size(0, 0);
 
         while (true) {
             WaitForSingleObject(wake_event_.get(), kHelperLoopWaitMs);
@@ -489,8 +489,8 @@ struct WhiteboardCanvasHelperClient::Impl {
     std::atomic<bool> cached_has_content{false};
     std::atomic<bool> cached_canvas_view_mode{false};
     std::atomic<int> cached_render_mode{static_cast<int>(CanvasRenderMode::kStroke)};
-    std::atomic<int> cached_canvas_width{kDefaultCanvasWidth};
-    std::atomic<int> cached_canvas_height{kDefaultCanvasHeight};
+    std::atomic<int> cached_canvas_width{kFallbackCanvasWidth};
+    std::atomic<int> cached_canvas_height{kFallbackCanvasHeight};
     std::atomic<int> cached_subcanvas_count{0};
     std::atomic<int> cached_active_subcanvas{-1};
 
@@ -523,8 +523,8 @@ struct WhiteboardCanvasHelperClient::Impl {
         cached_canvas_view_mode.store(false, std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(CanvasRenderMode::kStroke),
                                  std::memory_order_relaxed);
-        cached_canvas_width.store(kDefaultCanvasWidth, std::memory_order_relaxed);
-        cached_canvas_height.store(kDefaultCanvasHeight, std::memory_order_relaxed);
+        cached_canvas_width.store(kFallbackCanvasWidth, std::memory_order_relaxed);
+        cached_canvas_height.store(kFallbackCanvasHeight, std::memory_order_relaxed);
         cached_subcanvas_count.store(0, std::memory_order_relaxed);
         cached_active_subcanvas.store(-1, std::memory_order_relaxed);
     }
@@ -597,8 +597,8 @@ bool WhiteboardCanvasHelperClient::Start() {
     impl_->shared->zoom = 1.0f;
     impl_->shared->enhance_threshold = 5.0f;
     impl_->shared->yolo_fps = 2.0f;
-    impl_->shared->canvas_width = kDefaultCanvasWidth;
-    impl_->shared->canvas_height = kDefaultCanvasHeight;
+    impl_->shared->canvas_width = kFallbackCanvasWidth;
+    impl_->shared->canvas_height = kFallbackCanvasHeight;
     impl_->ResetCachedState();
 
     wchar_t exe_path[MAX_PATH] = {0};
@@ -865,7 +865,7 @@ CanvasRenderMode WhiteboardCanvasHelperClient::GetRenderMode() const {
 }
 
 cv::Size WhiteboardCanvasHelperClient::GetCanvasSize() const {
-    if (!IsReady()) return cv::Size(kDefaultCanvasWidth, kDefaultCanvasHeight);
+    if (!IsReady()) return cv::Size(kFallbackCanvasWidth, kFallbackCanvasHeight);
     impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
         impl_->RefreshCachedStateUnsafe();
     });
