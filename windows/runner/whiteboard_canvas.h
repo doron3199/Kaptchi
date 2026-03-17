@@ -126,7 +126,26 @@ private:
     // Alignment improvements (each can be toggled independently)
     static constexpr bool  kEnableJumpRejection      = false;  // Reject matches that jump too far from previous position.
     static constexpr bool  kEnableNeighborBinMerge     = false;  // Merge winning vote bin with 8 neighbors for robustness.
-    static constexpr bool  kEnablePhaseCorrelation     = true;  // Sub-pixel refinement via cv::phaseCorrelate after coarse match.
+
+    // Sub-pixel refinement methods (at most one should be enabled at a time)
+    static constexpr bool  kEnableECCRefinement        = false;  // ECC optimization: spatial-domain iterative search. Handles intensity changes well. Slow (~5-15ms).
+    static constexpr bool  kEnableTemplateRefinement    = true;  // Template matching: brute-force correlation of ink-rich patches. Sub-pixel via parabola fit.
+    static constexpr bool  kEnableLKRefinement          = false;   // Lucas-Kanade optical flow: tracks contour centroids between frames. Very fast (<1ms).
+
+    // ECC parameters
+    static const int       kECCMaxIterations           = 50;     // Max iterations for ECC optimization. Rec: 30-100.
+    static constexpr double kECCTerminationEps         = 1e-4;   // Convergence threshold for ECC. Lower = more precise but slower. Rec: 1e-5 to 1e-3.
+    static constexpr float kECCMaxCorrection           = 10.0f;  // Max pixel correction from ECC. Reject larger shifts.
+
+    // Template matching parameters
+    static const int       kTemplateMatchPatchSize     = 64;     // Size of the ink-rich patch to match (px at reference res). Rec: 32-128.
+    static const int       kTemplateMatchSearchRadius  = 15;     // Search radius around expected position (px at reference res). Rec: 5-20.
+    static constexpr float kTemplateMaxCorrection      = 10.0f;  // Max pixel correction from template matching.
+
+    // Lucas-Kanade parameters
+    static const int       kLKMinTrackedPoints         = 3;      // Min contour centroids to track. Rec: 3-10.
+    static const int       kLKMaxTrackedPoints         = 20;     // Max contour centroids to track. Rec: 10-30.
+    static constexpr float kLKMaxCorrection            = 10.0f;  // Max pixel correction from LK flow.
 
     static constexpr float kMaxJumpPx              = 40.0f;  // Max allowed position jump (px at reference res). Rec: 30-60.
 
@@ -134,7 +153,7 @@ private:
     static const int       kMinStrokePixelsForNewSC = 500;   // Min whiteboard pixels to spawn a new canvas (at reference res). Rec: 300-1000.
     static const int       kMotionLongEdge = 256;            // Downscale size for motion detection. Low: faster but blind to fine motion, High: slow. Rec: 128-512.
     static constexpr float kMinMotionFraction = 0.001f;       // Min changed pixels to process frame. Low: processes noise, High: ignores slow movement. Rec: 0.005-0.03.
-    static constexpr float kMaxMotionFraction = 0.10f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
+    static constexpr float kMaxMotionFraction = 0.08f;       // Max changed pixels to process frame. Low: ignores fast pans, High: allows blurry frames. Rec: 0.10-0.25.
     static const int       kStillFramePatience = 8;          // Wait N frames of stillness before allowing matching. Low: hasty/unstable, High: sluggish. Rec: 5-15.
     static const int       kFailedMatchPatience = 10;        // Spawns new sub-canvas after N consecutive match failures.
 
@@ -163,9 +182,9 @@ private:
     static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (at reference res). Rec: 20-60.
 
     // Contour matching
-    static constexpr float  kRectangleThreshold = 2.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
-    static constexpr double kMaxShapeDist    = 2.0; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
-    static const int        kMinContourArea  = 25;   // px² — filter noise (at reference res). Rec: 10-100.
+    static constexpr float  kRectangleThreshold = 3.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
+    static constexpr double kMaxShapeDist    = 0.7; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
+    static const int        kMinContourArea  = 30;   // px² — filter noise (at reference res). Rec: 10-100.
     static const int        kMinShapeVotes   = 5;    // min matched pairs to accept shift. Low: unstable/random jumps, High: hard to lock on. Rec: 2-5.
 
     // -----------------------------------------------------------------------
@@ -210,6 +229,8 @@ private:
     // Motion gate
     // -----------------------------------------------------------------------
     cv::Mat prev_gray_;                              // Store for previous frame to compute frame-to-frame delta.
+    cv::Mat prev_frame_gray_;                        // Full-res gray of previous successfully matched frame (for LK flow).
+    std::vector<cv::Point2f> prev_tracked_points_;   // Contour centroids from the previous matched frame (for LK flow).
     int     matched_frame_counter_ = 0;              // Total count of frames that successfully matched to the canvas.
     int     consecutive_failed_matches_ = 0;         // Counter for consecutive match failures.
     float   last_match_accuracy_ = 0.0f;             // Voting consensus (votes) of the last successful match.
@@ -283,11 +304,19 @@ private:
                                                    cv::Point2f roi_offset) const;
     void RebuildCanvasContours(WhiteboardGroup& group);
 
-    // Phase correlation: extract a gray region from canvas chunks at global position.
+    // Extract a gray region from canvas chunks at global position.
     cv::Mat GetCanvasGrayRegion(WhiteboardGroup& group, int global_x, int global_y,
                                 int width, int height);
 
-    
+    // Sub-pixel refinement methods (called after coarse contour match in stage 4)
+    bool RefineWithECC(WhiteboardGroup& group, const cv::Mat& gray,
+                       cv::Point2f& pos, int bin_size);
+    bool RefineWithTemplate(WhiteboardGroup& group, const cv::Mat& binary, const cv::Mat& gray,
+                            cv::Point2f& pos);
+    bool RefineWithLK(const cv::Mat& gray,
+                      const std::vector<ContourShape>& frame_contours,
+                      cv::Point2f& pos);
+
     // Chunk Grid management
     uint64_t GetChunkHash(int grid_x, int grid_y) const;
     void EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y);

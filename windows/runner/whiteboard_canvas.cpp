@@ -225,7 +225,7 @@ WhiteboardCanvas::WhiteboardCanvas() {
     }
 
     worker_thread_ = std::thread(&WhiteboardCanvas::WorkerLoop, this);
-    WhiteboardLog("[WhiteboardCanvas] Initialized (phase-correlation)");
+    WhiteboardLog("[WhiteboardCanvas] Initialized (contour-match + refinement)");
 }
 
 WhiteboardCanvas::~WhiteboardCanvas() {
@@ -460,6 +460,8 @@ void WhiteboardCanvas::Reset() {
     global_camera_pos_ = cv::Point2f(0, 0);
 
     prev_gray_ = cv::Mat();
+    prev_frame_gray_ = cv::Mat();
+    prev_tracked_points_.clear();
     canvas_contours_.clear();
     canvas_contours_dirty_ = true;
     has_content_ = false;
@@ -725,12 +727,16 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         std::chrono::duration<double, std::milli>(t_motion - t_start).count();
 
     // -------------------------------------------------------------------
-    // STAGE 2: Person occlusion mask (used as a no-update zone)
+    // STAGE 2: Person occlusion mask (required -- skip if absent)
     // -------------------------------------------------------------------
     bool has_person_mask = !person_mask.empty() && person_mask.size() == gray.size();
-    cv::Mat person_mask_dilated;
+    if (!has_person_mask) {
+        WhiteboardLog("[WhiteboardCanvas] No person mask -- skipping frame");
+        return;
+    }
 
-    if (has_person_mask) {
+    cv::Mat person_mask_dilated;
+    {
         cv::Mat small_mask;
         cv::resize(person_mask, small_mask, cv::Size(), 0.25, 0.25,
                    cv::INTER_NEAREST);
@@ -742,6 +748,29 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
         cv::resize(small_mask, person_mask_dilated, frame.size(), 0, 0,
                    cv::INTER_NEAREST);
+    }
+
+    // Compute left/right strips beside the person
+    cv::Rect person_bbox = cv::boundingRect(person_mask_dilated);
+    struct FrameStrip { int x; int width; };
+    std::vector<FrameStrip> strips;
+
+    static constexpr int kMinStripWidth = 512;
+
+    int left_width = person_bbox.x;
+    if (left_width >= kMinStripWidth) {
+        strips.push_back({0, left_width});
+    }
+    int right_x = person_bbox.x + person_bbox.width;
+    int right_width = frame.cols - right_x;
+    if (right_width >= kMinStripWidth) {
+        strips.push_back({right_x, right_width});
+    }
+
+    if (strips.empty()) {
+        WhiteboardLog("[WhiteboardCanvas] No valid strips (both sides < "
+                      + std::to_string(kMinStripWidth) + "px) -- skipping frame");
+        return;
     }
 
     // -------------------------------------------------------------------
@@ -853,24 +882,13 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     if (best_group_idx >= 0) {
         auto& group = *groups_[best_group_idx];
 
-        // --- Phase correlation: sub-pixel refinement ---
-        if (kEnablePhaseCorrelation) {
-            cv::Mat canvas_gray_roi = GetCanvasGrayRegion(
-                group, (int)std::round(matched_pos.x), (int)std::round(matched_pos.y),
-                frame.cols, frame.rows);
-            if (!canvas_gray_roi.empty() && canvas_gray_roi.size() == gray.size()) {
-                cv::Mat frame_f, canvas_f;
-                gray.convertTo(frame_f, CV_32F);
-                canvas_gray_roi.convertTo(canvas_f, CV_32F);
-                cv::Mat hann;
-                cv::createHanningWindow(hann, frame_f.size(), CV_32F);
-                cv::Point2d subpx = cv::phaseCorrelate(canvas_f, frame_f, hann);
-                // Only apply small corrections (< half bin size)
-                if (std::abs(subpx.x) < final_bin_size && std::abs(subpx.y) < final_bin_size) {
-                    matched_pos.x += (float)subpx.x;
-                    matched_pos.y += (float)subpx.y;
-                }
-            }
+        // --- Sub-pixel refinement (one method at a time) ---
+        if (kEnableECCRefinement) {
+            RefineWithECC(group, gray, matched_pos, final_bin_size);
+        } else if (kEnableTemplateRefinement) {
+            RefineWithTemplate(group, binary, gray, matched_pos);
+        } else if (kEnableLKRefinement) {
+            RefineWithLK(gray, frame_contours, matched_pos);
         }
 
         // --- Jump rejection ---
@@ -887,9 +905,33 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
 
         global_camera_pos_ = matched_pos;
 
-        PaintStrokesToChunks(group, binary, stroke_paint_bgr, global_camera_pos_,
-                     person_mask_dilated);
-        PaintRawFrameToChunks(group, frame, global_camera_pos_, person_mask_dilated);
+        // Update LK tracking state for next frame
+        if (kEnableLKRefinement) {
+            gray.copyTo(prev_frame_gray_);
+            prev_tracked_points_.clear();
+            // Pick top centroids from matched frame contours (sorted by area, descending)
+            std::vector<const ContourShape*> sorted_fc;
+            sorted_fc.reserve(frame_contours.size());
+            for (const auto& fc : frame_contours) sorted_fc.push_back(&fc);
+            std::sort(sorted_fc.begin(), sorted_fc.end(),
+                      [](const ContourShape* a, const ContourShape* b) { return a->area > b->area; });
+            int n = std::min((int)sorted_fc.size(), kLKMaxTrackedPoints);
+            for (int i = 0; i < n; i++) {
+                prev_tracked_points_.push_back(sorted_fc[i]->centroid);
+            }
+        }
+
+        // Paint each strip (left/right of person) separately
+        for (const auto& strip : strips) {
+            cv::Rect strip_roi(strip.x, 0, strip.width, frame.rows);
+            cv::Mat strip_binary = binary(strip_roi);
+            cv::Mat strip_paint  = stroke_paint_bgr(strip_roi);
+            cv::Mat strip_frame  = frame(strip_roi);
+            cv::Point2f strip_pos(global_camera_pos_.x + strip.x,
+                                  global_camera_pos_.y);
+            PaintStrokesToChunks(group, strip_binary, strip_paint, strip_pos);
+            PaintRawFrameToChunks(group, strip_frame, strip_pos);
+        }
 
         active_group_idx_ = best_group_idx;
         has_content_ = true;
@@ -905,9 +947,21 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
             frame,
             binary,
             stroke_paint_bgr,
-            frame_contours,
-            person_mask_dilated,
-            person_mask_dilated);
+            frame_contours);
+        // Paint strips into the newly created group
+        {
+            auto& new_group = *groups_.back();
+            for (const auto& strip : strips) {
+                cv::Rect strip_roi(strip.x, 0, strip.width, frame.rows);
+                cv::Mat strip_binary = binary(strip_roi);
+                cv::Mat strip_paint  = stroke_paint_bgr(strip_roi);
+                cv::Mat strip_frame  = frame(strip_roi);
+                cv::Point2f strip_pos(global_camera_pos_.x + strip.x,
+                                      global_camera_pos_.y);
+                PaintStrokesToChunks(new_group, strip_binary, strip_paint, strip_pos);
+                PaintRawFrameToChunks(new_group, strip_frame, strip_pos);
+            }
+        }
         created_new_sc = true;
         match_status = "NEW GROUP (total=" + std::to_string(groups_.size()) + ")";
 
@@ -1216,6 +1270,203 @@ cv::Mat WhiteboardCanvas::GetCanvasGrayRegion(WhiteboardGroup& group,
     cv::Mat gray_region;
     cv::cvtColor(region, gray_region, cv::COLOR_BGR2GRAY);
     return gray_region;
+}
+
+// ============================================================================
+//  SECTION 7b: Sub-pixel Refinement Methods
+// ============================================================================
+
+// --- ECC (Enhanced Correlation Coefficient) Refinement ---
+// Uses cv::findTransformECC in MOTION_TRANSLATION mode to iteratively
+// refine the coarse contour-voted position in the spatial domain.
+// Handles intensity changes (shadows, auto-exposure) better than FFT methods.
+bool WhiteboardCanvas::RefineWithECC(WhiteboardGroup& group, const cv::Mat& gray,
+                                      cv::Point2f& pos, int bin_size) {
+    cv::Mat canvas_gray_roi = GetCanvasGrayRegion(
+        group, (int)std::round(pos.x), (int)std::round(pos.y),
+        gray.cols, gray.rows);
+    if (canvas_gray_roi.empty() || canvas_gray_roi.size() != gray.size()) return false;
+
+    cv::Mat warp_matrix = cv::Mat::eye(2, 3, CV_32F);
+    cv::TermCriteria criteria(
+        cv::TermCriteria::COUNT | cv::TermCriteria::EPS,
+        kECCMaxIterations, kECCTerminationEps);
+
+    try {
+        cv::findTransformECC(canvas_gray_roi, gray, warp_matrix,
+                             cv::MOTION_TRANSLATION, criteria);
+        float dx = warp_matrix.at<float>(0, 2);
+        float dy = warp_matrix.at<float>(1, 2);
+
+        if (std::abs(dx) < kECCMaxCorrection && std::abs(dy) < kECCMaxCorrection) {
+            pos.x += dx;
+            pos.y += dy;
+            WhiteboardLog("[ECC] Refined by dx=" + std::to_string(dx)
+                          + " dy=" + std::to_string(dy));
+            return true;
+        }
+        WhiteboardLog("[ECC] Correction too large: dx=" + std::to_string(dx)
+                      + " dy=" + std::to_string(dy) + ", rejected");
+    } catch (const cv::Exception& e) {
+        WhiteboardLog(std::string("[ECC] Failed: ") + e.what());
+    }
+    return false;
+}
+
+// --- Template Matching Refinement ---
+// Takes a small ink-rich patch from the current frame and slides it over
+// the canvas to find the best correlation. Sub-pixel accuracy via 2D
+// parabola fit around the peak.
+bool WhiteboardCanvas::RefineWithTemplate(WhiteboardGroup& group,
+                                           const cv::Mat& binary,
+                                           const cv::Mat& gray,
+                                           cv::Point2f& pos) {
+    const int patch_size = ScalePx(kTemplateMatchPatchSize);
+    const int search_radius = ScalePx(kTemplateMatchSearchRadius);
+
+    // Find the densest ink patch in the binary image
+    cv::Rect best_patch;
+    int best_density = 0;
+    for (int y = 0; y <= binary.rows - patch_size; y += patch_size / 2) {
+        for (int x = 0; x <= binary.cols - patch_size; x += patch_size / 2) {
+            cv::Rect r(x, y, patch_size, patch_size);
+            int density = cv::countNonZero(binary(r));
+            if (density > best_density) {
+                best_density = density;
+                best_patch = r;
+            }
+        }
+    }
+
+    if (best_density < patch_size) return false; // Not enough ink
+
+    // Extract template from current frame gray
+    cv::Mat templ = gray(best_patch);
+
+    // Extract search region from canvas (patch area + search_radius on each side)
+    int search_x = (int)std::round(pos.x) + best_patch.x - search_radius;
+    int search_y = (int)std::round(pos.y) + best_patch.y - search_radius;
+    int search_w = patch_size + 2 * search_radius;
+    int search_h = patch_size + 2 * search_radius;
+
+    cv::Mat canvas_roi = GetCanvasGrayRegion(group, search_x, search_y,
+                                             search_w, search_h);
+    if (canvas_roi.empty() || canvas_roi.cols < templ.cols || canvas_roi.rows < templ.rows) {
+        return false;
+    }
+
+    cv::Mat result;
+    cv::matchTemplate(canvas_roi, templ, result, cv::TM_CCOEFF_NORMED);
+    if (result.empty()) return false;
+
+    // Find best match
+    double minVal, maxVal;
+    cv::Point minLoc, maxLoc;
+    cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc);
+
+    if (maxVal < 0.5) return false; // Poor match
+
+    // Sub-pixel refinement via parabola fit on 3x3 neighborhood
+    float sub_x = (float)maxLoc.x;
+    float sub_y = (float)maxLoc.y;
+
+    if (maxLoc.x > 0 && maxLoc.x < result.cols - 1) {
+        float left  = result.at<float>(maxLoc.y, maxLoc.x - 1);
+        float center = result.at<float>(maxLoc.y, maxLoc.x);
+        float right = result.at<float>(maxLoc.y, maxLoc.x + 1);
+        float denom = 2.0f * (2.0f * center - left - right);
+        if (std::abs(denom) > 1e-6f) {
+            sub_x += (left - right) / denom;
+        }
+    }
+    if (maxLoc.y > 0 && maxLoc.y < result.rows - 1) {
+        float top    = result.at<float>(maxLoc.y - 1, maxLoc.x);
+        float center = result.at<float>(maxLoc.y, maxLoc.x);
+        float bottom = result.at<float>(maxLoc.y + 1, maxLoc.x);
+        float denom = 2.0f * (2.0f * center - top - bottom);
+        if (std::abs(denom) > 1e-6f) {
+            sub_y += (top - bottom) / denom;
+        }
+    }
+
+    // The expected match position is at (search_radius, search_radius).
+    // The correction is the difference from that.
+    float dx = sub_x - (float)search_radius;
+    float dy = sub_y - (float)search_radius;
+
+    if (std::abs(dx) < kTemplateMaxCorrection && std::abs(dy) < kTemplateMaxCorrection) {
+        pos.x += dx;
+        pos.y += dy;
+        WhiteboardLog("[TemplateMatch] Refined by dx=" + std::to_string(dx)
+                      + " dy=" + std::to_string(dy)
+                      + " score=" + std::to_string(maxVal));
+        return true;
+    }
+    WhiteboardLog("[TemplateMatch] Correction too large: dx=" + std::to_string(dx)
+                  + " dy=" + std::to_string(dy) + ", rejected");
+    return false;
+}
+
+// --- Lucas-Kanade Optical Flow Refinement ---
+// Tracks contour centroids from the previous matched frame to the current frame.
+// Computes median flow vector as the sub-pixel correction.
+// Very fast (<1ms) since it only tracks a handful of sparse points.
+bool WhiteboardCanvas::RefineWithLK(const cv::Mat& gray,
+                                     const std::vector<ContourShape>& frame_contours,
+                                     cv::Point2f& pos) {
+    if (prev_frame_gray_.empty() || prev_tracked_points_.size() < (size_t)kLKMinTrackedPoints) {
+        return false;
+    }
+    if (prev_frame_gray_.size() != gray.size()) {
+        return false;
+    }
+
+    std::vector<cv::Point2f> next_points;
+    std::vector<uchar> status;
+    std::vector<float> err;
+
+    cv::calcOpticalFlowPyrLK(prev_frame_gray_, gray,
+                             prev_tracked_points_, next_points,
+                             status, err,
+                             cv::Size(21, 21), 3);
+
+    // Collect valid flow vectors
+    std::vector<float> flow_x, flow_y;
+    for (size_t i = 0; i < status.size(); i++) {
+        if (!status[i]) continue;
+        float fx = next_points[i].x - prev_tracked_points_[i].x;
+        float fy = next_points[i].y - prev_tracked_points_[i].y;
+        flow_x.push_back(fx);
+        flow_y.push_back(fy);
+    }
+
+    if ((int)flow_x.size() < kLKMinTrackedPoints) {
+        WhiteboardLog("[LK] Too few tracked points: " + std::to_string(flow_x.size()));
+        return false;
+    }
+
+    // Median flow
+    std::sort(flow_x.begin(), flow_x.end());
+    std::sort(flow_y.begin(), flow_y.end());
+    int mid = (int)flow_x.size() / 2;
+    float dx = flow_x[mid];
+    float dy = flow_y[mid];
+
+    if (std::abs(dx) < kLKMaxCorrection && std::abs(dy) < kLKMaxCorrection) {
+        // LK gives the motion of points between frames (prev→current).
+        // The camera moved by (dx,dy) in frame space, so canvas pos shifts by (-dx,-dy)
+        // relative to the coarse match. But the coarse match already accounts for this,
+        // so we apply as a fine correction on top.
+        pos.x -= dx;
+        pos.y -= dy;
+        WhiteboardLog("[LK] Refined by dx=" + std::to_string(-dx)
+                      + " dy=" + std::to_string(-dy)
+                      + " tracked=" + std::to_string(flow_x.size()));
+        return true;
+    }
+    WhiteboardLog("[LK] Correction too large: dx=" + std::to_string(dx)
+                  + " dy=" + std::to_string(dy) + ", rejected");
+    return false;
 }
 
 // ============================================================================
@@ -1697,10 +1948,9 @@ void WhiteboardCanvas::CreateSubCanvas(const cv::Mat& frame_bgr,
     // Seed at (0,0) global position
     global_camera_pos_ = cv::Point2f(0, 0);
 
-
-    PaintStrokesToChunks(*group, binary, enhanced_bgr, global_camera_pos_,
-                         stroke_no_update_mask);
-    PaintRawFrameToChunks(*group, frame_bgr, global_camera_pos_, raw_no_update_mask);
+    // NOTE: Painting is now done by the caller using per-strip logic.
+    // PaintStrokesToChunks and PaintRawFrameToChunks are called per-strip
+    // in ProcessFrameInternal after this method returns.
 
     int idx = (int)groups_.size();
     groups_.push_back(std::move(group));
