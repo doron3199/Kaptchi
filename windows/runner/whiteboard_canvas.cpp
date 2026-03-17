@@ -207,7 +207,7 @@ WhiteboardCanvas::WhiteboardCanvas() {
     stop_worker_ = false;
     perf_stats_.last_print_time = std::chrono::steady_clock::now();
 
-    WhiteboardLog("[WhiteboardCanvas] Logging to " + GetWhiteboardLogPath());
+//    WhiteboardLog("[WhiteboardCanvas] Logging to " + GetWhiteboardLogPath());
 
     if (!IsWhiteboardCanvasHelperProcess()) {
         auto helper_client = std::make_unique<WhiteboardCanvasHelperClient>();
@@ -217,15 +217,15 @@ WhiteboardCanvas::WhiteboardCanvas() {
             helper_client_->SetCanvasViewMode(canvas_view_mode_.load());
             helper_client_->SetRenderMode(GetRenderMode());
             SyncRuntimeSettings();
-            WhiteboardLog("[WhiteboardCanvas] Initialized (helper-process client)");
+//            WhiteboardLog("[WhiteboardCanvas] Initialized (helper-process client)");
             return;
         }
 
-        WhiteboardLog("[WhiteboardCanvas] Helper process unavailable, using in-process worker");
+//        WhiteboardLog("[WhiteboardCanvas] Helper process unavailable, using in-process worker");
     }
 
     worker_thread_ = std::thread(&WhiteboardCanvas::WorkerLoop, this);
-    WhiteboardLog("[WhiteboardCanvas] Initialized (contour-match + refinement)");
+//    WhiteboardLog("[WhiteboardCanvas] Initialized (contour-match + refinement)");
 }
 
 WhiteboardCanvas::~WhiteboardCanvas() {
@@ -440,6 +440,56 @@ bool WhiteboardCanvas::GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame
     return true;
 }
 
+bool WhiteboardCanvas::GetViewportAtCamera(cv::Size viewSize, cv::Mat& out_frame) {
+    if (remote_process_ && helper_client_) {
+        return helper_client_->GetOverview(viewSize, out_frame);
+    }
+
+    if (viewSize.width <= 0 || viewSize.height <= 0) return false;
+
+    std::unique_lock<std::mutex> lock(state_mutex_);
+
+    int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (idx < 0 || idx >= (int)groups_.size()) return false;
+    auto& group = *groups_[idx];
+
+    const CanvasRenderMode render_mode = GetRenderMode();
+    if (render_mode == CanvasRenderMode::kRaw) {
+        if (group.raw_cache_dirty) { RebuildRawRenderCache(group); group.raw_cache_dirty = false; }
+    } else {
+        if (group.stroke_cache_dirty) { RebuildStrokeRenderCache(group); group.stroke_cache_dirty = false; }
+    }
+    const cv::Mat& render_cache = GetRenderCacheForMode(group, render_mode);
+    if (render_cache.empty()) return false;
+
+    int cw = render_cache.cols, ch = render_cache.rows;
+
+    // Camera position relative to render cache origin
+    float min_px_x = (float)(render_mode == CanvasRenderMode::kRaw
+                     ? group.raw_min_px_x : group.stroke_min_px_x);
+    float cam_x = global_camera_pos_.x - min_px_x;
+
+    // Viewport ROI at 1:1 zoom: height = canvas height, width = view aspect * height
+    float view_aspect = (float)viewSize.width / (float)viewSize.height;
+    float roi_h = (float)ch;
+    float roi_w = roi_h * view_aspect;
+    if (roi_w > (float)cw) { roi_w = (float)cw; roi_h = roi_w / view_aspect; }
+
+    // Center viewport on camera midpoint
+    float cx = cam_x + (float)frame_w_ * 0.5f - roi_w * 0.5f;
+    cx = std::max(0.f, std::min(cx, (float)cw - roi_w));
+    float cy = std::max(0.f, (float)(ch - roi_h) * 0.5f);
+
+    int ix = (int)cx, iy = (int)cy, iw = (int)roi_w, ih = (int)roi_h;
+    if (ix + iw > cw) iw = cw - ix;
+    if (iy + ih > ch) ih = ch - iy;
+    if (iw <= 0 || ih <= 0) return false;
+
+    cv::Rect roi(ix, iy, iw, ih);
+    cv::resize(render_cache(roi), out_frame, viewSize, 0, 0, cv::INTER_LINEAR);
+    return true;
+}
+
 void WhiteboardCanvas::Reset() {
     if (remote_process_ && helper_client_) {
         helper_client_->Reset();
@@ -480,7 +530,7 @@ void WhiteboardCanvas::Reset() {
 
     perf_stats_ = PerformanceStats();
     perf_stats_.last_print_time = std::chrono::steady_clock::now();
-    WhiteboardLog("[WhiteboardCanvas] Reset");
+//    WhiteboardLog("[WhiteboardCanvas] Reset");
 }
 
 bool WhiteboardCanvas::HasContent() const {
@@ -633,10 +683,11 @@ void WhiteboardCanvas::WorkerLoop() {
         }
         try {
             ProcessFrameInternal(item.frame, item.person_mask);
-        } catch (const cv::Exception& e) {
-            WhiteboardLog(std::string("[WhiteboardCanvas] CV exception: ") + e.what(), true);
+//        } catch (const cv::Exception& e) {
+        } catch (const cv::Exception&) {
+            // WhiteboardLog(std::string("[WhiteboardCanvas] CV exception: ") + e.what(), true);
         } catch (...) {
-            WhiteboardLog("[WhiteboardCanvas] Unknown exception in worker", true);
+//            WhiteboardLog("[WhiteboardCanvas] Unknown exception in worker", true);
         }
     }
 }
@@ -699,7 +750,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                    << (motion_too_high ? "above-max"
                                       : has_motion_reference ? "pass"
                                                              : "warmup");
-            WhiteboardLog(stream.str());
+//            WhiteboardLog(stream.str());
         }
 
         if (motion_too_high) {
@@ -731,7 +782,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     // -------------------------------------------------------------------
     bool has_person_mask = !person_mask.empty() && person_mask.size() == gray.size();
     if (!has_person_mask) {
-        WhiteboardLog("[WhiteboardCanvas] No person mask -- skipping frame");
+//        WhiteboardLog("[WhiteboardCanvas] No person mask -- skipping frame");
         return;
     }
 
@@ -768,8 +819,8 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     }
 
     if (strips.empty()) {
-        WhiteboardLog("[WhiteboardCanvas] No valid strips (both sides < "
-                      + std::to_string(kMinStripWidth) + "px) -- skipping frame");
+//        WhiteboardLog("[WhiteboardCanvas] No valid strips (both sides < "
+//                      + std::to_string(kMinStripWidth) + "px) -- skipping frame");
         return;
     }
 
@@ -831,7 +882,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
         
         candidate_pair_count = static_cast<int>(canvas_contours_.size() * frame_contours.size());
 
-        int bin_sizes[] = {2, 5, 10 };
+        int bin_sizes[] = {1, 2, 5, 10};
 
         for (int bin_size : bin_sizes) {
             int tier_votes = 0;
@@ -856,25 +907,25 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     double current_matching_ms = std::chrono::duration<double, std::milli>(t_match - t_enhance).count();
     perf_stats_.stage4_matching_ms += current_matching_ms;
 
-    {
-        std::ostringstream stream;
-        stream << "[Performance] Tiered Matching - Final Bin: " << (tier_matched ? std::to_string(final_bin_size) : "NONE")
-               << " Votes: " << best_votes << " Accuracy: " << last_match_accuracy_;
-        WhiteboardLog(stream.str());
-    }
-    {
-        std::ostringstream stream;
-        stream << "[Performance] Contours found: " << frame_contours.size()
-               << ", Canvas contours compared: " << canvas_contours_.size()
-               << ", Candidate pairs: " << candidate_pair_count;
-        WhiteboardLog(stream.str());
-    }
-    {
-        std::ostringstream stream;
-        stream << "[Performance] Mapping (Contour Matching) took: "
-               << current_matching_ms << " ms";
-        WhiteboardLog(stream.str());
-    }
+    // {
+    //     std::ostringstream stream;
+    //     stream << "[Performance] Tiered Matching - Final Bin: " << (tier_matched ? std::to_string(final_bin_size) : "NONE")
+    //            << " Votes: " << best_votes << " Accuracy: " << last_match_accuracy_;
+    //     WhiteboardLog(stream.str());
+    // }
+    // {
+    //     std::ostringstream stream;
+    //     stream << "[Performance] Contours found: " << frame_contours.size()
+    //            << ", Canvas contours compared: " << canvas_contours_.size()
+    //            << ", Candidate pairs: " << candidate_pair_count;
+    //     WhiteboardLog(stream.str());
+    // }
+    // {
+    //     std::ostringstream stream;
+    //     stream << "[Performance] Mapping (Contour Matching) took: "
+    //            << current_matching_ms << " ms";
+    //     WhiteboardLog(stream.str());
+    // }
 
     // -------------------------------------------------------------------
     // STAGE 5: Paint to chunks or create a new group
@@ -896,9 +947,9 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
             float jump = (float)cv::norm(matched_pos - global_camera_pos_);
             const float max_jump_px = (float)ScalePx((int)kMaxJumpPx);
             if (jump > max_jump_px) {
-                WhiteboardLog("[WhiteboardCanvas] Jump rejected: "
-                              + std::to_string(jump) + "px (max="
-                              + std::to_string(max_jump_px) + ")");
+//                WhiteboardLog("[WhiteboardCanvas] Jump rejected: "
+//                              + std::to_string(jump) + "px (max="
+//                              + std::to_string(max_jump_px) + ")");
                 matched_pos = global_camera_pos_;
             }
         }
@@ -929,8 +980,159 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
             cv::Mat strip_frame  = frame(strip_roi);
             cv::Point2f strip_pos(global_camera_pos_.x + strip.x,
                                   global_camera_pos_.y);
+
+            // --- Edge-alignment warping ---
+            if (kEnableEdgeWarp && matched_frame_counter_ > 0) {
+                int half_w = ScalePx(kEdgeStripHalfWidth);
+                half_w = std::min(half_w, strip.width / 4);  // protect center
+                int strip_h = frame.rows;
+                int left_edge_gx = (int)std::round(strip_pos.x);
+                int right_edge_gx = (int)std::round(strip_pos.x) + strip.width;
+                int strip_gy = (int)std::round(strip_pos.y);
+
+                // --- Left edge ---
+                EdgeWarpResult left_warp;
+                if (half_w > 0) {
+                    // Reference strip: 100% from canvas, centered on left edge
+                    cv::Mat ref_left = GetCanvasStrokeBinaryRegion(
+                        group, left_edge_gx - half_w, strip_gy, half_w * 2, strip_h);
+                    // Seam strip: canvas left half + frame left half
+                    cv::Mat canvas_left = GetCanvasStrokeBinaryRegion(
+                        group, left_edge_gx - half_w, strip_gy, half_w, strip_h);
+                    // Frame binary for the leftmost half_w pixels
+                    int frame_hw = std::min(half_w, strip_binary.cols);
+                    cv::Mat frame_left_bin;
+                    cv::threshold(
+                        strip_binary(cv::Rect(0, 0, frame_hw, strip_h)),
+                        frame_left_bin, 0, 255, cv::THRESH_BINARY);
+                    // Pad if needed to match half_w
+                    if (frame_hw < half_w) {
+                        cv::Mat padded = cv::Mat::zeros(strip_h, half_w, CV_8UC1);
+                        frame_left_bin.copyTo(padded(cv::Rect(0, 0, frame_hw, strip_h)));
+                        frame_left_bin = padded;
+                    }
+                    cv::Mat seam_left;
+                    if (!canvas_left.empty() && canvas_left.rows == strip_h) {
+                        cv::hconcat(canvas_left, frame_left_bin, seam_left);
+                    }
+                    if (!ref_left.empty() && !seam_left.empty() &&
+                        ref_left.size() == seam_left.size()) {
+                        left_warp = ComputeEdgeShifts(ref_left, seam_left);
+                    }
+                }
+
+                // --- Right edge ---
+                EdgeWarpResult right_warp;
+                if (half_w > 0) {
+                    cv::Mat ref_right = GetCanvasStrokeBinaryRegion(
+                        group, right_edge_gx - half_w, strip_gy, half_w * 2, strip_h);
+                    int frame_hw = std::min(half_w, strip_binary.cols);
+                    cv::Mat frame_right_bin;
+                    int right_start = std::max(0, strip_binary.cols - frame_hw);
+                    cv::threshold(
+                        strip_binary(cv::Rect(right_start, 0, frame_hw, strip_h)),
+                        frame_right_bin, 0, 255, cv::THRESH_BINARY);
+                    if (frame_hw < half_w) {
+                        cv::Mat padded = cv::Mat::zeros(strip_h, half_w, CV_8UC1);
+                        frame_right_bin.copyTo(
+                            padded(cv::Rect(half_w - frame_hw, 0, frame_hw, strip_h)));
+                        frame_right_bin = padded;
+                    }
+                    cv::Mat canvas_right = GetCanvasStrokeBinaryRegion(
+                        group, right_edge_gx, strip_gy, half_w, strip_h);
+                    cv::Mat seam_right;
+                    if (!canvas_right.empty() && canvas_right.rows == strip_h) {
+                        cv::hconcat(frame_right_bin, canvas_right, seam_right);
+                    }
+                    if (!ref_right.empty() && !seam_right.empty() &&
+                        ref_right.size() == seam_right.size()) {
+                        right_warp = ComputeEdgeShifts(ref_right, seam_right);
+                    }
+                }
+
+                if (!kEdgeWarpModeB) {
+                    // Mode A: warp the new image to fit existing canvas
+                    if (left_warp.valid || right_warp.valid) {
+                        cv::Mat map_x, map_y;
+                        BuildEdgeRemapMaps(left_warp, right_warp,
+                                           strip.width, strip_h, map_x, map_y);
+                        cv::remap(strip_binary, strip_binary, map_x, map_y,
+                                  cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
+                        cv::remap(strip_paint, strip_paint, map_x, map_y,
+                                  cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+                        cv::remap(strip_frame, strip_frame, map_x, map_y,
+                                  cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+
+                        // Log quality
+                        auto log_warp = [](const EdgeWarpResult& w, const std::string& side) {
+                            if (!w.valid) return;
+                            float hsum = 0, hmx = 0, vsum = 0, vmx = 0;
+                            for (size_t i = 0; i < w.per_row_shift.size(); i++) {
+                                hsum += std::abs(w.per_row_shift[i]);
+                                hmx = std::max(hmx, std::abs(w.per_row_shift[i]));
+                                if (i < w.per_row_vshift.size()) {
+                                    vsum += std::abs(w.per_row_vshift[i]);
+                                    vmx = std::max(vmx, std::abs(w.per_row_vshift[i]));
+                                }
+                            }
+//                            float n = w.per_row_shift.empty() ? 1.0f : (float)w.per_row_shift.size();
+//                            WhiteboardLog("[EdgeWarp] " + side
+//                                + " hmean=" + std::to_string(hsum / n)
+//                                + " hmax=" + std::to_string(hmx)
+//                                + " vmean=" + std::to_string(vsum / n)
+//                                + " vmax=" + std::to_string(vmx));
+                        };
+                        log_warp(left_warp, "LEFT");
+                        log_warp(right_warp, "RIGHT");
+                    }
+                } else {
+                    // Mode B: warp existing canvas to fit new image
+                    if (left_warp.valid) {
+                        WarpCanvasEdgeRegion(group, left_warp, left_edge_gx,
+                                             strip_gy, strip_h, true);
+                    }
+                    if (right_warp.valid) {
+                        WarpCanvasEdgeRegion(group, right_warp, right_edge_gx,
+                                             strip_gy, strip_h, false);
+                    }
+                    if (left_warp.valid || right_warp.valid) {
+//                        auto log_warp = [](const EdgeWarpResult& w, const std::string& side) {
+//                            if (!w.valid) return;
+//                            float hsum = 0, hmx = 0, vsum = 0, vmx = 0;
+//                            for (size_t i = 0; i < w.per_row_shift.size(); i++) {
+//                                hsum += std::abs(w.per_row_shift[i]);
+//                                hmx = std::max(hmx, std::abs(w.per_row_shift[i]));
+//                                if (i < w.per_row_vshift.size()) {
+//                                    vsum += std::abs(w.per_row_vshift[i]);
+//                                    vmx = std::max(vmx, std::abs(w.per_row_vshift[i]));
+//                                }
+//                            }
+//                            float n = w.per_row_shift.empty() ? 1.0f : (float)w.per_row_shift.size();
+//                            WhiteboardLog("[EdgeWarp-B] " + side
+//                                + " hmean=" + std::to_string(hsum / n)
+//                                + " hmax=" + std::to_string(hmx)
+//                                + " vmean=" + std::to_string(vsum / n)
+//                                + " vmax=" + std::to_string(vmx));
+//                        };
+//                        log_warp(left_warp, "LEFT");
+//                        log_warp(right_warp, "RIGHT");
+                    }
+                }
+            }
+
+            // Always paint strokes regardless of ORB outcome
             PaintStrokesToChunks(group, strip_binary, strip_paint, strip_pos);
-            PaintRawFrameToChunks(group, strip_frame, strip_pos);
+
+            // ORB-align the raw frame for visual seam quality (does not affect mapping)
+            cv::Mat frame_to_paint = strip_frame;
+            if (kEnableRawORBStitch) {
+                cv::Mat aligned = ORBAlignRawFrame(group, strip_frame, strip_pos);
+                if (!aligned.empty()) {
+                    frame_to_paint = aligned;
+                }
+                // On failure, fall back to unaligned raw frame
+            }
+            PaintRawFrameToChunks(group, frame_to_paint, strip_pos);
         }
 
         active_group_idx_ = best_group_idx;
@@ -971,16 +1173,16 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
                      + " votes=" + std::to_string(best_votes) + ")";
     }
 
-    WhiteboardLog("[WhiteboardCanvas] " + match_status);
+//    WhiteboardLog("[WhiteboardCanvas] " + match_status);
 
     auto t_paint = std::chrono::steady_clock::now();
     double current_painting_ms = std::chrono::duration<double, std::milli>(t_paint - t_match).count();
     perf_stats_.stage5_painting_ms += current_painting_ms;
-    {
-        std::ostringstream stream;
-        stream << "[Performance] Drawing (Painting) took: " << current_painting_ms << " ms";
-        WhiteboardLog(stream.str());
-    }
+//    {
+//        std::ostringstream stream;
+//        stream << "[Performance] Drawing (Painting) took: " << current_painting_ms << " ms";
+//        WhiteboardLog(stream.str());
+//    }
 
     perf_stats_.total_frame_contours += static_cast<double>(frame_contours.size());
     perf_stats_.total_canvas_contours += static_cast<double>(canvas_contours_.size());
@@ -993,39 +1195,39 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
     }
 
     if ((t_paint - perf_stats_.last_print_time) >= std::chrono::seconds(1)) {
-        const double frames = static_cast<double>(std::max(1, perf_stats_.frame_count));
-        const double matched_frames = static_cast<double>(std::max(1, perf_stats_.matched_frames));
+//        const double frames = static_cast<double>(std::max(1, perf_stats_.frame_count));
+//        const double matched_frames = static_cast<double>(std::max(1, perf_stats_.matched_frames));
 
-        {
-            std::ostringstream stream;
-            stream << "[WhiteboardMatchAvg] frames=" << perf_stats_.frame_count
-                   << " matchedFrames=" << perf_stats_.matched_frames
-                   << " avgBestVotesAll=" << (perf_stats_.total_best_votes / frames)
-                   << " avgBestVotesMatched="
-                   << (perf_stats_.matched_frames > 0
-                       ? (perf_stats_.total_best_votes / matched_frames)
-                       : 0.0)
-                   << " avgFrameContours=" << (perf_stats_.total_frame_contours / frames)
-                   << " avgCanvasContours=" << (perf_stats_.total_canvas_contours / frames)
-                   << " avgCandidatePairs=" << (perf_stats_.total_candidate_pairs / frames)
-                   << " avgAcceptedPairs=" << (perf_stats_.total_accepted_pairs / frames)
-                   << " maxDist=" << kMaxShapeDist;
-            WhiteboardLog(stream.str());
-        }
+        // {
+        //     std::ostringstream stream;
+        //     stream << "[WhiteboardMatchAvg] frames=" << perf_stats_.frame_count
+        //            << " matchedFrames=" << perf_stats_.matched_frames
+        //            << " avgBestVotesAll=" << (perf_stats_.total_best_votes / frames)
+        //            << " avgBestVotesMatched="
+        //            << (perf_stats_.matched_frames > 0
+        //                ? (perf_stats_.total_best_votes / matched_frames)
+        //                : 0.0)
+        //            << " avgFrameContours=" << (perf_stats_.total_frame_contours / frames)
+        //            << " avgCanvasContours=" << (perf_stats_.total_canvas_contours / frames)
+        //            << " avgCandidatePairs=" << (perf_stats_.total_candidate_pairs / frames)
+        //            << " avgAcceptedPairs=" << (perf_stats_.total_accepted_pairs / frames)
+        //            << " maxDist=" << kMaxShapeDist;
+        //     WhiteboardLog(stream.str());
+        // }
 
-        {
-            std::ostringstream stream;
-            stream << "[WhiteboardPerfAvg] frames=" << perf_stats_.frame_count
-                   << " motionMs=" << (perf_stats_.stage1_motion_ms / frames)
-                   << " enhanceMs=" << (perf_stats_.stage3_enhance_ms / frames)
-                   << " matchMs=" << (perf_stats_.stage4_matching_ms / frames)
-                   << " paintMs=" << (perf_stats_.stage5_painting_ms / frames)
-                   << " totalMs="
-                   << ((perf_stats_.stage1_motion_ms + perf_stats_.stage3_enhance_ms +
-                        perf_stats_.stage4_matching_ms + perf_stats_.stage5_painting_ms) /
-                       frames);
-            WhiteboardLog(stream.str());
-        }
+        // {
+        //     std::ostringstream stream;
+        //     stream << "[WhiteboardPerfAvg] frames=" << perf_stats_.frame_count
+        //            << " motionMs=" << (perf_stats_.stage1_motion_ms / frames)
+        //            << " enhanceMs=" << (perf_stats_.stage3_enhance_ms / frames)
+        //            << " matchMs=" << (perf_stats_.stage4_matching_ms / frames)
+        //            << " paintMs=" << (perf_stats_.stage5_painting_ms / frames)
+        //            << " totalMs="
+        //            << ((perf_stats_.stage1_motion_ms + perf_stats_.stage3_enhance_ms +
+        //                 perf_stats_.stage4_matching_ms + perf_stats_.stage5_painting_ms) /
+        //                frames);
+        //     WhiteboardLog(stream.str());
+        // }
 
         perf_stats_.stage1_motion_ms = 0;
         perf_stats_.stage3_enhance_ms = 0;
@@ -1223,11 +1425,11 @@ void WhiteboardCanvas::RebuildCanvasContours(WhiteboardGroup& group) {
     cv::Point2f offset((float)group.stroke_min_px_x,
                        (float)group.stroke_min_px_y);
     canvas_contours_ = ExtractContourShapes(canvas_bin, offset);
-    {
-        std::ostringstream stream;
-        stream << "[Canvas] Rebuilt contours: " << canvas_contours_.size();
-        WhiteboardLog(stream.str());
-    }
+    // {
+    //     std::ostringstream stream;
+    //     stream << "[Canvas] Rebuilt contours: " << canvas_contours_.size();
+    //     WhiteboardLog(stream.str());
+    // }
 }
 
 // Reads a frame-sized gray region from the raw canvas chunks at the given
@@ -1272,6 +1474,213 @@ cv::Mat WhiteboardCanvas::GetCanvasGrayRegion(WhiteboardGroup& group,
     return gray_region;
 }
 
+// Extract BGR region from raw_canvas chunks (returns empty Mat if chunks missing)
+cv::Mat WhiteboardCanvas::GetCanvasRawBGRRegion(WhiteboardGroup& group,
+                                                  int global_x, int global_y,
+                                                  int width, int height) {
+    if (width <= 0 || height <= 0) return cv::Mat();
+
+    int gx0 = global_x, gy0 = global_y;
+    int gx1 = gx0 + width, gy1 = gy0 + height;
+
+    int sc_x = (int)std::floor((float)gx0 / kChunkWidth);
+    int sc_y = (int)std::floor((float)gy0 / chunk_height_);
+    int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkWidth);
+    int ec_y = (int)std::floor((float)(gy1 - 1) / chunk_height_);
+
+    // Check all required chunks exist
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            if (group.chunks.find(GetChunkHash(cx, cy)) == group.chunks.end()) {
+                return cv::Mat();
+            }
+        }
+    }
+
+    cv::Mat region(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            int cpx = cx * kChunkWidth, cpy = cy * chunk_height_;
+            int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
+            int ix1 = std::min(cpx + kChunkWidth, gx1);
+            int iy1 = std::min(cpy + chunk_height_, gy1);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
+            cv::Rect out_roi(ix0 - gx0, iy0 - gy0, ix1 - ix0, iy1 - iy0);
+            group.chunks[GetChunkHash(cx, cy)]->raw_canvas(chunk_roi).copyTo(region(out_roi));
+        }
+    }
+    return region;
+}
+
+// ============================================================================
+//  SECTION 7a2: ORB-based Raw Frame Stitching (visual quality only)
+// ============================================================================
+//
+// Aligns a raw frame strip to existing canvas content using ORB feature
+// matching. Does NOT affect mapping/tracking — only improves seam quality
+// in the raw render view.
+//
+// Algorithm:
+//   1. Read existing canvas content at the frame's placement position
+//   2. Split at horizontal midpoint of the frame
+//   3. For each half that has existing content:
+//      a. ORB detect + match between canvas half and frame half
+//      b. Estimate homography (frame→canvas) via RANSAC
+//      c. Warp the frame half to align with canvas
+//   4. If frame is expanding the canvas (one side has no content),
+//      only stitch the side that overlaps.
+
+cv::Mat WhiteboardCanvas::ORBAlignRawFrame(WhiteboardGroup& group,
+                                            const cv::Mat& frame_bgr,
+                                            cv::Point2f camera_pos) {
+    int gx = (int)std::round(camera_pos.x);
+    int gy = (int)std::round(camera_pos.y);
+    int fw = frame_bgr.cols;
+    int fh = frame_bgr.rows;
+    int mid_x = fw / 2;
+
+    if (g_whiteboard_debug) {
+        cv::imshow("ORB Align Input", frame_bgr);
+    }
+
+    if (mid_x < 32 || fh < 32) {
+        WhiteboardLog("[ORBAlign] Too small for ORB (mid_x=" + std::to_string(mid_x) + " fh=" + std::to_string(fh) + ")");
+        return cv::Mat();
+    }
+
+    // Try to read left and right halves of existing canvas separately
+    cv::Mat canvas_left  = GetCanvasRawBGRRegion(group, gx, gy, mid_x, fh);
+    cv::Mat canvas_right = GetCanvasRawBGRRegion(group, gx + mid_x, gy, fw - mid_x, fh);
+
+    // Check if each half has actual content (not all white)
+    auto hasContent = [this](const cv::Mat& bgr) -> bool {
+        if (bgr.empty()) return false;
+        cv::Mat g;
+        cv::cvtColor(bgr, g, cv::COLOR_BGR2GRAY);
+        return cv::countNonZero(g < 250) > (int)(g.total() * kORBMinCanvasContent);
+    };
+
+    bool has_left  = hasContent(canvas_left);
+    bool has_right = hasContent(canvas_right);
+
+    if (!has_left && !has_right) {
+        WhiteboardLog("[ORBAlign] No existing content to stitch with (left=" + std::to_string(has_left) + " right=" + std::to_string(has_right) + ")");
+        return cv::Mat();
+    }
+
+    cv::Mat result = frame_bgr.clone();
+
+    // Lambda: ORB-stitch one half of the frame to its canvas counterpart.
+    // Returns true if homography was found and applied.
+    auto orbStitchHalf = [&](const cv::Rect& roi, const cv::Mat& canvas_half,
+                              const std::string& side) -> bool {
+        cv::Mat frame_half = frame_bgr(roi);
+
+        // Convert to grayscale for ORB
+        cv::Mat canvas_g, frame_g;
+        cv::cvtColor(canvas_half, canvas_g, cv::COLOR_BGR2GRAY);
+        cv::cvtColor(frame_half, frame_g, cv::COLOR_BGR2GRAY);
+
+        // ORB detection
+        auto orb = cv::ORB::create(kORBMaxFeatures);
+        std::vector<cv::KeyPoint> kp_canvas, kp_frame;
+        cv::Mat desc_canvas, desc_frame;
+        orb->detectAndCompute(canvas_g, cv::noArray(), kp_canvas, desc_canvas);
+        orb->detectAndCompute(frame_g, cv::noArray(), kp_frame, desc_frame);
+
+        if (desc_canvas.empty() || desc_frame.empty()) {
+            WhiteboardLog("[ORBStitch] " + side + " FAILED: empty descriptors (canvas=" + std::to_string(desc_canvas.empty()) + " frame=" + std::to_string(desc_frame.empty()) + ")");
+            return false;
+        }
+        if ((int)kp_canvas.size() < kORBMinMatches || (int)kp_frame.size() < kORBMinMatches) {
+            WhiteboardLog("[ORBStitch] " + side + " FAILED: too few keypoints (canvas=" + std::to_string(kp_canvas.size()) + " frame=" + std::to_string(kp_frame.size()) + ")");
+            return false;
+        }
+
+        // Match (cross-check for robustness)
+        cv::BFMatcher matcher(cv::NORM_HAMMING, true);
+        std::vector<cv::DMatch> matches;
+        matcher.match(desc_frame, desc_canvas, matches);
+
+        if ((int)matches.size() < kORBMinMatches) {
+            WhiteboardLog("[ORBStitch] " + side + " FAILED: too few matches (" + std::to_string(matches.size()) + ")");
+            return false;
+        }
+
+        // Sort by distance, keep top matches
+        std::sort(matches.begin(), matches.end(),
+                  [](const cv::DMatch& a, const cv::DMatch& b) { return a.distance < b.distance; });
+        int n = std::min((int)matches.size(), kORBMaxGoodMatches);
+        matches.resize(n);
+
+        // Extract matched points
+        std::vector<cv::Point2f> pts_frame, pts_canvas;
+        for (const auto& m : matches) {
+            pts_frame.push_back(kp_frame[m.queryIdx].pt);
+            pts_canvas.push_back(kp_canvas[m.trainIdx].pt);
+        }
+
+        // Find homography: frame→canvas
+        std::vector<uchar> inlier_mask;
+        cv::Mat H = cv::findHomography(pts_frame, pts_canvas, cv::RANSAC, 3.0, inlier_mask);
+        if (H.empty() || H.rows != 3 || H.cols != 3) {
+            WhiteboardLog("[ORBStitch] " + side + " FAILED: findHomography failed");
+            return false;
+        }
+
+        // Validate: homography should be close to identity (small perspective correction)
+        double h00 = H.at<double>(0, 0);
+        double h11 = H.at<double>(1, 1);
+        double h22 = H.at<double>(2, 2);
+        if (std::abs(h00 / h22 - 1.0) > kORBMaxHomographyDev ||
+            std::abs(h11 / h22 - 1.0) > kORBMaxHomographyDev) {
+            WhiteboardLog("[ORBStitch] " + side + " homography too extreme, skipping"
+                          + " h00=" + std::to_string(h00) + " h11=" + std::to_string(h11));
+            return false;
+        }
+
+        // Count inliers
+        int inliers = 0;
+        for (uchar v : inlier_mask) if (v) inliers++;
+        if (inliers < kORBMinMatches) {
+            WhiteboardLog("[ORBStitch] " + side + " FAILED: too few inliers (" + std::to_string(inliers) + "/" + std::to_string(n) + ")");
+            return false;
+        }
+
+        // Warp the frame half to align with canvas
+        cv::Mat warped;
+        cv::warpPerspective(frame_half, warped, H, frame_half.size(),
+                            cv::INTER_LINEAR, cv::BORDER_REPLICATE);
+        warped.copyTo(result(roi));
+
+        WhiteboardLog("[ORBStitch] " + side + " OK: " + std::to_string(inliers)
+                      + "/" + std::to_string(n) + " inliers");
+        return true;
+    };
+
+    bool left_ok = false, right_ok = false;
+
+    if (has_left) {
+        cv::Rect left_roi(0, 0, mid_x, fh);
+        left_ok = orbStitchHalf(left_roi, canvas_left, "LEFT");
+    }
+
+    if (has_right) {
+        cv::Rect right_roi(mid_x, 0, fw - mid_x, fh);
+        right_ok = orbStitchHalf(right_roi, canvas_right, "RIGHT");
+    }
+
+    // Succeed if at least one half was aligned; the other keeps original pixels
+    if (!left_ok && !right_ok) {
+        WhiteboardLog("[ORBStitch] Both halves failed, returning empty");
+        return cv::Mat();
+    }
+
+    return result;
+}
+
 // ============================================================================
 //  SECTION 7b: Sub-pixel Refinement Methods
 // ============================================================================
@@ -1301,14 +1710,15 @@ bool WhiteboardCanvas::RefineWithECC(WhiteboardGroup& group, const cv::Mat& gray
         if (std::abs(dx) < kECCMaxCorrection && std::abs(dy) < kECCMaxCorrection) {
             pos.x += dx;
             pos.y += dy;
-            WhiteboardLog("[ECC] Refined by dx=" + std::to_string(dx)
-                          + " dy=" + std::to_string(dy));
+//            WhiteboardLog("[ECC] Refined by dx=" + std::to_string(dx)
+//                          + " dy=" + std::to_string(dy));
             return true;
         }
-        WhiteboardLog("[ECC] Correction too large: dx=" + std::to_string(dx)
-                      + " dy=" + std::to_string(dy) + ", rejected");
-    } catch (const cv::Exception& e) {
-        WhiteboardLog(std::string("[ECC] Failed: ") + e.what());
+//        WhiteboardLog("[ECC] Correction too large: dx=" + std::to_string(dx)
+//                      + " dy=" + std::to_string(dy) + ", rejected");
+//    } catch (const cv::Exception& e) {
+    } catch (const cv::Exception&) {
+//        WhiteboardLog(std::string("[ECC] Failed: ") + e.what());
     }
     return false;
 }
@@ -1397,13 +1807,13 @@ bool WhiteboardCanvas::RefineWithTemplate(WhiteboardGroup& group,
     if (std::abs(dx) < kTemplateMaxCorrection && std::abs(dy) < kTemplateMaxCorrection) {
         pos.x += dx;
         pos.y += dy;
-        WhiteboardLog("[TemplateMatch] Refined by dx=" + std::to_string(dx)
-                      + " dy=" + std::to_string(dy)
-                      + " score=" + std::to_string(maxVal));
+//        WhiteboardLog("[TemplateMatch] Refined by dx=" + std::to_string(dx)
+//                      + " dy=" + std::to_string(dy)
+//                      + " score=" + std::to_string(maxVal));
         return true;
     }
-    WhiteboardLog("[TemplateMatch] Correction too large: dx=" + std::to_string(dx)
-                  + " dy=" + std::to_string(dy) + ", rejected");
+//    WhiteboardLog("[TemplateMatch] Correction too large: dx=" + std::to_string(dx)
+//                  + " dy=" + std::to_string(dy) + ", rejected");
     return false;
 }
 
@@ -1441,7 +1851,7 @@ bool WhiteboardCanvas::RefineWithLK(const cv::Mat& gray,
     }
 
     if ((int)flow_x.size() < kLKMinTrackedPoints) {
-        WhiteboardLog("[LK] Too few tracked points: " + std::to_string(flow_x.size()));
+//        WhiteboardLog("[LK] Too few tracked points: " + std::to_string(flow_x.size()));
         return false;
     }
 
@@ -1459,13 +1869,13 @@ bool WhiteboardCanvas::RefineWithLK(const cv::Mat& gray,
         // so we apply as a fine correction on top.
         pos.x -= dx;
         pos.y -= dy;
-        WhiteboardLog("[LK] Refined by dx=" + std::to_string(-dx)
-                      + " dy=" + std::to_string(-dy)
-                      + " tracked=" + std::to_string(flow_x.size()));
+//        WhiteboardLog("[LK] Refined by dx=" + std::to_string(-dx)
+//                      + " dy=" + std::to_string(-dy)
+//                      + " tracked=" + std::to_string(flow_x.size()));
         return true;
     }
-    WhiteboardLog("[LK] Correction too large: dx=" + std::to_string(dx)
-                  + " dy=" + std::to_string(dy) + ", rejected");
+//    WhiteboardLog("[LK] Correction too large: dx=" + std::to_string(dx)
+//                  + " dy=" + std::to_string(dy) + ", rejected");
     return false;
 }
 
@@ -1739,9 +2149,9 @@ void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
         cv::meanStdDev(lap, mu, sigma);
         double variance = sigma.val[0] * sigma.val[0];
         if (variance < kBlurThreshold) {
-            WhiteboardLog("[RawPaint] Blurry frame rejected (var="
-                          + std::to_string(variance) + " thr="
-                          + std::to_string(kBlurThreshold) + ")");
+           WhiteboardLog("[RawPaint] Blurry frame rejected (var="
+                         + std::to_string(variance) + " thr="
+                         + std::to_string(kBlurThreshold) + ")");
             return;
         }
     }
@@ -1922,6 +2332,347 @@ void WhiteboardCanvas::RebuildRawRenderCache(WhiteboardGroup& group) {
 }
 
 // ============================================================================
+//  SECTION 10: Edge-Alignment Warping
+// ============================================================================
+
+// Reads stroke_canvas binary data from chunks at global coordinates.
+// Returns binary Mat (ink=255, bg=0). Returns empty Mat if chunks don't exist.
+cv::Mat WhiteboardCanvas::GetCanvasStrokeBinaryRegion(WhiteboardGroup& group,
+                                                       int global_x, int global_y,
+                                                       int width, int height) {
+    if (width <= 0 || height <= 0) return cv::Mat();
+
+    int gx0 = global_x, gy0 = global_y;
+    int gx1 = gx0 + width, gy1 = gy0 + height;
+
+    int sc_x = (int)std::floor((float)gx0 / kChunkWidth);
+    int sc_y = (int)std::floor((float)gy0 / chunk_height_);
+    int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkWidth);
+    int ec_y = (int)std::floor((float)(gy1 - 1) / chunk_height_);
+
+    // If any required chunk is missing, return zeros (no ink)
+    bool all_exist = true;
+    for (int cy = sc_y; cy <= ec_y && all_exist; cy++) {
+        for (int cx = sc_x; cx <= ec_x && all_exist; cx++) {
+            if (group.chunks.find(GetChunkHash(cx, cy)) == group.chunks.end()) {
+                all_exist = false;
+            }
+        }
+    }
+    if (!all_exist) return cv::Mat::zeros(height, width, CV_8UC1);
+
+    cv::Mat region(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            int cpx = cx * kChunkWidth, cpy = cy * chunk_height_;
+            int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
+            int ix1 = std::min(cpx + kChunkWidth, gx1);
+            int iy1 = std::min(cpy + chunk_height_, gy1);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
+            cv::Rect out_roi(ix0 - gx0, iy0 - gy0, ix1 - ix0, iy1 - iy0);
+            group.chunks[GetChunkHash(cx, cy)]->stroke_canvas(chunk_roi).copyTo(region(out_roi));
+        }
+    }
+
+    // Convert to binary: stroke canvas has dark ink on white background
+    cv::Mat gray, binary;
+    cv::cvtColor(region, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, binary, 200, 255, cv::THRESH_BINARY_INV);  // ink=255, bg=0
+    return binary;
+}
+
+// Core alignment: per-row 2D (horizontal + vertical) cross-correlation
+// between reference and seam strips.
+WhiteboardCanvas::EdgeWarpResult WhiteboardCanvas::ComputeEdgeShifts(
+        const cv::Mat& reference_strip, const cv::Mat& seam_strip) {
+    EdgeWarpResult result;
+    if (reference_strip.empty() || seam_strip.empty()) return result;
+    if (reference_strip.size() != seam_strip.size()) return result;
+
+    const int rows = reference_strip.rows;
+    const int cols = reference_strip.cols;
+    const int block_size = ScalePx(kEdgeRowBlockSize);
+    const int max_shift = ScalePx(kEdgeMaxShift);
+    const int num_blocks = rows / block_size;
+    if (num_blocks == 0) return result;
+
+    result.per_row_shift.resize(rows, 0.0f);
+    result.per_row_vshift.resize(rows, 0.0f);
+    std::vector<float> block_hshifts(num_blocks, 0.0f);
+    std::vector<float> block_vshifts(num_blocks, 0.0f);
+    std::vector<bool> block_valid(num_blocks, false);
+
+    const float min_ink_fraction = 0.03f;
+    // Vertical search range is half the horizontal (perspective vertical
+    // distortion is typically smaller than horizontal near edges)
+    const int max_vshift = std::max(1, max_shift / 2);
+
+    for (int b = 0; b < num_blocks; b++) {
+        int y0 = b * block_size;
+        int y1 = std::min(y0 + block_size, rows);
+        cv::Rect block_roi(0, y0, cols, y1 - y0);
+
+        cv::Mat ref_block = reference_strip(block_roi);
+        cv::Mat seam_block = seam_strip(block_roi);
+
+        int ref_ink = cv::countNonZero(ref_block);
+        int seam_ink = cv::countNonZero(seam_block);
+        int total_pixels = (y1 - y0) * cols;
+
+        // Skip low-ink blocks
+        if ((float)ref_ink / total_pixels < min_ink_fraction &&
+            (float)seam_ink / total_pixels < min_ink_fraction) {
+            continue;
+        }
+
+        int best_hshift = 0;
+        int best_vshift = 0;
+        int best_score = 0;
+
+        for (int dy = -max_vshift; dy <= max_vshift; dy++) {
+            for (int dx = -max_shift; dx <= max_shift; dx++) {
+                cv::Mat shifted;
+                cv::Mat M = (cv::Mat_<float>(2, 3) << 1, 0, (float)dx, 0, 1, (float)dy);
+                cv::warpAffine(seam_block, shifted, M, seam_block.size(),
+                               cv::INTER_NEAREST, cv::BORDER_CONSTANT, cv::Scalar(0));
+
+                cv::Mat overlap;
+                cv::bitwise_and(ref_block, shifted, overlap);
+                int score = cv::countNonZero(overlap);
+                if (score > best_score) {
+                    best_score = score;
+                    best_hshift = dx;
+                    best_vshift = dy;
+                }
+            }
+        }
+
+        block_hshifts[b] = (float)best_hshift;
+        block_vshifts[b] = (float)best_vshift;
+        block_valid[b] = true;
+    }
+
+    // Interpolate invalid blocks from nearest valid neighbors
+    for (int b = 0; b < num_blocks; b++) {
+        if (block_valid[b]) continue;
+
+        int prev = -1, next_v = -1;
+        for (int j = b - 1; j >= 0; j--) {
+            if (block_valid[j]) { prev = j; break; }
+        }
+        for (int j = b + 1; j < num_blocks; j++) {
+            if (block_valid[j]) { next_v = j; break; }
+        }
+
+        if (prev >= 0 && next_v >= 0) {
+            float t = (float)(b - prev) / (float)(next_v - prev);
+            block_hshifts[b] = block_hshifts[prev] * (1.0f - t) + block_hshifts[next_v] * t;
+            block_vshifts[b] = block_vshifts[prev] * (1.0f - t) + block_vshifts[next_v] * t;
+        } else if (prev >= 0) {
+            block_hshifts[b] = block_hshifts[prev];
+            block_vshifts[b] = block_vshifts[prev];
+        } else if (next_v >= 0) {
+            block_hshifts[b] = block_hshifts[next_v];
+            block_vshifts[b] = block_vshifts[next_v];
+        }
+    }
+
+    // Expand block shifts to per-row
+    for (int b = 0; b < num_blocks; b++) {
+        int y0 = b * block_size;
+        int y1 = std::min(y0 + block_size, rows);
+        for (int y = y0; y < y1; y++) {
+            result.per_row_shift[y] = block_hshifts[b];
+            result.per_row_vshift[y] = block_vshifts[b];
+        }
+    }
+    // Fill trailing rows
+    if (num_blocks * block_size < rows) {
+        float last_h = num_blocks > 0 ? block_hshifts[num_blocks - 1] : 0.0f;
+        float last_v = num_blocks > 0 ? block_vshifts[num_blocks - 1] : 0.0f;
+        for (int y = num_blocks * block_size; y < rows; y++) {
+            result.per_row_shift[y] = last_h;
+            result.per_row_vshift[y] = last_v;
+        }
+    }
+
+    // Median filter for smoothing (both channels)
+    int kernel = ScalePx(kEdgeMedianKernel);
+    if (kernel % 2 == 0) kernel++;
+    if (kernel >= 3 && rows >= kernel) {
+        cv::Mat hmat(1, rows, CV_32FC1, result.per_row_shift.data());
+        cv::Mat vmat(1, rows, CV_32FC1, result.per_row_vshift.data());
+        cv::Mat h_smooth, v_smooth;
+        cv::medianBlur(hmat, h_smooth, kernel);
+        cv::medianBlur(vmat, v_smooth, kernel);
+        for (int y = 0; y < rows; y++) {
+            result.per_row_shift[y] = h_smooth.at<float>(0, y);
+            result.per_row_vshift[y] = v_smooth.at<float>(0, y);
+        }
+    }
+
+    // Check if any non-zero shifts exist (either axis)
+    bool has_shift = false;
+    for (int y = 0; y < rows && !has_shift; y++) {
+        if (std::abs(result.per_row_shift[y]) > 0.1f ||
+            std::abs(result.per_row_vshift[y]) > 0.1f) {
+            has_shift = true;
+        }
+    }
+    result.valid = has_shift;
+    return result;
+}
+
+// Builds remap maps that apply per-row 2D shifts at edges, blending to zero at center.
+void WhiteboardCanvas::BuildEdgeRemapMaps(const EdgeWarpResult& left_warp,
+                                           const EdgeWarpResult& right_warp,
+                                           int frame_width, int frame_height,
+                                           cv::Mat& map_x, cv::Mat& map_y) {
+    map_x.create(frame_height, frame_width, CV_32FC1);
+    map_y.create(frame_height, frame_width, CV_32FC1);
+
+    int half_w = ScalePx(kEdgeStripHalfWidth);
+    // Clamp to quarter of frame width to protect center
+    half_w = std::min(half_w, frame_width / 4);
+
+    for (int y = 0; y < frame_height; y++) {
+        float left_hshift = (left_warp.valid && y < (int)left_warp.per_row_shift.size())
+                            ? left_warp.per_row_shift[y] : 0.0f;
+        float left_vshift = (left_warp.valid && y < (int)left_warp.per_row_vshift.size())
+                            ? left_warp.per_row_vshift[y] : 0.0f;
+        float right_hshift = (right_warp.valid && y < (int)right_warp.per_row_shift.size())
+                             ? right_warp.per_row_shift[y] : 0.0f;
+        float right_vshift = (right_warp.valid && y < (int)right_warp.per_row_vshift.size())
+                             ? right_warp.per_row_vshift[y] : 0.0f;
+
+        float* mx = map_x.ptr<float>(y);
+        float* my = map_y.ptr<float>(y);
+
+        for (int x = 0; x < frame_width; x++) {
+            float hshift = 0.0f;
+            float vshift = 0.0f;
+
+            if (x < half_w) {
+                // Left edge: full shift at x=0, blend to 0 at x=half_w
+                float blend = 1.0f - (float)x / (float)half_w;
+                hshift = left_hshift * blend;
+                vshift = left_vshift * blend;
+            } else if (x >= frame_width - half_w) {
+                // Right edge: blend from 0 to full shift at x=frame_width-1
+                float blend = (float)(x - (frame_width - half_w)) / (float)half_w;
+                hshift = right_hshift * blend;
+                vshift = right_vshift * blend;
+            }
+
+            mx[x] = (float)x - hshift;
+            my[x] = (float)y - vshift;
+        }
+    }
+}
+
+// Mode B: Read canvas edge region from chunks, warp it, write back.
+void WhiteboardCanvas::WarpCanvasEdgeRegion(WhiteboardGroup& group,
+                                             const EdgeWarpResult& warp,
+                                             int edge_global_x, int global_y,
+                                             int height, bool is_left_edge) {
+    if (!warp.valid) return;
+
+    int half_w = ScalePx(kEdgeStripHalfWidth);
+    int region_x = is_left_edge ? (edge_global_x - half_w) : edge_global_x;
+    int region_w = half_w;
+
+    // Build remap maps for the edge region
+    cv::Mat map_x(height, region_w, CV_32FC1);
+    cv::Mat map_y(height, region_w, CV_32FC1);
+
+    for (int y = 0; y < height; y++) {
+        float raw_hshift = (y < (int)warp.per_row_shift.size()) ? warp.per_row_shift[y] : 0.0f;
+        float raw_vshift = (y < (int)warp.per_row_vshift.size()) ? warp.per_row_vshift[y] : 0.0f;
+        // For Mode B, we warp the canvas in the opposite direction
+        if (!is_left_edge) {
+            raw_hshift = -raw_hshift;
+            raw_vshift = -raw_vshift;
+        }
+
+        float* mx = map_x.ptr<float>(y);
+        float* my = map_y.ptr<float>(y);
+
+        for (int x = 0; x < region_w; x++) {
+            float blend;
+            if (is_left_edge) {
+                blend = (float)x / (float)region_w;  // 0 at outer edge, 1 at seam
+            } else {
+                blend = 1.0f - (float)x / (float)region_w;  // 1 at seam, 0 at outer edge
+            }
+            mx[x] = (float)x - raw_hshift * blend;
+            my[x] = (float)y - raw_vshift * blend;
+        }
+    }
+
+    // Read stroke canvas and raw canvas regions
+    int gx0 = region_x, gy0 = global_y;
+    int gx1 = gx0 + region_w, gy1 = gy0 + height;
+
+    int sc_x = (int)std::floor((float)gx0 / kChunkWidth);
+    int sc_y = (int)std::floor((float)gy0 / chunk_height_);
+    int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkWidth);
+    int ec_y = (int)std::floor((float)(gy1 - 1) / chunk_height_);
+
+    // Check all chunks exist
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            if (group.chunks.find(GetChunkHash(cx, cy)) == group.chunks.end()) return;
+        }
+    }
+
+    // Read stroke and raw regions
+    cv::Mat stroke_region(height, region_w, CV_8UC3, cv::Scalar(255, 255, 255));
+    cv::Mat raw_region(height, region_w, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            int cpx = cx * kChunkWidth, cpy = cy * chunk_height_;
+            int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
+            int ix1 = std::min(cpx + kChunkWidth, gx1);
+            int iy1 = std::min(cpy + chunk_height_, gy1);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
+            cv::Rect out_roi(ix0 - gx0, iy0 - gy0, ix1 - ix0, iy1 - iy0);
+            auto& chunk = group.chunks[GetChunkHash(cx, cy)];
+            chunk->stroke_canvas(chunk_roi).copyTo(stroke_region(out_roi));
+            chunk->raw_canvas(chunk_roi).copyTo(raw_region(out_roi));
+        }
+    }
+
+    // Warp both
+    cv::Mat warped_stroke, warped_raw;
+    cv::remap(stroke_region, warped_stroke, map_x, map_y, cv::INTER_LINEAR,
+              cv::BORDER_REPLICATE);
+    cv::remap(raw_region, warped_raw, map_x, map_y, cv::INTER_LINEAR,
+              cv::BORDER_REPLICATE);
+
+    // Write back to chunks
+    for (int cy = sc_y; cy <= ec_y; cy++) {
+        for (int cx = sc_x; cx <= ec_x; cx++) {
+            int cpx = cx * kChunkWidth, cpy = cy * chunk_height_;
+            int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
+            int ix1 = std::min(cpx + kChunkWidth, gx1);
+            int iy1 = std::min(cpy + chunk_height_, gy1);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
+            cv::Rect src_roi(ix0 - gx0, iy0 - gy0, ix1 - ix0, iy1 - iy0);
+            auto& chunk = group.chunks[GetChunkHash(cx, cy)];
+            warped_stroke(src_roi).copyTo(chunk->stroke_canvas(chunk_roi));
+            warped_raw(src_roi).copyTo(chunk->raw_canvas(chunk_roi));
+        }
+    }
+}
+
+// ============================================================================
 //  SECTION 12: Create new Whiteboard Group
 // ============================================================================
 
@@ -1969,12 +2720,12 @@ void WhiteboardCanvas::CreateSubCanvas(const cv::Mat& frame_bgr,
     canvas_contours_ = seed_contours;
     canvas_contours_dirty_ = false;
 
-    {
-        std::ostringstream stream;
-        stream << "[WhiteboardCanvas] Created New Group " << idx
-               << " with " << canvas_contours_.size() << " seed contours";
-        WhiteboardLog(stream.str());
-    }
+//    {
+//        std::ostringstream stream;
+//        stream << "[WhiteboardCanvas] Created New Group " << idx
+//               << " with " << canvas_contours_.size() << " seed contours";
+//        WhiteboardLog(stream.str());
+//    }
 }
 
 
@@ -2111,7 +2862,7 @@ void SetPanoramaEnabled(bool enabled) {
         }
     }
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
-    WhiteboardLog(std::string("[WhiteboardCanvas] ") + (enabled ? "Enabled" : "Disabled"));
+//    WhiteboardLog(std::string("[WhiteboardCanvas] ") + (enabled ? "Enabled" : "Disabled"));
 }
 
 void ResetPanorama() {
@@ -2210,17 +2961,17 @@ void SetWhiteboardDebug(bool enabled) {
     g_whiteboard_debug.store(enabled);
     if (g_whiteboard_canvas) g_whiteboard_canvas->SyncRuntimeSettings();
     if (!enabled) cv::destroyAllWindows();
-    WhiteboardLog(std::string("[WhiteboardCanvas] Debug windows ") + (enabled ? "ON" : "OFF"));
+//    WhiteboardLog(std::string("[WhiteboardCanvas] Debug windows ") + (enabled ? "ON" : "OFF"));
 }
 
 void SetCanvasEnhanceThreshold(float threshold) {
     g_canvas_enhance_threshold.store(threshold);
     if (g_whiteboard_canvas) g_whiteboard_canvas->SyncRuntimeSettings();
-    {
-        std::ostringstream stream;
-        stream << "[WhiteboardCanvas] Enhance threshold=" << threshold;
-        WhiteboardLog(stream.str());
-    }
+//    {
+//        std::ostringstream stream;
+//        stream << "[WhiteboardCanvas] Enhance threshold=" << threshold;
+//        WhiteboardLog(stream.str());
+//    }
 }
 
 int GetSubCanvasCount() {

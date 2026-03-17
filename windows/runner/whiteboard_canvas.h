@@ -97,6 +97,7 @@ public:
                      cv::Size viewSize, cv::Mat& out_frame);
     bool GetOverview(cv::Size viewSize, cv::Mat& out_frame);
     bool GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame);
+    bool GetViewportAtCamera(cv::Size viewSize, cv::Mat& out_frame);
 
     // --- State control ---
     void Reset();
@@ -129,7 +130,7 @@ private:
 
     // Sub-pixel refinement methods (at most one should be enabled at a time)
     static constexpr bool  kEnableECCRefinement        = false;  // ECC optimization: spatial-domain iterative search. Handles intensity changes well. Slow (~5-15ms).
-    static constexpr bool  kEnableTemplateRefinement    = true;  // Template matching: brute-force correlation of ink-rich patches. Sub-pixel via parabola fit.
+    static constexpr bool  kEnableTemplateRefinement    = false;  // Template matching: brute-force correlation of ink-rich patches. Sub-pixel via parabola fit.
     static constexpr bool  kEnableLKRefinement          = false;   // Lucas-Kanade optical flow: tracks contour centroids between frames. Very fast (<1ms).
 
     // ECC parameters
@@ -138,8 +139,8 @@ private:
     static constexpr float kECCMaxCorrection           = 10.0f;  // Max pixel correction from ECC. Reject larger shifts.
 
     // Template matching parameters
-    static const int       kTemplateMatchPatchSize     = 64;     // Size of the ink-rich patch to match (px at reference res). Rec: 32-128.
-    static const int       kTemplateMatchSearchRadius  = 15;     // Search radius around expected position (px at reference res). Rec: 5-20.
+    static const int       kTemplateMatchPatchSize     = 128;     // Size of the ink-rich patch to match (px at reference res). Rec: 32-128.
+    static const int       kTemplateMatchSearchRadius  = 30;     // Search radius around expected position (px at reference res). Rec: 5-20.
     static constexpr float kTemplateMaxCorrection      = 10.0f;  // Max pixel correction from template matching.
 
     // Lucas-Kanade parameters
@@ -174,16 +175,32 @@ private:
     static const int       kAbsenceEraseFrames  = 5;          // Count of frames where stroke is missing to erase. Low: flickering, High: slow erase. Rec: 3-10.
     static const int       kAbsenceEraseThr     = 10;         // Intensity threshold for "missing" detection. Low: sensitive to shadows, High: ignores erasures. Rec: 5-20.
 
+    // Edge-alignment warping
+    static constexpr bool  kEnableEdgeWarp         = false;
+    static constexpr bool  kEdgeWarpModeB          = true;  // false=warp new image, true=warp canvas
+    static const int       kEdgeStripHalfWidth     = 50;     // half-width of comparison strips (px at ref res)
+    static const int       kEdgeMaxShift           = 10;     // max per-row horizontal shift (px at ref res)
+    static const int       kEdgeRowBlockSize       = 4;      // rows averaged together for shift
+    static const int       kEdgeMedianKernel       = 15;     // median filter kernel for smoothing
+
     // Raw canvas quality (each can be toggled independently)
     static constexpr bool  kEnableBlurRejection   = true;   // Skip painting raw frame when it's blurry (camera in motion).
-    static constexpr bool  kEnableRawEdgeFeather   = false;  // Fade out frame edges to blend seams in raw canvas.
+    static constexpr bool  kEnableRawEdgeFeather   = true;   // Fade out frame edges to blend seams in raw canvas.
     static constexpr float kBlurThreshold          = 30.0f;  // Laplacian variance below this = blurry. Low: strict, High: permissive. Rec: 30-80.
     static const int       kRawEdgeMargin          = 30;     // Pixels to crop from each edge of raw frame (at reference res). Rec: 15-50.
     static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (at reference res). Rec: 20-60.
 
+    // ORB-based raw stitching (visual seam quality only — does NOT affect mapping)
+    static constexpr bool  kEnableRawORBStitch      = true;   // Use ORB feature matching to align raw frames at seams.
+    static const int       kORBMaxFeatures           = 500;    // Max ORB keypoints per half. Rec: 300-1000.
+    static const int       kORBMinMatches            = 8;      // Min good matches to attempt homography. Rec: 6-15.
+    static const int       kORBMaxGoodMatches        = 40;     // Keep top N matches by distance. Rec: 30-80.
+    static constexpr float kORBMaxHomographyDev      = 0.15f;  // Max deviation from identity for homography diagonal. Rec: 0.1-0.3.
+    static constexpr float kORBMinCanvasContent      = 0.002f;  // Min fraction of non-white pixels to consider half "has content".
+
     // Contour matching
-    static constexpr float  kRectangleThreshold = 3.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
-    static constexpr double kMaxShapeDist    = 0.7; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
+    static constexpr float  kRectangleThreshold = 30.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
+    static constexpr double kMaxShapeDist    = 1.0; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
     static const int        kMinContourArea  = 30;   // px² — filter noise (at reference res). Rec: 10-100.
     static const int        kMinShapeVotes   = 5;    // min matched pairs to accept shift. Low: unstable/random jumps, High: hard to lock on. Rec: 2-5.
 
@@ -294,6 +311,29 @@ private:
     } perf_stats_;
 
     // -----------------------------------------------------------------------
+    // Edge-alignment warping
+    // -----------------------------------------------------------------------
+    struct EdgeWarpResult {
+        std::vector<float> per_row_shift;   // horizontal shift per row
+        std::vector<float> per_row_vshift;  // vertical shift per row
+        bool valid = false;
+    };
+
+    EdgeWarpResult ComputeEdgeShifts(const cv::Mat& reference_strip,
+                                     const cv::Mat& seam_strip);
+    void BuildEdgeRemapMaps(const EdgeWarpResult& left_warp,
+                            const EdgeWarpResult& right_warp,
+                            int frame_width, int frame_height,
+                            cv::Mat& map_x, cv::Mat& map_y);
+    cv::Mat GetCanvasStrokeBinaryRegion(WhiteboardGroup& group,
+                                        int global_x, int global_y,
+                                        int width, int height);
+    void WarpCanvasEdgeRegion(WhiteboardGroup& group,
+                              const EdgeWarpResult& warp,
+                              int edge_global_x, int global_y, int height,
+                              bool is_left_edge);
+
+    // -----------------------------------------------------------------------
     // Internal methods (all run on worker_thread_ unless noted)
     // -----------------------------------------------------------------------
     void WorkerLoop();
@@ -307,6 +347,14 @@ private:
     // Extract a gray region from canvas chunks at global position.
     cv::Mat GetCanvasGrayRegion(WhiteboardGroup& group, int global_x, int global_y,
                                 int width, int height);
+
+    // Extract a BGR region from raw_canvas chunks at global position.
+    cv::Mat GetCanvasRawBGRRegion(WhiteboardGroup& group, int global_x, int global_y,
+                                   int width, int height);
+
+    // ORB-align a raw frame to existing canvas content (visual quality only).
+    cv::Mat ORBAlignRawFrame(WhiteboardGroup& group, const cv::Mat& frame_bgr,
+                              cv::Point2f camera_pos);
 
     // Sub-pixel refinement methods (called after coarse contour match in stage 4)
     bool RefineWithECC(WhiteboardGroup& group, const cv::Mat& gray,

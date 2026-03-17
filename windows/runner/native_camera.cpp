@@ -692,7 +692,7 @@ void NativeCamera::RefreshDisplayFrame() {
         const bool has_canvas_content = g_whiteboard_canvas->HasContent();
         if (has_canvas_content) {
             cv::Mat canvas_out;
-            if (g_whiteboard_canvas->GetOverview(
+            if (g_whiteboard_canvas->GetViewportAtCamera(
                     display_bgr.size(),
                     canvas_out)) {
                 display_bgr = canvas_out;
@@ -805,7 +805,7 @@ void NativeCamera::ProcessingThreadLoop() {
                 if (has_canvas_content) {
                     cv::Mat canvas_out;
                     const bool got_lock =
-                        g_whiteboard_canvas->GetOverview(
+                        g_whiteboard_canvas->GetViewportAtCamera(
                             frame.size(),
                             canvas_out);
 
