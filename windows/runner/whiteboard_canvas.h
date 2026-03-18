@@ -48,7 +48,6 @@ enum class CanvasPipelineMode : int {
 // ---------------------------------------------------------------------------
 struct Chunk {
     cv::Mat stroke_canvas;   // CV_8UC3, white-initialized, kChunkWidth x chunk_height_
-    cv::Mat stroke_canvas;   // CV_8UC3, white-initialized, kChunkWidth x chunk_height_
     cv::Mat absence_counter; // CV_8UC1, zero-initialized, tracking erase frames
     cv::Mat raw_canvas;      // CV_8UC3, white-initialized raw mosaic tile
     int grid_x;
@@ -221,8 +220,8 @@ struct WhiteboardGroup {
     // Stroke view bounds (in pixels)
     int stroke_min_px_x = 0;
     int stroke_min_px_y = 0;
-    int stroke_max_px_x = 0;
-    int stroke_max_px_y = 0;
+    int stroke_max_px_x = 512;
+    int stroke_max_px_y = 512;
 
     // Raw view bounds (in pixels)
     int raw_min_px_x = 0;
@@ -342,28 +341,10 @@ private:
     static const int       kStillFramePatience = 1;
 
     // Worker queue
-    static const int       kQueueDepth         = 1;          // Buffer for incoming frames. Higher increases lag but prevents dropped frames. Rec: 1-2.
+    static const int       kQueueDepth         = 1;
 
-    // Anti-ghosting layers (each can be toggled independently)
-    static constexpr bool  kEnableProximitySuppression = true;  // Dilate existing ink to suppress nearby new strokes.
-    static constexpr bool  kEnableGridReplace          = true;  // Replace cell content when IoU is low (content changed).
-    static constexpr bool  kEnableGhostBlock           = true;  // Block painting cells where overlap is high (duplicate ghost).
-    static constexpr bool  kEnableAbsenceErasure       = true;  // Erase canvas cells when strokes disappear for N frames.
-
-    static const int       kProximityRadius     = 30;        // Pixel radius to suppress nearby matches (at reference res). Rec: 10-30.
-    static const int       kGridCellSize        = 100;       // Grid size for content density checks (at reference res). Rec: 100-400.
-    static const int       kMinCellStrokePixels = 50;         // Min pixels in cell to consider it "full" (at reference res). Rec: 30-100.
-    static constexpr float kCellReplaceIoU      = 0.40f;       // Overlap threshold to replace old data. Low: messy layers, High: stubborn old data. Rec: 0.1-0.4.
-    static constexpr float kCellGhostOverlap    = 0.35f;       // Overlap threshold to flag a "ghost" stroke. Low: aggressive erasures, High: trails visible. Rec: 0.15-0.35.
-    static const int       kAbsenceEraseFrames  = 5;          // Count of frames where stroke is missing to erase. Low: flickering, High: slow erase. Rec: 3-10.
-    static const int       kAbsenceEraseThr     = 10;         // Intensity threshold for "missing" detection. Low: sensitive to shadows, High: ignores erasures. Rec: 5-20.
-
-    // Raw canvas quality (each can be toggled independently)
-    static constexpr bool  kEnableBlurRejection   = true;   // Skip painting raw frame when it's blurry (camera in motion).
-    static constexpr bool  kEnableRawEdgeFeather   = false;  // Fade out frame edges to blend seams in raw canvas.
-    static constexpr float kBlurThreshold          = 30.0f;  // Laplacian variance below this = blurry. Low: strict, High: permissive. Rec: 30-80.
-    static const int       kRawEdgeMargin          = 30;     // Pixels to crop from each edge of raw frame (at reference res). Rec: 15-50.
-    static const int       kRawFeatherWidth        = 40;     // Width of the fade gradient at edges (at reference res). Rec: 20-60.
+    // Raw canvas quality
+    // (blur rejection removed — not used in current pipeline)
 
     // Contour matching
     static constexpr double kMaxShapeDist    = 0.5;
@@ -430,10 +411,6 @@ private:
     // Canvas defaults
     static const int kDefaultCanvasWidth = 1920;
     static const int kDefaultCanvasHeight = 1080;
-    static constexpr float  kRectangleThreshold = 3.0f; // Aspect ratio threshold (max(w/h, h/w)). Strokes exceeding this are filtered out as "rectangular" artifacts (like board edges).
-    static constexpr double kMaxShapeDist    = 0.7; // matchShapes threshold. Low: strict/fewer matches, High: loose/false positives. Rec: 0.3-0.7.
-    static const int        kMinContourArea  = 30;   // px² — filter noise (at reference res). Rec: 10-100.
-    static const int        kMinShapeVotes   = 5;    // min matched pairs to accept shift. Low: unstable/random jumps, High: hard to lock on. Rec: 2-5.
 
     // -----------------------------------------------------------------------
     // Chunk pipeline constants
@@ -478,13 +455,6 @@ private:
     static const int kReferenceHeight = 1080;
     int ScalePx(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight)); }
     int ScaleArea(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight * frame_h_ / kReferenceHeight)); }
-    static const int kChunkWidth = 512;              // Width of internal memory tiles (px). Do not change without re-tuning. Rec: 512.
-    int chunk_height_ = 0;                           // Height of chunks = frame_h_, set on first frame.
-
-    // Resolution-relative helpers: scale a reference-res value to actual frame_h_
-    static const int kReferenceHeight = 1080;
-    int ScalePx(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight)); }
-    int ScaleArea(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight * frame_h_ / kReferenceHeight)); }
 
     // -----------------------------------------------------------------------
     // Sub-canvas collection (protected by state_mutex_)
@@ -523,12 +493,8 @@ private:
     // -----------------------------------------------------------------------
     cv::Mat prev_gray_;
     int     frames_since_warp_ = 0;
+    int     matched_frame_counter_ = 0;
     int     motion_frame_counter_ = 0;
-    cv::Mat prev_frame_gray_;                        // Full-res gray of previous successfully matched frame (for LK flow).
-    std::vector<cv::Point2f> prev_tracked_points_;   // Contour centroids from the previous matched frame (for LK flow).
-    int     matched_frame_counter_ = 0;              // Total count of frames that successfully matched to the canvas.
-    int     consecutive_failed_matches_ = 0;         // Counter for consecutive match failures.
-    float   last_match_accuracy_ = 0.0f;             // Voting consensus (votes) of the last successful match.
 
     // -----------------------------------------------------------------------
     // Atomic flags
@@ -750,11 +716,7 @@ private:
     uint64_t GetChunkHash(int grid_x, int grid_y) const;
     void EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y);
 
-    // Matching helpers
-    bool MatchContours(const std::vector<ContourShape>& frame_contours,
-                       const std::vector<ContourShape>& canvas_contours,
-                       cv::Point2f& out_pos, int& out_votes, int binSize);
-
+    // Chunk painting
     void PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
                               const cv::Mat& enhanced_bgr, cv::Point2f camera_pos,
                               const cv::Mat& no_update_mask = cv::Mat());

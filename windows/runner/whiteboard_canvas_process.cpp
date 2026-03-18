@@ -34,8 +34,8 @@ constexpr DWORD kStateReadLockTimeoutMs = 8;
 constexpr DWORD kHelperStartTimeoutMs = 5000;
 constexpr DWORD kHelperLoopWaitMs = 15;
 constexpr int kNoSubCanvasRequest = -1;
-constexpr int kFallbackCanvasWidth = 1;
-constexpr int kFallbackCanvasHeight = 1;
+constexpr int kDefaultCanvasWidth = 1920;
+constexpr int kDefaultCanvasHeight = 1080;
 constexpr int kMaxGraphNodes = 512;
 constexpr int kMaxGraphNodeFloats = kMaxGraphNodes * 14;
 constexpr int kMaxGraphContourFloats = 500000;
@@ -65,8 +65,8 @@ struct SharedState {
     LONG overview_req_width = 0;
     LONG overview_req_height = 0;
     LONG has_content = 0;
-    LONG canvas_width = kFallbackCanvasWidth;
-    LONG canvas_height = kFallbackCanvasHeight;
+    LONG canvas_width = kDefaultCanvasWidth;
+    LONG canvas_height = kDefaultCanvasHeight;
     LONG subcanvas_count = 0;
     LONG active_subcanvas = -1;
     LONG frame_available = 0;
@@ -215,6 +215,11 @@ public:
         cv::Mat last_viewport;
         cv::Mat last_overview;
         cv::Size latest_output_size(kDefaultCanvasWidth, kDefaultCanvasHeight);
+        int last_graph_compare_request_id = 0;
+        int graph_compare_result_id = 0;
+        bool graph_compare_result_ready = false;
+        bool graph_compare_result_ok = false;
+        float graph_compare_result[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
 
         while (true) {
             WaitForSingleObject(wake_event_.get(), kHelperLoopWaitMs);
@@ -553,6 +558,7 @@ struct WhiteboardCanvasHelperClient::Impl {
     std::atomic<bool> cached_has_content{false};
     std::atomic<bool> cached_canvas_view_mode{false};
     std::atomic<int> cached_render_mode{static_cast<int>(CanvasRenderMode::kStroke)};
+    std::atomic<int> cached_pipeline_mode{static_cast<int>(CanvasPipelineMode::kGraph)};
     std::atomic<int> cached_canvas_width{kDefaultCanvasWidth};
     std::atomic<int> cached_canvas_height{kDefaultCanvasHeight};
     std::atomic<int> cached_subcanvas_count{0};
@@ -590,6 +596,8 @@ struct WhiteboardCanvasHelperClient::Impl {
         cached_canvas_view_mode.store(false, std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(CanvasRenderMode::kStroke),
                                  std::memory_order_relaxed);
+        cached_pipeline_mode.store(static_cast<int>(CanvasPipelineMode::kGraph),
+                                   std::memory_order_relaxed);
         cached_canvas_width.store(kDefaultCanvasWidth, std::memory_order_relaxed);
         cached_canvas_height.store(kDefaultCanvasHeight, std::memory_order_relaxed);
         cached_subcanvas_count.store(0, std::memory_order_relaxed);
@@ -665,8 +673,8 @@ bool WhiteboardCanvasHelperClient::Start() {
     impl_->shared->zoom = 1.0f;
     impl_->shared->enhance_threshold = 5.0f;
     impl_->shared->yolo_fps = 2.0f;
-    impl_->shared->canvas_width = kFallbackCanvasWidth;
-    impl_->shared->canvas_height = kFallbackCanvasHeight;
+    impl_->shared->canvas_width = kDefaultCanvasWidth;
+    impl_->shared->canvas_height = kDefaultCanvasHeight;
     impl_->ResetCachedState();
 
     wchar_t exe_path[MAX_PATH] = {0};
@@ -952,7 +960,7 @@ int WhiteboardCanvasHelperClient::GetPipelineMode() const {
 }
 
 cv::Size WhiteboardCanvasHelperClient::GetCanvasSize() const {
-    if (!IsReady()) return cv::Size(kFallbackCanvasWidth, kFallbackCanvasHeight);
+    if (!IsReady()) return cv::Size(kDefaultCanvasWidth, kDefaultCanvasHeight);
     impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
         impl_->RefreshCachedStateUnsafe();
     });
