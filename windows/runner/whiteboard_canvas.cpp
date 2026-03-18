@@ -197,6 +197,62 @@ static const char* RenderModeName(CanvasRenderMode mode) {
     return mode == CanvasRenderMode::kRaw ? "RAW" : "STROKE";
 }
 
+// ---------------------------------------------------------------------------
+// ComputeFrameEdgeMask — Find strokes in a binary mask that touch the frame
+// edges. Returns a mask of those full blobs (via connectedComponents) so they
+// can be excluded from painting — preventing partial strokes from cutting
+// existing canvas content. Returns empty Mat when no edge-crossing strokes.
+// ---------------------------------------------------------------------------
+static cv::Mat ComputeFrameEdgeMask(const cv::Mat& binary, int border_width) {
+    if (binary.empty() || cv::countNonZero(binary) == 0) return cv::Mat();
+
+    const int w = binary.cols, h = binary.rows;
+    const int bw = border_width;
+
+    // 1. Hollow border mask at the frame edges
+    cv::Mat border_mask = cv::Mat::zeros(h, w, CV_8U);
+    border_mask(cv::Rect(0, 0, w, std::min(bw, h))).setTo(255);
+    int bot_y = std::max(0, h - bw);
+    border_mask(cv::Rect(0, bot_y, w, h - bot_y)).setTo(255);
+    border_mask(cv::Rect(0, 0, std::min(bw, w), h)).setTo(255);
+    int right_x = std::max(0, w - bw);
+    border_mask(cv::Rect(right_x, 0, w - right_x, h)).setTo(255);
+
+    // 2. Find binary pixels that touch the border
+    cv::Mat edge_ink;
+    cv::bitwise_and(binary, border_mask, edge_ink);
+    if (cv::countNonZero(edge_ink) == 0) return cv::Mat();
+
+    // 3. Connected components of ALL strokes in the binary
+    cv::Mat labels;
+    int n_labels = cv::connectedComponents(binary, labels, 8, CV_32S);
+    (void)n_labels;
+
+    // 4. Collect label IDs that touch the border
+    std::set<int> edge_labels;
+    for (int y = 0; y < edge_ink.rows; y++) {
+        const uchar* ep = edge_ink.ptr<uchar>(y);
+        const int* lp = labels.ptr<int>(y);
+        for (int x = 0; x < edge_ink.cols; x++) {
+            if (ep[x] > 0 && lp[x] > 0)
+                edge_labels.insert(lp[x]);
+        }
+    }
+    if (edge_labels.empty()) return cv::Mat();
+
+    // 5. Build mask of full edge-crossing blobs
+    cv::Mat mask = cv::Mat::zeros(h, w, CV_8U);
+    for (int y = 0; y < labels.rows; y++) {
+        const int* lp = labels.ptr<int>(y);
+        uchar* mp = mask.ptr<uchar>(y);
+        for (int x = 0; x < labels.cols; x++) {
+            if (edge_labels.count(lp[x]))
+                mp[x] = 255;
+        }
+    }
+    return mask;
+}
+
 } // namespace
 
 // ============================================================================
@@ -921,6 +977,11 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
             }
         }
 
+        // Edge-crossing stroke protection: find strokes in the full-frame
+        // binary that touch the camera frame boundary.  Those partial blobs
+        // are suppressed so they don't overwrite complete strokes on the canvas.
+        cv::Mat full_edge_mask = ComputeFrameEdgeMask(binary, ScalePx(kEdgeBorderWidth));
+
         // Paint each strip (left/right of person) separately
         for (const auto& strip : strips) {
             cv::Rect strip_roi(strip.x, 0, strip.width, frame.rows);
@@ -929,7 +990,11 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& frame, const cv::Mat&
             cv::Mat strip_frame  = frame(strip_roi);
             cv::Point2f strip_pos(global_camera_pos_.x + strip.x,
                                   global_camera_pos_.y);
-            PaintStrokesToChunks(group, strip_binary, strip_paint, strip_pos);
+
+            cv::Mat strip_edge_mask = (!full_edge_mask.empty())
+                ? full_edge_mask(strip_roi) : cv::Mat();
+
+            PaintStrokesToChunks(group, strip_binary, strip_paint, strip_pos, strip_edge_mask);
             PaintRawFrameToChunks(group, strip_frame, strip_pos);
         }
 

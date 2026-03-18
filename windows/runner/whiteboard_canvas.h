@@ -23,6 +23,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <set>
 #include <unordered_map>
 #include <chrono>
 #include <future>
@@ -159,6 +160,9 @@ private:
 
     // Worker queue
     static const int       kQueueDepth         = 1;          // Buffer for incoming frames. Higher increases lag but prevents dropped frames. Rec: 1-2.
+
+    // Edge-crossing stroke protection
+    static const int kEdgeBorderWidth = 5;  // Border strip width in pixels (at ref res) to detect edge-crossing strokes
 
     // Anti-ghosting layers (each can be toggled independently)
     static constexpr bool  kEnableProximitySuppression = true;  // Dilate existing ink to suppress nearby new strokes.
