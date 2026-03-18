@@ -40,6 +40,7 @@ enum class CanvasRenderMode : int {
 enum class CanvasPipelineMode : int {
     kGraph = 0,   // Graph-based entity pipeline (default)
     kChunk = 1,   // Chunk-based tile pipeline ("picture")
+    kHybrid = 2,  // Chunk camera mapping + graph entity display
 };
 
 // ---------------------------------------------------------------------------
@@ -683,6 +684,15 @@ private:
 
     // Debug: 3x2 tile grid showing pipeline stages
     void RenderDebugGrid(const PipelineDebugState& state);
+
+    // -----------------------------------------------------------------------
+    // Hybrid pipeline methods
+    // -----------------------------------------------------------------------
+    void ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& gray,
+                            const cv::Mat& person_mask, float motion_fraction);
+    void RebuildCanvasContoursFromGraph(WhiteboardGroup& group);
+    void RebuildStrokeRenderCacheHybrid(WhiteboardGroup& group);
+    void RebuildRawRenderCacheHybrid(WhiteboardGroup& group);
 
     // -----------------------------------------------------------------------
     // Chunk pipeline methods

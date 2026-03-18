@@ -373,9 +373,15 @@ private:
         snapshot.render_mode = shared_->render_mode == static_cast<LONG>(CanvasRenderMode::kRaw)
             ? CanvasRenderMode::kRaw
             : CanvasRenderMode::kStroke;
-        snapshot.pipeline_mode = shared_->pipeline_mode == static_cast<LONG>(CanvasPipelineMode::kChunk)
-            ? CanvasPipelineMode::kChunk
-            : CanvasPipelineMode::kGraph;
+        {
+            int pm = static_cast<int>(shared_->pipeline_mode);
+            if (pm == static_cast<int>(CanvasPipelineMode::kHybrid))
+                snapshot.pipeline_mode = CanvasPipelineMode::kHybrid;
+            else if (pm == static_cast<int>(CanvasPipelineMode::kChunk))
+                snapshot.pipeline_mode = CanvasPipelineMode::kChunk;
+            else
+                snapshot.pipeline_mode = CanvasPipelineMode::kGraph;
+        }
         snapshot.debug_enabled = shared_->whiteboard_debug != 0;
         snapshot.reset_requested = shared_->reset_requested != 0;
         snapshot.requested_active_subcanvas = shared_->pending_active_subcanvas;

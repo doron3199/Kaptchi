@@ -1415,17 +1415,19 @@ bool WhiteboardCanvas::EnsureRenderCacheReady(WhiteboardGroup& group,
                                               CanvasRenderMode render_mode) {
     const auto profile_start = SteadyClock::now();
 
-    const bool is_chunk = GetPipelineMode() == CanvasPipelineMode::kChunk;
+    const auto cache_pm = GetPipelineMode();
     if (render_mode == CanvasRenderMode::kRaw) {
         if (group.raw_cache_dirty) {
-            if (is_chunk) RebuildRawRenderCacheChunk(group);
-            else          RebuildRawRenderCache(group);
+            if (cache_pm == CanvasPipelineMode::kChunk) RebuildRawRenderCacheChunk(group);
+            else if (cache_pm == CanvasPipelineMode::kHybrid) RebuildRawRenderCacheHybrid(group);
+            else RebuildRawRenderCache(group);
             group.raw_cache_dirty = false;
         }
     } else {
         if (group.stroke_cache_dirty) {
-            if (is_chunk) RebuildStrokeRenderCacheChunk(group);
-            else          RebuildStrokeRenderCache(group);
+            if (cache_pm == CanvasPipelineMode::kChunk) RebuildStrokeRenderCacheChunk(group);
+            else if (cache_pm == CanvasPipelineMode::kHybrid) RebuildStrokeRenderCacheHybrid(group);
+            else RebuildStrokeRenderCache(group);
             group.stroke_cache_dirty = false;
         }
     }
@@ -1972,17 +1974,6 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
     }
 
     // -------------------------------------------------------------------
-    // Pipeline mode branch: chunk pipeline uses its own stages 3+
-    // -------------------------------------------------------------------
-    if (GetPipelineMode() == CanvasPipelineMode::kChunk) {
-        ProcessFrameChunk(frame, gray, cropped_person_mask, motion_fraction);
-        RecordProfileSample(ProfileStep::kFrameTotal,
-                            ElapsedMs(frame_start, SteadyClock::now()));
-        MaybeLogProfileSummary();
-        return;
-    }
-
-    // -------------------------------------------------------------------
     // STAGE 3: Enhance + Binarize (graph pipeline)
     // -------------------------------------------------------------------
     int stroke_pixel_count = 0;
@@ -2013,7 +2004,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
         has_content_ = any_nodes;
     };
 
-    if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; }
+    if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; chunk_height_ = frame_h_; }
 
     int         best_votes = 0;
     cv::Point2f matched_pos(0, 0);
@@ -2187,6 +2178,17 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
         }
         recompute_has_content();
         match_status = "NEW GROUP (total=" + std::to_string(groups_.size()) + ")";
+    }
+
+    // -------------------------------------------------------------------
+    // STAGE 5b: Also paint to chunks (for chunk/hybrid display modes)
+    // -------------------------------------------------------------------
+    if (active_group_idx_ >= 0 && active_group_idx_ < static_cast<int>(groups_.size()) &&
+        best_votes >= kMinVotesForCameraUpdate && chunk_height_ > 0) {
+        auto& chunk_group = *groups_[active_group_idx_];
+        cv::Mat stroke_paint(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+        PaintStrokesToChunks(chunk_group, binary, stroke_paint, global_camera_pos_, no_update_mask);
+        PaintRawFrameToChunks(chunk_group, frame, global_camera_pos_, no_update_mask);
     }
 
     int graph_node_count = 0;
@@ -3832,17 +3834,21 @@ void WhiteboardCanvas::SetPipelineMode(CanvasPipelineMode mode) {
         helper_client_->SetPipelineMode(new_mode);
     }
 
-    Reset();
-    WhiteboardLog("[WhiteboardCanvas] Pipeline mode changed to "
-                  + std::string(new_mode == static_cast<int>(CanvasPipelineMode::kChunk)
-                                ? "CHUNK" : "GRAPH"));
+    InvalidateRenderCaches();
+    const char* name = (new_mode == static_cast<int>(CanvasPipelineMode::kHybrid))
+                        ? "HYBRID"
+                        : (new_mode == static_cast<int>(CanvasPipelineMode::kChunk))
+                            ? "CHUNK" : "GRAPH";
+    WhiteboardLog(std::string("[WhiteboardCanvas] Pipeline mode changed to ") + name);
 }
 
 CanvasPipelineMode WhiteboardCanvas::GetPipelineMode() const {
-    return pipeline_mode_.load(std::memory_order_relaxed) ==
-            static_cast<int>(CanvasPipelineMode::kChunk)
-        ? CanvasPipelineMode::kChunk
-        : CanvasPipelineMode::kGraph;
+    const int m = pipeline_mode_.load(std::memory_order_relaxed);
+    if (m == static_cast<int>(CanvasPipelineMode::kHybrid))
+        return CanvasPipelineMode::kHybrid;
+    if (m == static_cast<int>(CanvasPipelineMode::kChunk))
+        return CanvasPipelineMode::kChunk;
+    return CanvasPipelineMode::kGraph;
 }
 
 // ============================================================================
@@ -4454,6 +4460,402 @@ void WhiteboardCanvas::CreateSubCanvasChunk(const cv::Mat& frame_bgr,
 }
 
 // ============================================================================
+//  SECTION 20b: Hybrid Pipeline -- ProcessFrameHybrid
+// ============================================================================
+
+void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& gray,
+                                           const cv::Mat& person_mask, float motion_fraction) {
+    // --- Person mask dilation (same as chunk pipeline) ---
+    bool has_person_mask = !person_mask.empty() && person_mask.size() == gray.size();
+    cv::Mat person_mask_dilated;
+    if (has_person_mask) {
+        cv::Mat small_mask;
+        cv::resize(person_mask, small_mask, cv::Size(), 0.25, 0.25, cv::INTER_NEAREST);
+        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.05));
+        pad |= 1;
+        cv::Mat k_dilate = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(pad, pad));
+        cv::dilate(small_mask, small_mask, k_dilate);
+        cv::resize(small_mask, person_mask_dilated, frame.size(), 0, 0, cv::INTER_NEAREST);
+    }
+
+    // --- Binarize (graph-style) ---
+    cv::Mat no_update_mask = BuildNoUpdateMask(gray, person_mask);
+    int stroke_pixel_count = 0;
+    cv::Mat binary = BuildBinaryMask(gray, no_update_mask, stroke_pixel_count);
+    RecordProfileSample(ProfileStep::kBinaryMask, 0);
+
+    // --- Extract frame blobs (for graph entity matching) ---
+    const auto blob_start = SteadyClock::now();
+    std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame);
+    RecordProfileSample(ProfileStep::kBlobExtract,
+                        ElapsedMs(blob_start, SteadyClock::now()));
+
+    // --- Extract frame contours (for chunk-style camera matching) ---
+    std::vector<ContourShape> frame_contours =
+        ExtractContourShapes(binary, cv::Point2f(0, 0));
+
+    // --- Stroke reject filter ---
+    const cv::Rect lecturer_frame_rect = ComputeMaskBoundingRect(person_mask);
+    cv::Mat stroke_reject_mask;
+    if (kEnableFrameStrokeRejectFilter) {
+        stroke_reject_mask = BuildFrameStrokeRejectMask(
+            frame.size(), lecturer_frame_rect);
+    }
+
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+
+    if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; chunk_height_ = frame_h_; }
+
+    auto recompute_has_content = [&]() {
+        bool any_nodes = false;
+        for (const auto& group_ptr : groups_) {
+            if (group_ptr && !group_ptr->nodes.empty()) {
+                any_nodes = true;
+                break;
+            }
+        }
+        has_content_ = any_nodes;
+    };
+
+    int         best_votes = 0;
+    cv::Point2f matched_pos(0, 0);
+    std::string match_status;
+    bool created_new_sc = false;
+    bool graph_updated = false;
+    const int current_frame = processed_frame_id_;  // already incremented by caller
+
+    const bool has_active_group =
+        active_group_idx_ >= 0 && active_group_idx_ < static_cast<int>(groups_.size());
+    const int active_group_nodes = has_active_group
+        ? static_cast<int>(groups_[active_group_idx_]->nodes.size())
+        : 0;
+
+    // --- Step 1: Camera position from contour voting (chunk-style) ---
+    bool contour_matched = false;
+    if (has_active_group && !canvas_contours_.empty() && !frame_contours.empty()) {
+        if (canvas_contours_dirty_) {
+            RebuildCanvasContoursFromGraph(*groups_[active_group_idx_]);
+        }
+
+        int bin_sizes[] = {2, 5, 10};
+        for (int bin_size : bin_sizes) {
+            int tier_votes = 0;
+            cv::Point2f tier_pos;
+            if (MatchContours(frame_contours, canvas_contours_, tier_pos, tier_votes, bin_size)) {
+                if (tier_votes > kChunkMinShapeVotes && bin_size > 2) continue;
+                best_votes = tier_votes;
+                matched_pos = tier_pos;
+                contour_matched = true;
+                break;
+            }
+        }
+    }
+
+    // --- Step 2: Apply camera position ---
+    const bool graph_ready_for_matching =
+        has_active_group && active_group_nodes >= kStableGraphNodeThreshold;
+
+    if (contour_matched && best_votes >= kMinVotesForCameraUpdate) {
+        // Jump rejection
+        if (kChunkEnableJumpRejection && matched_frame_counter_ > 0) {
+            float jump = (float)cv::norm(matched_pos - global_camera_pos_);
+            const float max_jump_px = (float)ScalePx((int)kChunkMaxJumpPx);
+            if (jump > max_jump_px) {
+                matched_pos = global_camera_pos_;
+            }
+        }
+
+        // Velocity smoothing
+        const cv::Point2f frame_velocity = matched_pos - global_camera_pos_;
+        camera_velocity_ = kVelocitySmoothingAlpha * frame_velocity
+                         + (1.0f - kVelocitySmoothingAlpha) * camera_velocity_;
+
+        global_camera_pos_ = matched_pos;
+        global_frame_bootstrap_consumed_ = true;
+        matched_frame_counter_++;
+        last_vote_count_ = best_votes;
+    } else if (graph_ready_for_matching && !blobs.empty()) {
+        // Fallback: use graph RANSAC for camera position
+        int graph_votes = 0;
+        auto& group = *groups_[active_group_idx_];
+        cv::Point2f graph_pos = MatchBlobsToGraph(group, blobs, graph_votes);
+        RecordProfileSample(ProfileStep::kGraphMatch, 0);
+
+        if (graph_votes >= kMinVotesForCameraUpdate) {
+            const cv::Point2f frame_velocity = graph_pos - global_camera_pos_;
+            camera_velocity_ = kVelocitySmoothingAlpha * frame_velocity
+                             + (1.0f - kVelocitySmoothingAlpha) * camera_velocity_;
+            global_camera_pos_ = graph_pos;
+            global_frame_bootstrap_consumed_ = true;
+            matched_frame_counter_++;
+            last_vote_count_ = graph_votes;
+            best_votes = graph_votes;
+        } else if (graph_votes > 0) {
+            global_camera_pos_ += camera_velocity_;
+            camera_velocity_ *= 0.7f;
+            best_votes = graph_votes;
+        }
+    }
+
+    RecordProfileSample(ProfileStep::kCameraUpdate, 0);
+
+    // --- Step 3: Filter blobs ---
+    if (kEnableFrameStrokeRejectFilter) {
+        FilterFrameBlobsForCanvas(blobs, stroke_reject_mask, kKNeighbors);
+    }
+
+    // --- Step 4: Graph entity update ---
+    const auto graph_update_start = SteadyClock::now();
+    if (!has_active_group) {
+        if (stroke_pixel_count >= kMinStrokePixelsForNewSC && !blobs.empty()) {
+            CreateSubCanvas(frame, binary, blobs, current_frame);
+            created_new_sc = true;
+            if (active_group_idx_ >= 0 && active_group_idx_ < static_cast<int>(groups_.size())) {
+                groups_[active_group_idx_]->last_lecturer_rect = cv::Rect();
+            }
+            recompute_has_content();
+            // Build initial contours from seeded graph
+            if (active_group_idx_ >= 0 && active_group_idx_ < static_cast<int>(groups_.size())) {
+                RebuildCanvasContoursFromGraph(*groups_[active_group_idx_]);
+            }
+            match_status = "HYBRID NEW GROUP (total=" + std::to_string(groups_.size()) + ")";
+        } else {
+            match_status = "HYBRID bootstrap waiting (strokes=" + std::to_string(stroke_pixel_count)
+                         + " blobs=" + std::to_string(blobs.size()) + ")";
+        }
+
+    } else if (!graph_ready_for_matching) {
+        auto& group = *groups_[active_group_idx_];
+        if (!blobs.empty()) {
+            SeedGroupFromFrameBlobs(group, blobs, current_frame);
+            global_camera_pos_ = cv::Point2f(0, 0);
+            camera_velocity_ = cv::Point2f(0, 0);
+            last_vote_count_ = 0;
+            global_frame_bootstrap_consumed_ = false;
+            matched_frame_counter_ = 0;
+            group.last_lecturer_rect = cv::Rect();
+            recompute_has_content();
+            // Build initial contours from seeded graph
+            RebuildCanvasContoursFromGraph(group);
+            match_status = "HYBRID RESET GRAPH GR" + std::to_string(active_group_idx_)
+                         + " nodes=" + std::to_string(group.nodes.size());
+        } else {
+            match_status = "HYBRID bootstrap (graph=" + std::to_string(active_group_nodes) + ")";
+        }
+
+    } else {
+        auto& group = *groups_[active_group_idx_];
+        graph_updated = UpdateGraph(group, blobs, current_frame);
+        if (best_votes >= kMinVotesForCameraUpdate) {
+            group.last_lecturer_rect =
+                TranslateFrameRectToCanvas(lecturer_frame_rect, global_camera_pos_);
+        } else {
+            group.last_lecturer_rect = cv::Rect();
+        }
+        recompute_has_content();
+
+        // Rebuild canvas contours from graph for next frame's contour matching
+        if (graph_updated) {
+            RebuildCanvasContoursFromGraph(group);
+        }
+
+        if (best_votes >= kMinVotesForCameraUpdate) {
+            match_status = "HYBRID MATCHED GR" + std::to_string(active_group_idx_)
+                         + " votes=" + std::to_string(best_votes)
+                         + (contour_matched ? " [contour]" : " [graph-fallback]")
+                         + " nodes=" + std::to_string(group.nodes.size());
+        } else {
+            match_status = "HYBRID NO MATCH GR" + std::to_string(active_group_idx_)
+                         + " blobs=" + std::to_string(blobs.size())
+                         + " nodes=" + std::to_string(group.nodes.size());
+        }
+    }
+
+    RecordProfileSample(ProfileStep::kGraphUpdate,
+                        ElapsedMs(graph_update_start, SteadyClock::now()));
+
+    int graph_node_count = 0;
+    if (active_group_idx_ >= 0 && active_group_idx_ < static_cast<int>(groups_.size())) {
+        graph_node_count = static_cast<int>(groups_[active_group_idx_]->nodes.size());
+    }
+
+    RecordFrameProfile(false, best_votes,
+                       static_cast<int>(blobs.size()),
+                       graph_node_count);
+
+    WhiteboardLog("[HybridPipeline] " + match_status);
+}
+
+// ============================================================================
+//  SECTION 20c: Hybrid Pipeline -- RebuildCanvasContoursFromGraph
+// ============================================================================
+
+void WhiteboardCanvas::RebuildCanvasContoursFromGraph(WhiteboardGroup& group) {
+    canvas_contours_.clear();
+    canvas_contours_dirty_ = false;
+
+    if (group.nodes.empty()) return;
+
+    int width = std::max(1, group.stroke_max_px_x - group.stroke_min_px_x);
+    int height = std::max(1, group.stroke_max_px_y - group.stroke_min_px_y);
+
+    // Render all node binary masks onto a temporary canvas
+    cv::Mat temp_canvas(height, width, CV_8UC1, cv::Scalar(0));
+
+    for (const auto& pair : group.nodes) {
+        const auto* node = pair.second.get();
+        cv::Rect dst_roi(
+            node->bbox_canvas.x - group.stroke_min_px_x,
+            node->bbox_canvas.y - group.stroke_min_px_y,
+            node->bbox_canvas.width, node->bbox_canvas.height);
+
+        int cx0 = std::max(0, dst_roi.x);
+        int cy0 = std::max(0, dst_roi.y);
+        int cx1 = std::min(width, dst_roi.x + dst_roi.width);
+        int cy1 = std::min(height, dst_roi.y + dst_roi.height);
+        if (cx0 >= cx1 || cy0 >= cy1) continue;
+
+        int sx0 = cx0 - dst_roi.x;
+        int sy0 = cy0 - dst_roi.y;
+        int sw = cx1 - cx0;
+        int sh = cy1 - cy0;
+
+        if (sx0 + sw > node->binary_mask.cols || sy0 + sh > node->binary_mask.rows) continue;
+
+        cv::Rect src_rect(sx0, sy0, sw, sh);
+        cv::Rect dst_rect(cx0, cy0, sw, sh);
+
+        temp_canvas(dst_rect).setTo(255, node->binary_mask(src_rect));
+    }
+
+    // Extract contours with offset = stroke_min_px
+    cv::Point2f offset((float)group.stroke_min_px_x,
+                       (float)group.stroke_min_px_y);
+    canvas_contours_ = ExtractContourShapes(temp_canvas, offset);
+}
+
+// ============================================================================
+//  SECTION 20d: Hybrid Pipeline -- Render caches
+// ============================================================================
+
+void WhiteboardCanvas::RebuildStrokeRenderCacheHybrid(WhiteboardGroup& group) {
+    // Same as graph render but without graph overlay for clean output
+    const auto profile_start = SteadyClock::now();
+    if (group.nodes.empty()) {
+        group.stroke_render_cache = cv::Mat();
+        RecordProfileSample(ProfileStep::kRenderStrokeCache,
+                            ElapsedMs(profile_start, SteadyClock::now()));
+        return;
+    }
+
+    int width = std::max(1, group.stroke_max_px_x - group.stroke_min_px_x);
+    int height = std::max(1, group.stroke_max_px_y - group.stroke_min_px_y);
+
+    cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    std::vector<const DrawingNode*> sorted_nodes;
+    sorted_nodes.reserve(group.nodes.size());
+    for (const auto& pair : group.nodes) {
+        sorted_nodes.push_back(pair.second.get());
+    }
+    std::sort(sorted_nodes.begin(), sorted_nodes.end(),
+              [](const DrawingNode* a, const DrawingNode* b) {
+                  return a->created_frame < b->created_frame;
+              });
+
+    for (const auto* node : sorted_nodes) {
+        cv::Rect dst_roi(
+            node->bbox_canvas.x - group.stroke_min_px_x,
+            node->bbox_canvas.y - group.stroke_min_px_y,
+            node->bbox_canvas.width, node->bbox_canvas.height);
+
+        int cx0 = std::max(0, dst_roi.x);
+        int cy0 = std::max(0, dst_roi.y);
+        int cx1 = std::min(width, dst_roi.x + dst_roi.width);
+        int cy1 = std::min(height, dst_roi.y + dst_roi.height);
+        if (cx0 >= cx1 || cy0 >= cy1) continue;
+
+        int sx0 = cx0 - dst_roi.x;
+        int sy0 = cy0 - dst_roi.y;
+        int sw = cx1 - cx0;
+        int sh = cy1 - cy0;
+
+        if (sx0 + sw > node->binary_mask.cols || sy0 + sh > node->binary_mask.rows) continue;
+
+        cv::Rect src_rect(sx0, sy0, sw, sh);
+        cv::Rect dst_rect(cx0, cy0, sw, sh);
+
+        canvas(dst_rect).setTo(cv::Scalar(0, 0, 0), node->binary_mask(src_rect));
+    }
+
+    cv::bitwise_not(canvas, canvas);
+
+    // No graph overlay in hybrid mode -- keep output clean
+
+    group.stroke_render_cache = canvas;
+    RecordProfileSample(ProfileStep::kRenderStrokeCache,
+                        ElapsedMs(profile_start, SteadyClock::now()));
+}
+
+void WhiteboardCanvas::RebuildRawRenderCacheHybrid(WhiteboardGroup& group) {
+    // Same as graph render but without graph overlay for clean output
+    const auto profile_start = SteadyClock::now();
+    if (group.nodes.empty()) {
+        group.raw_render_cache = cv::Mat();
+        RecordProfileSample(ProfileStep::kRenderRawCache,
+                            ElapsedMs(profile_start, SteadyClock::now()));
+        return;
+    }
+
+    int width = std::max(1, group.raw_max_px_x - group.raw_min_px_x);
+    int height = std::max(1, group.raw_max_px_y - group.raw_min_px_y);
+    cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    std::vector<const DrawingNode*> sorted_nodes;
+    sorted_nodes.reserve(group.nodes.size());
+    for (const auto& pair : group.nodes) {
+        if (pair.second->color_pixels.empty()) continue;
+        sorted_nodes.push_back(pair.second.get());
+    }
+    std::sort(sorted_nodes.begin(), sorted_nodes.end(),
+              [](const DrawingNode* a, const DrawingNode* b) {
+                  return a->created_frame < b->created_frame;
+              });
+
+    for (const auto* node : sorted_nodes) {
+        cv::Rect dst_roi(
+            node->bbox_canvas.x - group.raw_min_px_x,
+            node->bbox_canvas.y - group.raw_min_px_y,
+            node->bbox_canvas.width, node->bbox_canvas.height);
+
+        int cx0 = std::max(0, dst_roi.x);
+        int cy0 = std::max(0, dst_roi.y);
+        int cx1 = std::min(width, dst_roi.x + dst_roi.width);
+        int cy1 = std::min(height, dst_roi.y + dst_roi.height);
+        if (cx0 >= cx1 || cy0 >= cy1) continue;
+
+        int sx0 = cx0 - dst_roi.x;
+        int sy0 = cy0 - dst_roi.y;
+        int sw = cx1 - cx0;
+        int sh = cy1 - cy0;
+
+        if (sx0 + sw > node->color_pixels.cols || sy0 + sh > node->color_pixels.rows) continue;
+        if (sx0 + sw > node->binary_mask.cols || sy0 + sh > node->binary_mask.rows) continue;
+
+        cv::Rect src_rect(sx0, sy0, sw, sh);
+        cv::Rect dst_rect(cx0, cy0, sw, sh);
+
+        node->color_pixels(src_rect).copyTo(canvas(dst_rect), node->binary_mask(src_rect));
+    }
+
+    // No graph overlay in hybrid mode -- keep output clean
+
+    group.raw_render_cache = canvas;
+    RecordProfileSample(ProfileStep::kRenderRawCache,
+                        ElapsedMs(profile_start, SteadyClock::now()));
+}
+
+// ============================================================================
 //  SECTION 21: Chunk Pipeline -- ProcessFrameChunk
 // ============================================================================
 
@@ -4777,10 +5179,12 @@ bool IsCanvasShowGraph() {
 
 void SetCanvasPipelineMode(int mode) {
     if (g_whiteboard_canvas) {
-        g_whiteboard_canvas->SetPipelineMode(
-            mode == static_cast<int>(CanvasPipelineMode::kChunk)
-                ? CanvasPipelineMode::kChunk
-                : CanvasPipelineMode::kGraph);
+        CanvasPipelineMode pm = CanvasPipelineMode::kGraph;
+        if (mode == static_cast<int>(CanvasPipelineMode::kChunk))
+            pm = CanvasPipelineMode::kChunk;
+        else if (mode == static_cast<int>(CanvasPipelineMode::kHybrid))
+            pm = CanvasPipelineMode::kHybrid;
+        g_whiteboard_canvas->SetPipelineMode(pm);
     }
 }
 

@@ -102,7 +102,7 @@ class _CameraScreenState extends State<CameraScreen>
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
-  bool _isChunkMode = false;
+  int _pipelineMode = 0; // 0=Graph, 1=Chunk, 2=Hybrid
   WhiteboardCanvasRenderMode _canvasRenderMode =
       WhiteboardCanvasRenderMode.stroke;
   bool _isWhiteboardDebug = false;
@@ -1251,29 +1251,10 @@ class _CameraScreenState extends State<CameraScreen>
                     : AppLocalizations.of(context)!.enableWhiteboard,
                 onPressed: () {
                   final enableWhiteboard = !_isWhiteboardMode;
-                  if (!enableWhiteboard && _isCanvasViewMode) {
-                    _setCanvasViewMode(false);
-                  }
-                  if (!enableWhiteboard && _isChunkMode) {
-                    _isChunkMode = false;
-                    NativeCameraService().setCanvasPipelineMode(0);
-                  }
 
                   setState(() {
                     _isWhiteboardMode = enableWhiteboard;
-                    if (_isWhiteboardMode) {
-                      // Reset canvas on enable so each session starts fresh
-                      NativeCameraService().resetPanorama();
-                      _canvasRenderMode = WhiteboardCanvasRenderMode.stroke;
-                      _canvasPanX = 0.5;
-                      _canvasPanY = 0.5;
-                      _canvasZoom = 1.0;
-                    }
                   });
-
-                  if (enableWhiteboard) {
-                    _canvasNavNotifier.value = (count: 0, active: 0);
-                  }
 
                   if (enableWhiteboard) {
                     _startCanvasPollTimer();
@@ -1282,9 +1263,6 @@ class _CameraScreenState extends State<CameraScreen>
                   }
 
                   NativeCameraService().setPanoramaEnabled(enableWhiteboard);
-                  if (enableWhiteboard) {
-                    NativeCameraService().setCanvasRenderMode(0);
-                  }
                 },
               ),
             // Canvas View Toggle (only visible when whiteboard mode is active)
@@ -1324,15 +1302,27 @@ class _CameraScreenState extends State<CameraScreen>
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(
                 icon: Icon(
-                  _isChunkMode ? Icons.grid_view : Icons.account_tree,
-                  color: _isChunkMode ? Colors.orange : Colors.teal,
+                  _pipelineMode == 0
+                      ? Icons.account_tree
+                      : _pipelineMode == 1
+                          ? Icons.grid_view
+                          : Icons.merge_type,
+                  color: _pipelineMode == 0
+                      ? Colors.teal
+                      : _pipelineMode == 1
+                          ? Colors.orange
+                          : Colors.purple,
                 ),
-                tooltip: _isChunkMode ? 'Switch to Graph mode' : 'Switch to Picture mode',
+                tooltip: _pipelineMode == 0
+                    ? 'Switch to Picture mode'
+                    : _pipelineMode == 1
+                        ? 'Switch to Hybrid mode'
+                        : 'Switch to Graph mode',
                 onPressed: () {
                   setState(() {
-                    _isChunkMode = !_isChunkMode;
+                    _pipelineMode = (_pipelineMode + 1) % 3;
                   });
-                  NativeCameraService().setCanvasPipelineMode(_isChunkMode ? 1 : 0);
+                  NativeCameraService().setCanvasPipelineMode(_pipelineMode);
                 },
               ),
             // Reset Whiteboard (only visible when whiteboard mode is active)
