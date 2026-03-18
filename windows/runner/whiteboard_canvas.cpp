@@ -1415,14 +1415,17 @@ bool WhiteboardCanvas::EnsureRenderCacheReady(WhiteboardGroup& group,
                                               CanvasRenderMode render_mode) {
     const auto profile_start = SteadyClock::now();
 
+    const bool is_chunk = GetPipelineMode() == CanvasPipelineMode::kChunk;
     if (render_mode == CanvasRenderMode::kRaw) {
         if (group.raw_cache_dirty) {
-            RebuildRawRenderCache(group);
+            if (is_chunk) RebuildRawRenderCacheChunk(group);
+            else          RebuildRawRenderCache(group);
             group.raw_cache_dirty = false;
         }
     } else {
         if (group.stroke_cache_dirty) {
-            RebuildStrokeRenderCache(group);
+            if (is_chunk) RebuildStrokeRenderCacheChunk(group);
+            else          RebuildStrokeRenderCache(group);
             group.stroke_cache_dirty = false;
         }
     }
@@ -1634,6 +1637,12 @@ void WhiteboardCanvas::Reset() {
     global_frame_bootstrap_consumed_ = false;
 
     prev_gray_ = cv::Mat();
+    prev_frame_gray_ = cv::Mat();
+    canvas_contours_.clear();
+    canvas_contours_dirty_ = true;
+    consecutive_failed_matches_ = 0;
+    last_match_accuracy_ = 0.0f;
+    chunk_height_ = 0;
     has_content_ = false;
     if (g_whiteboard_debug.load()) {
         for (const auto& info : sc_debug_infos_)
@@ -1963,7 +1972,18 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
     }
 
     // -------------------------------------------------------------------
-    // STAGE 3: Enhance + Binarize
+    // Pipeline mode branch: chunk pipeline uses its own stages 3+
+    // -------------------------------------------------------------------
+    if (GetPipelineMode() == CanvasPipelineMode::kChunk) {
+        ProcessFrameChunk(frame, gray, cropped_person_mask, motion_fraction);
+        RecordProfileSample(ProfileStep::kFrameTotal,
+                            ElapsedMs(frame_start, SteadyClock::now()));
+        MaybeLogProfileSummary();
+        return;
+    }
+
+    // -------------------------------------------------------------------
+    // STAGE 3: Enhance + Binarize (graph pipeline)
     // -------------------------------------------------------------------
     int stroke_pixel_count = 0;
     const auto binary_start = SteadyClock::now();
@@ -3304,7 +3324,45 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
 cv::Mat WhiteboardCanvas::GetCanvasGrayRegion(WhiteboardGroup& group,
                                                int global_x, int global_y,
                                                int width, int height) {
-    // Compose a gray image from nearby nodes' binary masks
+    // --- Chunk pipeline path: read from chunk tiles ---
+    if (GetPipelineMode() == CanvasPipelineMode::kChunk && chunk_height_ > 0) {
+        int gx0 = global_x, gy0 = global_y;
+        int gx1 = gx0 + width, gy1 = gy0 + height;
+
+        int sc_x = (int)std::floor((float)gx0 / kChunkWidth);
+        int sc_y = (int)std::floor((float)gy0 / chunk_height_);
+        int ec_x = (int)std::floor((float)(gx1 - 1) / kChunkWidth);
+        int ec_y = (int)std::floor((float)(gy1 - 1) / chunk_height_);
+
+        for (int cy = sc_y; cy <= ec_y; cy++) {
+            for (int cx = sc_x; cx <= ec_x; cx++) {
+                if (group.chunks.find(GetChunkHash(cx, cy)) == group.chunks.end()) {
+                    return cv::Mat();
+                }
+            }
+        }
+
+        cv::Mat region(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+        for (int cy = sc_y; cy <= ec_y; cy++) {
+            for (int cx = sc_x; cx <= ec_x; cx++) {
+                int cpx = cx * kChunkWidth, cpy = cy * chunk_height_;
+                int ix0 = std::max(cpx, gx0), iy0 = std::max(cpy, gy0);
+                int ix1 = std::min(cpx + kChunkWidth, gx1);
+                int iy1 = std::min(cpy + chunk_height_, gy1);
+                if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+                cv::Rect chunk_roi(ix0 - cpx, iy0 - cpy, ix1 - ix0, iy1 - iy0);
+                cv::Rect out_roi(ix0 - gx0, iy0 - gy0, ix1 - ix0, iy1 - iy0);
+                group.chunks[GetChunkHash(cx, cy)]->raw_canvas(chunk_roi).copyTo(region(out_roi));
+            }
+        }
+
+        cv::Mat gray_region;
+        cv::cvtColor(region, gray_region, cv::COLOR_BGR2GRAY);
+        return gray_region;
+    }
+
+    // --- Graph pipeline path: compose from node masks ---
     cv::Rect viewport(global_x, global_y, width, height);
 
     int coverage_pixels = 0;
@@ -3761,7 +3819,801 @@ void WhiteboardCanvas::RenderDebugGrid(const PipelineDebugState& state) {
 }
 
 // ============================================================================
-//  SECTION 14: FFI exports
+//  SECTION 14: Pipeline mode switching
+// ============================================================================
+
+void WhiteboardCanvas::SetPipelineMode(CanvasPipelineMode mode) {
+    const int old_mode = pipeline_mode_.load(std::memory_order_relaxed);
+    const int new_mode = static_cast<int>(mode);
+    if (old_mode == new_mode) return;
+    pipeline_mode_.store(new_mode, std::memory_order_relaxed);
+
+    if (remote_process_ && helper_client_) {
+        helper_client_->SetPipelineMode(new_mode);
+    }
+
+    Reset();
+    WhiteboardLog("[WhiteboardCanvas] Pipeline mode changed to "
+                  + std::string(new_mode == static_cast<int>(CanvasPipelineMode::kChunk)
+                                ? "CHUNK" : "GRAPH"));
+}
+
+CanvasPipelineMode WhiteboardCanvas::GetPipelineMode() const {
+    return pipeline_mode_.load(std::memory_order_relaxed) ==
+            static_cast<int>(CanvasPipelineMode::kChunk)
+        ? CanvasPipelineMode::kChunk
+        : CanvasPipelineMode::kGraph;
+}
+
+// ============================================================================
+//  SECTION 15: Chunk Pipeline -- Contour helpers
+// ============================================================================
+
+std::vector<WhiteboardCanvas::ContourShape>
+WhiteboardCanvas::ExtractContourShapes(const cv::Mat& binary,
+                                        cv::Point2f roi_offset) const {
+    std::vector<ContourShape> result;
+    if (binary.empty()) return result;
+
+    std::vector<std::vector<cv::Point>> raw;
+    cv::findContours(binary, raw, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+
+    for (const auto& c : raw) {
+        const double area = cv::contourArea(c);
+        if (area < ScaleArea(kMinContourArea)) continue;
+
+        cv::Rect bbox = cv::boundingRect(c);
+        if (bbox.width > 0 && bbox.height > 0) {
+            float aspect_ratio = (bbox.width > bbox.height)
+                               ? (float)bbox.width / (float)bbox.height
+                               : (float)bbox.height / (float)bbox.width;
+            if (aspect_ratio >= kChunkRectangleThreshold) continue;
+        }
+
+        cv::Moments m = cv::moments(c);
+        if (std::abs(m.m00) < 1e-6) continue;
+        cv::Point2f centroid((float)(m.m10 / m.m00) + roi_offset.x,
+                             (float)(m.m01 / m.m00) + roi_offset.y);
+
+        double hu[7];
+        cv::HuMoments(m, hu);
+
+        ContourShape shape;
+        shape.contour  = c;
+        shape.centroid = centroid;
+        shape.area = area;
+        std::copy(hu, hu + 7, shape.hu);
+        result.push_back(std::move(shape));
+    }
+
+    return result;
+}
+
+bool WhiteboardCanvas::MatchContours(const std::vector<ContourShape>& frame_contours,
+                                     const std::vector<ContourShape>& canvas_contours,
+                                     cv::Point2f& out_pos, int& out_votes, int binSize) {
+    if (canvas_contours.empty() || frame_contours.empty()) return false;
+
+    std::unordered_map<int64_t, std::vector<cv::Point2f>> votes;
+
+    for (const auto& cc : canvas_contours) {
+        for (const auto& fc : frame_contours) {
+            double dist = cv::matchShapes(cc.contour, fc.contour,
+                                          cv::CONTOURS_MATCH_I2, 0);
+            if (dist > kChunkMaxShapeDist) continue;
+
+            float dx = cc.centroid.x - fc.centroid.x;
+            float dy = cc.centroid.y - fc.centroid.y;
+
+            int bin_x = (int)std::round(dx / (float)binSize) * binSize;
+            int bin_y = (int)std::round(dy / (float)binSize) * binSize;
+            int64_t key = (static_cast<int64_t>(static_cast<uint32_t>(bin_x)) << 32)
+                        | static_cast<uint32_t>(bin_y);
+            votes[key].push_back(cv::Point2f(dx, dy));
+        }
+    }
+
+    int best_votes = 0;
+    int64_t best_key = 0;
+    for (const auto& vote : votes) {
+        const int vote_count = (int)vote.second.size();
+        if (vote_count > best_votes) {
+            best_votes = vote_count;
+            best_key = vote.first;
+        }
+    }
+
+    if (best_votes < kChunkMinShapeVotes) return false;
+
+    std::vector<cv::Point2f> merged;
+    if (kChunkEnableNeighborBinMerge) {
+        int center_bx = (int)(int32_t)(uint32_t)(best_key >> 32);
+        int center_by = (int)(int32_t)(uint32_t)(best_key & 0xFFFFFFFF);
+        for (int nx = -1; nx <= 1; nx++) {
+            for (int ny = -1; ny <= 1; ny++) {
+                int nbx = center_bx + nx * binSize;
+                int nby = center_by + ny * binSize;
+                int64_t nkey = (static_cast<int64_t>(static_cast<uint32_t>(nbx)) << 32)
+                             | static_cast<uint32_t>(nby);
+                auto it = votes.find(nkey);
+                if (it != votes.end()) {
+                    merged.insert(merged.end(), it->second.begin(), it->second.end());
+                }
+            }
+        }
+        best_votes = (int)merged.size();
+    } else {
+        merged = votes[best_key];
+    }
+
+    std::vector<float> dxs, dys;
+    dxs.reserve(merged.size());
+    dys.reserve(merged.size());
+    for (const auto& pt : merged) {
+        dxs.push_back(pt.x);
+        dys.push_back(pt.y);
+    }
+    std::sort(dxs.begin(), dxs.end());
+    std::sort(dys.begin(), dys.end());
+    int mid = (int)merged.size() / 2;
+    out_pos = cv::Point2f(dxs[mid], dys[mid]);
+    out_votes = best_votes;
+    return true;
+}
+
+void WhiteboardCanvas::RebuildCanvasContours(WhiteboardGroup& group) {
+    canvas_contours_.clear();
+    canvas_contours_dirty_ = false;
+
+    if (group.stroke_cache_dirty) {
+        RebuildStrokeRenderCacheChunk(group);
+        group.stroke_cache_dirty = false;
+    }
+    if (group.stroke_render_cache.empty()) return;
+
+    cv::Mat gray, canvas_bin;
+    cv::cvtColor(group.stroke_render_cache, gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(gray, canvas_bin, 50, 255, cv::THRESH_BINARY);
+
+    cv::Point2f offset((float)group.stroke_min_px_x,
+                       (float)group.stroke_min_px_y);
+    canvas_contours_ = ExtractContourShapes(canvas_bin, offset);
+}
+
+// ============================================================================
+//  SECTION 16: Chunk Pipeline -- Sub-pixel Refinement
+// ============================================================================
+
+bool WhiteboardCanvas::RefineWithTemplate(WhiteboardGroup& group,
+                                           const cv::Mat& binary,
+                                           const cv::Mat& gray,
+                                           cv::Point2f& pos) {
+    const int patch_size = ScalePx(kChunkTemplateMatchPatchSize);
+    const int search_radius = ScalePx(kChunkTemplateMatchSearchRadius);
+
+    cv::Rect best_patch;
+    int best_density = 0;
+    for (int y = 0; y <= binary.rows - patch_size; y += patch_size / 2) {
+        for (int x = 0; x <= binary.cols - patch_size; x += patch_size / 2) {
+            cv::Rect r(x, y, patch_size, patch_size);
+            int density = cv::countNonZero(binary(r));
+            if (density > best_density) {
+                best_density = density;
+                best_patch = r;
+            }
+        }
+    }
+
+    if (best_density < patch_size) return false;
+
+    cv::Mat templ = gray(best_patch);
+
+    int search_x = (int)std::round(pos.x) + best_patch.x - search_radius;
+    int search_y = (int)std::round(pos.y) + best_patch.y - search_radius;
+    int search_w = patch_size + 2 * search_radius;
+    int search_h = patch_size + 2 * search_radius;
+
+    cv::Mat canvas_roi = GetCanvasGrayRegion(group, search_x, search_y,
+                                             search_w, search_h);
+    if (canvas_roi.empty() || canvas_roi.cols < templ.cols || canvas_roi.rows < templ.rows) {
+        return false;
+    }
+
+    cv::Mat result;
+    cv::matchTemplate(canvas_roi, templ, result, cv::TM_CCOEFF_NORMED);
+    if (result.empty()) return false;
+
+    double minVal, maxVal;
+    cv::Point minLoc, maxLoc;
+    cv::minMaxLoc(result, &minVal, &maxVal, &minLoc, &maxLoc);
+
+    if (maxVal < 0.5) return false;
+
+    float sub_x = (float)maxLoc.x;
+    float sub_y = (float)maxLoc.y;
+
+    if (maxLoc.x > 0 && maxLoc.x < result.cols - 1) {
+        float left  = result.at<float>(maxLoc.y, maxLoc.x - 1);
+        float center = result.at<float>(maxLoc.y, maxLoc.x);
+        float right = result.at<float>(maxLoc.y, maxLoc.x + 1);
+        float denom = 2.0f * (2.0f * center - left - right);
+        if (std::abs(denom) > 1e-6f) {
+            sub_x += (left - right) / denom;
+        }
+    }
+    if (maxLoc.y > 0 && maxLoc.y < result.rows - 1) {
+        float top    = result.at<float>(maxLoc.y - 1, maxLoc.x);
+        float center = result.at<float>(maxLoc.y, maxLoc.x);
+        float bottom = result.at<float>(maxLoc.y + 1, maxLoc.x);
+        float denom = 2.0f * (2.0f * center - top - bottom);
+        if (std::abs(denom) > 1e-6f) {
+            sub_y += (top - bottom) / denom;
+        }
+    }
+
+    float dx = sub_x - (float)search_radius;
+    float dy = sub_y - (float)search_radius;
+
+    if (std::abs(dx) < kChunkTemplateMaxCorrection && std::abs(dy) < kChunkTemplateMaxCorrection) {
+        pos.x += dx;
+        pos.y += dy;
+        return true;
+    }
+    return false;
+}
+
+// ============================================================================
+//  SECTION 17: Chunk Grid Management
+// ============================================================================
+
+uint64_t WhiteboardCanvas::GetChunkHash(int grid_x, int grid_y) const {
+    uint32_t ux = (uint32_t)grid_x;
+    uint32_t uy = (uint32_t)grid_y;
+    return ((uint64_t)ux << 32) | uy;
+}
+
+void WhiteboardCanvas::EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y) {
+    uint64_t hash = GetChunkHash(grid_x, grid_y);
+    if (group.chunks.find(hash) == group.chunks.end()) {
+        auto chunk = std::make_unique<Chunk>();
+        chunk->stroke_canvas = cv::Mat(chunk_height_, kChunkWidth, CV_8UC3, cv::Scalar(255, 255, 255));
+        chunk->absence_counter = cv::Mat(chunk_height_, kChunkWidth, CV_8U, cv::Scalar(0));
+        chunk->raw_canvas = cv::Mat(chunk_height_, kChunkWidth, CV_8UC3, cv::Scalar(255, 255, 255));
+        chunk->grid_x = grid_x;
+        chunk->grid_y = grid_y;
+        group.chunks[hash] = std::move(chunk);
+        group.stroke_cache_dirty = true;
+        group.raw_cache_dirty = true;
+    }
+}
+
+// ============================================================================
+//  SECTION 18: Chunk Pipeline -- Painting to Chunks
+// ============================================================================
+
+void WhiteboardCanvas::PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
+                                             const cv::Mat& enhanced_bgr,
+                                             cv::Point2f camera_pos,
+                                             const cv::Mat& no_update_mask) {
+    cv::Rect bbox = cv::boundingRect(binary);
+    if (bbox.empty()) return;
+
+    int global_start_x = (int)std::round(camera_pos.x) + bbox.x;
+    int global_start_y = (int)std::round(camera_pos.y) + bbox.y;
+    int global_end_x   = global_start_x + bbox.width;
+    int global_end_y   = global_start_y + bbox.height;
+
+    cv::Rect paint_bbox = bbox;
+    int clip_top = std::max(group.stroke_min_px_y - global_start_y, 0);
+    int clip_bottom = std::max(global_end_y - group.stroke_max_px_y, 0);
+    paint_bbox.y += clip_top;
+    paint_bbox.height -= (clip_top + clip_bottom);
+    global_start_y += clip_top;
+    global_end_y -= clip_bottom;
+
+    if (paint_bbox.height <= 0 || global_start_y >= global_end_y) return;
+
+    if (global_start_x < group.stroke_min_px_x) group.stroke_min_px_x = global_start_x;
+    if (global_end_x > group.stroke_max_px_x) group.stroke_max_px_x = global_end_x;
+
+    int start_chunk_x = (int)std::floor((float)global_start_x / kChunkWidth);
+    int start_chunk_y = (int)std::floor((float)global_start_y / chunk_height_);
+    int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkWidth);
+    int end_chunk_y   = (int)std::floor((float)global_end_y   / chunk_height_);
+
+    for (int cy = start_chunk_y; cy <= end_chunk_y; cy++)
+        for (int cx = start_chunk_x; cx <= end_chunk_x; cx++)
+            EnsureChunkAllocated(group, cx, cy);
+
+    cv::Mat footprint(paint_bbox.height, paint_bbox.width, CV_8UC3, cv::Scalar(255, 255, 255));
+    cv::Mat absence_foot(paint_bbox.height, paint_bbox.width, CV_8U, cv::Scalar(0));
+
+    for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
+        for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
+            int chunk_px_x = cx * kChunkWidth;
+            int chunk_px_y = cy * chunk_height_;
+            int ix0 = std::max(chunk_px_x, global_start_x);
+            int iy0 = std::max(chunk_px_y, global_start_y);
+            int ix1 = std::min(chunk_px_x + kChunkWidth, global_end_x);
+            int iy1 = std::min(chunk_px_y + chunk_height_, global_end_y);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
+            cv::Rect foot_roi (ix0 - global_start_x, iy0 - global_start_y, ix1 - ix0, iy1 - iy0);
+
+            uint64_t hash = GetChunkHash(cx, cy);
+            auto& chunk = group.chunks[hash];
+            chunk->stroke_canvas(chunk_roi).copyTo(footprint(foot_roi));
+            chunk->absence_counter(chunk_roi).copyTo(absence_foot(foot_roi));
+        }
+    }
+
+    cv::Mat new_strokes = binary(paint_bbox);
+    cv::Mat colors_bbox = enhanced_bgr(paint_bbox);
+    cv::Mat no_update_bbox = (!no_update_mask.empty() && no_update_mask.size() == binary.size())
+        ? no_update_mask(paint_bbox)
+        : cv::Mat(paint_bbox.height, paint_bbox.width, CV_8U, cv::Scalar(0));
+
+    cv::Mat foot_gray, existing;
+    cv::cvtColor(footprint, foot_gray, cv::COLOR_BGR2GRAY);
+    cv::threshold(foot_gray, existing, 200, 255, cv::THRESH_BINARY_INV);
+
+    cv::Mat prox_allow_mask(footprint.size(), CV_8U, cv::Scalar(255));
+    if (kEnableProximitySuppression) {
+        cv::Mat canvas_stroke_zone;
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE,
+            cv::Size(2 * ScalePx(kProximityRadius) + 1, 2 * ScalePx(kProximityRadius) + 1));
+        cv::dilate(existing, canvas_stroke_zone, kernel);
+        cv::bitwise_not(canvas_stroke_zone, prox_allow_mask);
+    }
+
+    cv::Mat update_allowed_mask;
+    cv::bitwise_not(no_update_bbox, update_allowed_mask);
+
+    cv::Mat cell_replace_mask(footprint.size(), CV_8U, cv::Scalar(0));
+    cv::Mat cell_erase_mask(footprint.size(), CV_8U, cv::Scalar(0));
+    cv::Mat ghost_block(footprint.size(), CV_8U, cv::Scalar(0));
+
+    if (kEnableGridReplace || kEnableGhostBlock || kEnableAbsenceErasure) {
+        const int grid_cell_size = ScalePx(kGridCellSize);
+        for (int gy = 0; gy < footprint.rows; gy += grid_cell_size) {
+            for (int gx = 0; gx < footprint.cols; gx += grid_cell_size) {
+                int cw = std::min(grid_cell_size, footprint.cols - gx);
+                int ch = std::min(grid_cell_size, footprint.rows - gy);
+                cv::Rect cell(gx, gy, cw, ch);
+
+                if (cv::countNonZero(no_update_bbox(cell)) > 0) continue;
+
+                int new_count   = cv::countNonZero(new_strokes(cell));
+                int exist_count = cv::countNonZero(existing(cell));
+
+                if (kEnableAbsenceErasure
+                    && exist_count >= ScalePx(kMinCellStrokePixels) && new_count < kAbsenceEraseThr) {
+                    absence_foot(cell) += 1;
+                    cv::Mat absence_roi = absence_foot(cell);
+                    cv::Mat erase_flag = (absence_roi >= kAbsenceEraseFrames);
+                    if (cv::countNonZero(erase_flag) > 0) {
+                        cell_erase_mask(cell).setTo(255);
+                        absence_roi.setTo(0);
+                    }
+                    continue;
+                } else {
+                    absence_foot(cell).setTo(0);
+                }
+
+                if (exist_count < ScalePx(kMinCellStrokePixels) || new_count == 0) continue;
+
+                cv::Mat inter;
+                cv::bitwise_and(new_strokes(cell), existing(cell), inter);
+                int inter_count = cv::countNonZero(inter);
+                int union_count = new_count + exist_count - inter_count;
+                float iou = (union_count > 0) ? (float)inter_count / (float)union_count : 0.0f;
+                float overlap = (float)inter_count / (float)new_count;
+
+                if (kEnableGridReplace && iou < kCellReplaceIoU) {
+                    cell_replace_mask(cell).setTo(255);
+                    prox_allow_mask(cell).setTo(255);
+                } else if (kEnableGhostBlock && overlap > kCellGhostOverlap) {
+                    ghost_block(cell).setTo(255);
+                }
+            }
+        }
+    }
+
+    if (kEnableGhostBlock) {
+        cv::Mat ghost_allow;
+        cv::bitwise_not(ghost_block, ghost_allow);
+        cv::bitwise_and(prox_allow_mask, ghost_allow, prox_allow_mask);
+    }
+    cv::bitwise_and(prox_allow_mask, update_allowed_mask, prox_allow_mask);
+
+    cv::Mat new_only;
+    cv::bitwise_and(new_strokes, prox_allow_mask, new_only);
+
+    for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
+        for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
+            int chunk_px_x = cx * kChunkWidth;
+            int chunk_px_y = cy * chunk_height_;
+            int ix0 = std::max(chunk_px_x, global_start_x);
+            int iy0 = std::max(chunk_px_y, global_start_y);
+            int ix1 = std::min(chunk_px_x + kChunkWidth, global_end_x);
+            int iy1 = std::min(chunk_px_y + chunk_height_, global_end_y);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
+            cv::Rect foot_roi (ix0 - global_start_x, iy0 - global_start_y, ix1 - ix0, iy1 - iy0);
+
+            uint64_t hash = GetChunkHash(cx, cy);
+            auto& chunk = group.chunks[hash];
+            bool chunk_dirty = false;
+
+            absence_foot(foot_roi).copyTo(chunk->absence_counter(chunk_roi));
+
+            cv::Mat erase_roi = cell_erase_mask(foot_roi) | cell_replace_mask(foot_roi);
+            if (cv::countNonZero(erase_roi) > 0) {
+                chunk->stroke_canvas(chunk_roi).setTo(cv::Scalar(255, 255, 255), erase_roi);
+                chunk_dirty = true;
+            }
+
+            cv::Mat sub_mask = new_only(foot_roi);
+            if (cv::countNonZero(sub_mask) > 0) {
+                colors_bbox(foot_roi).copyTo(chunk->stroke_canvas(chunk_roi), sub_mask);
+                chunk_dirty = true;
+            }
+
+            if (chunk_dirty) {
+                group.stroke_cache_dirty = true;
+                canvas_contours_dirty_ = true;
+            }
+        }
+    }
+}
+
+void WhiteboardCanvas::PaintRawFrameToChunks(WhiteboardGroup& group,
+                                             const cv::Mat& frame_bgr,
+                                             cv::Point2f camera_pos,
+                                             const cv::Mat& no_update_mask) {
+    if (frame_bgr.empty()) return;
+
+    if (kEnableBlurRejection) {
+        cv::Mat gray_small;
+        cv::resize(frame_bgr, gray_small, cv::Size(), 0.25, 0.25, cv::INTER_AREA);
+        cv::Mat gray_ch;
+        cv::cvtColor(gray_small, gray_ch, cv::COLOR_BGR2GRAY);
+        cv::Mat lap;
+        cv::Laplacian(gray_ch, lap, CV_64F);
+        cv::Scalar mu, sigma;
+        cv::meanStdDev(lap, mu, sigma);
+        double variance = sigma.val[0] * sigma.val[0];
+        if (variance < kBlurThreshold) return;
+    }
+
+    const int margin = ScalePx(kRawEdgeMargin);
+    const int fw = frame_bgr.cols, fh = frame_bgr.rows;
+    cv::Rect inner(margin, margin,
+                   std::max(1, fw - 2 * margin),
+                   std::max(1, fh - 2 * margin));
+
+    int global_start_x = (int)std::round(camera_pos.x) + inner.x;
+    int global_start_y = (int)std::round(camera_pos.y) + inner.y;
+    int global_end_x = global_start_x + inner.width;
+    int global_end_y = global_start_y + inner.height;
+
+    if (global_start_x < group.raw_min_px_x) group.raw_min_px_x = global_start_x;
+    if (global_start_y < group.raw_min_px_y) group.raw_min_px_y = global_start_y;
+    if (global_end_x > group.raw_max_px_x) group.raw_max_px_x = global_end_x;
+    if (global_end_y > group.raw_max_px_y) group.raw_max_px_y = global_end_y;
+
+    cv::Mat inner_frame = frame_bgr(inner);
+    cv::Mat inner_no_update;
+    if (!no_update_mask.empty() && no_update_mask.size() == frame_bgr.size()) {
+        inner_no_update = no_update_mask(inner);
+    }
+
+    int start_chunk_x = (int)std::floor((float)global_start_x / kChunkWidth);
+    int start_chunk_y = (int)std::floor((float)global_start_y / chunk_height_);
+    int end_chunk_x   = (int)std::floor((float)global_end_x   / kChunkWidth);
+    int end_chunk_y   = (int)std::floor((float)global_end_y   / chunk_height_);
+
+    for (int cy = start_chunk_y; cy <= end_chunk_y; cy++) {
+        for (int cx = start_chunk_x; cx <= end_chunk_x; cx++) {
+            EnsureChunkAllocated(group, cx, cy);
+
+            int chunk_px_x = cx * kChunkWidth;
+            int chunk_px_y = cy * chunk_height_;
+            int ix0 = std::max(chunk_px_x, global_start_x);
+            int iy0 = std::max(chunk_px_y, global_start_y);
+            int ix1 = std::min(chunk_px_x + kChunkWidth, global_end_x);
+            int iy1 = std::min(chunk_px_y + chunk_height_, global_end_y);
+            if (ix0 >= ix1 || iy0 >= iy1) continue;
+
+            cv::Rect chunk_roi(ix0 - chunk_px_x, iy0 - chunk_px_y, ix1 - ix0, iy1 - iy0);
+            cv::Rect src_roi(ix0 - global_start_x, iy0 - global_start_y, ix1 - ix0, iy1 - iy0);
+
+            cv::Mat valid_mask;
+            if (!inner_no_update.empty()) {
+                cv::bitwise_not(inner_no_update(src_roi), valid_mask);
+            } else {
+                valid_mask = cv::Mat(src_roi.height, src_roi.width, CV_8U, cv::Scalar(255));
+            }
+            if (cv::countNonZero(valid_mask) == 0) continue;
+
+            uint64_t hash = GetChunkHash(cx, cy);
+            auto& chunk = group.chunks[hash];
+            inner_frame(src_roi).copyTo(chunk->raw_canvas(chunk_roi), valid_mask);
+            group.raw_cache_dirty = true;
+        }
+    }
+}
+
+// ============================================================================
+//  SECTION 19: Chunk Pipeline -- Render Caches
+// ============================================================================
+
+void WhiteboardCanvas::RebuildStrokeRenderCacheChunk(WhiteboardGroup& group) {
+    if (group.chunks.empty()) {
+        group.stroke_render_cache = cv::Mat();
+        return;
+    }
+
+    int width = std::max(1, group.stroke_max_px_x - group.stroke_min_px_x);
+    int height = std::max(1, group.stroke_max_px_y - group.stroke_min_px_y);
+    group.stroke_render_cache = cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    for (const auto& pair : group.chunks) {
+        const auto& chunk = pair.second;
+        int chunk_left = chunk->grid_x * kChunkWidth;
+        int chunk_top = chunk->grid_y * chunk_height_;
+        int chunk_right = chunk_left + kChunkWidth;
+        int chunk_bottom = chunk_top + chunk_height_;
+
+        int copy_left = std::max(chunk_left, group.stroke_min_px_x);
+        int copy_top = std::max(chunk_top, group.stroke_min_px_y);
+        int copy_right = std::min(chunk_right, group.stroke_max_px_x);
+        int copy_bottom = std::min(chunk_bottom, group.stroke_max_px_y);
+        if (copy_left >= copy_right || copy_top >= copy_bottom) continue;
+
+        cv::Rect src_roi(copy_left - chunk_left, copy_top - chunk_top,
+                         copy_right - copy_left, copy_bottom - copy_top);
+        cv::Rect dst_roi(copy_left - group.stroke_min_px_x, copy_top - group.stroke_min_px_y,
+                         copy_right - copy_left, copy_bottom - copy_top);
+
+        chunk->stroke_canvas(src_roi).copyTo(group.stroke_render_cache(dst_roi));
+    }
+
+    cv::bitwise_not(group.stroke_render_cache, group.stroke_render_cache);
+}
+
+void WhiteboardCanvas::RebuildRawRenderCacheChunk(WhiteboardGroup& group) {
+    if (group.chunks.empty()) {
+        group.raw_render_cache = cv::Mat();
+        return;
+    }
+
+    int width = std::max(1, group.raw_max_px_x - group.raw_min_px_x);
+    int height = std::max(1, group.raw_max_px_y - group.raw_min_px_y);
+    group.raw_render_cache = cv::Mat(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    for (const auto& pair : group.chunks) {
+        const auto& chunk = pair.second;
+        int chunk_left = chunk->grid_x * kChunkWidth;
+        int chunk_top = chunk->grid_y * chunk_height_;
+        int chunk_right = chunk_left + kChunkWidth;
+        int chunk_bottom = chunk_top + chunk_height_;
+
+        int copy_left = std::max(chunk_left, group.raw_min_px_x);
+        int copy_top = std::max(chunk_top, group.raw_min_px_y);
+        int copy_right = std::min(chunk_right, group.raw_max_px_x);
+        int copy_bottom = std::min(chunk_bottom, group.raw_max_px_y);
+        if (copy_left >= copy_right || copy_top >= copy_bottom) continue;
+
+        cv::Rect src_roi(copy_left - chunk_left, copy_top - chunk_top,
+                         copy_right - copy_left, copy_bottom - copy_top);
+        cv::Rect dst_roi(copy_left - group.raw_min_px_x, copy_top - group.raw_min_px_y,
+                         copy_right - copy_left, copy_bottom - copy_top);
+
+        chunk->raw_canvas(src_roi).copyTo(group.raw_render_cache(dst_roi));
+    }
+}
+
+// ============================================================================
+//  SECTION 20: Chunk Pipeline -- CreateSubCanvas
+// ============================================================================
+
+void WhiteboardCanvas::CreateSubCanvasChunk(const cv::Mat& frame_bgr,
+                                             const cv::Mat& binary,
+                                             const cv::Mat& enhanced_bgr,
+                                             const std::vector<ContourShape>& seed_contours) {
+    auto group = std::make_unique<WhiteboardGroup>();
+    group->debug_id = next_debug_id_++;
+    const int canvas_width = std::max(1, frame_bgr.cols);
+    const int canvas_height = std::max(1, frame_bgr.rows);
+
+    group->stroke_min_px_x = 0;
+    group->stroke_min_px_y = 0;
+    group->stroke_max_px_x = canvas_width;
+    group->stroke_max_px_y = canvas_height;
+    group->raw_min_px_x = 0;
+    group->raw_min_px_y = 0;
+    group->raw_max_px_x = std::max(frame_w_, frame_bgr.cols);
+    group->raw_max_px_y = std::max(frame_h_, frame_bgr.rows);
+
+    global_camera_pos_ = cv::Point2f(0, 0);
+
+    int idx = (int)groups_.size();
+    groups_.push_back(std::move(group));
+    active_group_idx_ = idx;
+
+    if (canvas_view_mode_.load() && view_group_idx_ == -1) {
+        view_group_idx_ = idx;
+    }
+
+    has_content_ = true;
+    canvas_contours_ = seed_contours;
+    canvas_contours_dirty_ = false;
+}
+
+// ============================================================================
+//  SECTION 21: Chunk Pipeline -- ProcessFrameChunk
+// ============================================================================
+
+void WhiteboardCanvas::ProcessFrameChunk(const cv::Mat& frame, const cv::Mat& gray,
+                                          const cv::Mat& person_mask, float motion_fraction) {
+    // --- Person mask ---
+    bool has_person_mask = !person_mask.empty() && person_mask.size() == gray.size();
+    if (!has_person_mask) {
+        WhiteboardLog("[ChunkPipeline] No person mask -- skipping frame");
+        return;
+    }
+
+    cv::Mat person_mask_dilated;
+    {
+        cv::Mat small_mask;
+        cv::resize(person_mask, small_mask, cv::Size(), 0.25, 0.25, cv::INTER_NEAREST);
+        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.05));
+        pad |= 1;
+        cv::Mat k_dilate = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(pad, pad));
+        cv::dilate(small_mask, small_mask, k_dilate);
+        cv::resize(small_mask, person_mask_dilated, frame.size(), 0, 0, cv::INTER_NEAREST);
+    }
+
+    cv::Rect person_bbox = cv::boundingRect(person_mask_dilated);
+    struct FrameStrip { int x; int width; };
+    std::vector<FrameStrip> strips;
+    static constexpr int kMinStripWidth = 512;
+    int left_width = person_bbox.x;
+    if (left_width >= kMinStripWidth) strips.push_back({0, left_width});
+    int right_x = person_bbox.x + person_bbox.width;
+    int right_width = frame.cols - right_x;
+    if (right_width >= kMinStripWidth) strips.push_back({right_x, right_width});
+    if (strips.empty()) return;
+
+    // --- Binarize ---
+    cv::Mat binary;
+    cv::adaptiveThreshold(gray, binary, 255,
+                          cv::ADAPTIVE_THRESH_GAUSSIAN_C,
+                          cv::THRESH_BINARY_INV, 51, 5);
+    if (has_person_mask && !person_mask_dilated.empty()) {
+        binary.setTo(0, person_mask_dilated);
+    }
+    const int top_cut    = (int)(gray.rows * 0.15);
+    const int bottom_cut = (int)(gray.rows * 0.90);
+    if (top_cut > 0) binary(cv::Rect(0, 0, binary.cols, top_cut)).setTo(0);
+    if (bottom_cut < binary.rows)
+        binary(cv::Rect(0, bottom_cut, binary.cols, binary.rows - bottom_cut)).setTo(0);
+
+    int stroke_pixel_count = cv::countNonZero(binary);
+    cv::Mat stroke_paint_bgr(frame.size(), CV_8UC3, cv::Scalar(0, 0, 0));
+
+    // --- Contour matching ---
+    std::vector<ContourShape> frame_contours =
+        ExtractContourShapes(binary, cv::Point2f(0, 0));
+
+    std::lock_guard<std::mutex> state_lock(state_mutex_);
+
+    if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; chunk_height_ = frame_h_; }
+
+    int         best_group_idx = -1;
+    int         best_votes = 0;
+    cv::Point2f matched_pos(0, 0);
+    std::string match_status;
+    bool created_new_sc = false;
+    bool tier_matched = false;
+    int final_bin_size = 10;
+
+    if (canvas_contours_dirty_ && active_group_idx_ >= 0
+        && active_group_idx_ < (int)groups_.size()) {
+        RebuildCanvasContours(*groups_[active_group_idx_]);
+    }
+
+    if (active_group_idx_ >= 0 && active_group_idx_ < (int)groups_.size()
+        && !canvas_contours_.empty() && !frame_contours.empty()) {
+
+        int bin_sizes[] = {2, 5, 10};
+        for (int bin_size : bin_sizes) {
+            int tier_votes = 0;
+            cv::Point2f tier_pos;
+            if (MatchContours(frame_contours, canvas_contours_, tier_pos, tier_votes, bin_size)) {
+                if (tier_votes > kChunkMinShapeVotes && bin_size > 2) continue;
+                best_votes = tier_votes;
+                matched_pos = tier_pos;
+                final_bin_size = bin_size;
+                tier_matched = true;
+                break;
+            }
+        }
+
+        if (tier_matched) {
+            best_group_idx = active_group_idx_;
+            last_match_accuracy_ = (float)best_votes;
+        }
+    }
+
+    // --- Paint or create ---
+    if (best_group_idx >= 0) {
+        auto& group = *groups_[best_group_idx];
+
+        if (kChunkEnableTemplateRefinement) {
+            RefineWithTemplate(group, binary, gray, matched_pos);
+        }
+
+        if (kChunkEnableJumpRejection && matched_frame_counter_ > 0) {
+            float jump = (float)cv::norm(matched_pos - global_camera_pos_);
+            const float max_jump_px = (float)ScalePx((int)kChunkMaxJumpPx);
+            if (jump > max_jump_px) {
+                matched_pos = global_camera_pos_;
+            }
+        }
+
+        global_camera_pos_ = matched_pos;
+        consecutive_failed_matches_ = 0;
+
+        for (const auto& strip : strips) {
+            cv::Rect strip_roi(strip.x, 0, strip.width, frame.rows);
+            cv::Mat strip_binary = binary(strip_roi);
+            cv::Mat strip_paint  = stroke_paint_bgr(strip_roi);
+            cv::Mat strip_frame  = frame(strip_roi);
+            cv::Point2f strip_pos(global_camera_pos_.x + strip.x, global_camera_pos_.y);
+            PaintStrokesToChunks(group, strip_binary, strip_paint, strip_pos);
+            PaintRawFrameToChunks(group, strip_frame, strip_pos);
+        }
+
+        active_group_idx_ = best_group_idx;
+        has_content_ = true;
+        matched_frame_counter_++;
+        match_status = "CHUNK MATCHED GR" + std::to_string(best_group_idx)
+                     + " votes=" + std::to_string(best_votes)
+                     + " chunks=" + std::to_string(group.chunks.size());
+
+    } else if (groups_.empty() && stroke_pixel_count >= ScaleArea(kMinStrokePixelsForNewSC)) {
+        CreateSubCanvasChunk(frame, binary, stroke_paint_bgr, frame_contours);
+        {
+            auto& new_group = *groups_.back();
+            for (const auto& strip : strips) {
+                cv::Rect strip_roi(strip.x, 0, strip.width, frame.rows);
+                cv::Mat strip_binary = binary(strip_roi);
+                cv::Mat strip_paint  = stroke_paint_bgr(strip_roi);
+                cv::Mat strip_frame  = frame(strip_roi);
+                cv::Point2f strip_pos(global_camera_pos_.x + strip.x, global_camera_pos_.y);
+                PaintStrokesToChunks(new_group, strip_binary, strip_paint, strip_pos);
+                PaintRawFrameToChunks(new_group, strip_frame, strip_pos);
+            }
+        }
+        created_new_sc = true;
+        match_status = "CHUNK NEW GROUP (total=" + std::to_string(groups_.size()) + ")";
+
+    } else {
+        consecutive_failed_matches_++;
+        match_status = "CHUNK no match (strokes=" + std::to_string(stroke_pixel_count)
+                     + " contours=" + std::to_string(frame_contours.size())
+                     + " votes=" + std::to_string(best_votes) + ")";
+    }
+
+    WhiteboardLog("[ChunkPipeline] " + match_status);
+}
+
+// ============================================================================
+//  SECTION 22: FFI exports
 // ============================================================================
 
 void SetPanoramaEnabled(bool enabled) {
@@ -3921,6 +4773,20 @@ void SetCanvasShowGraph(bool enabled) {
 
 bool IsCanvasShowGraph() {
     return g_canvas_show_graph.load();
+}
+
+void SetCanvasPipelineMode(int mode) {
+    if (g_whiteboard_canvas) {
+        g_whiteboard_canvas->SetPipelineMode(
+            mode == static_cast<int>(CanvasPipelineMode::kChunk)
+                ? CanvasPipelineMode::kChunk
+                : CanvasPipelineMode::kGraph);
+    }
+}
+
+int GetCanvasPipelineMode() {
+    if (!g_whiteboard_canvas) return static_cast<int>(CanvasPipelineMode::kGraph);
+    return static_cast<int>(g_whiteboard_canvas->GetPipelineMode());
 }
 
 // ============================================================================

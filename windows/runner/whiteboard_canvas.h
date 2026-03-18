@@ -37,6 +37,22 @@ enum class CanvasRenderMode : int {
     kRaw = 1,
 };
 
+enum class CanvasPipelineMode : int {
+    kGraph = 0,   // Graph-based entity pipeline (default)
+    kChunk = 1,   // Chunk-based tile pipeline ("picture")
+};
+
+// ---------------------------------------------------------------------------
+// Chunk -- one fixed-size tile of the virtual infinite whiteboard (chunk pipeline)
+// ---------------------------------------------------------------------------
+struct Chunk {
+    cv::Mat stroke_canvas;   // CV_8UC3, white-initialized, kChunkWidth x chunk_height_
+    cv::Mat absence_counter; // CV_8UC1, zero-initialized, tracking erase frames
+    cv::Mat raw_canvas;      // CV_8UC3, white-initialized raw mosaic tile
+    int grid_x;
+    int grid_y;
+};
+
 // ---------------------------------------------------------------------------
 // CandidateNode -- Tentative drawing; must be confirmed k frames before promotion
 // ---------------------------------------------------------------------------
@@ -188,7 +204,7 @@ private:
 struct WhiteboardGroup {
     int debug_id = -1;
 
-    // Graph of drawing nodes
+    // --- Graph pipeline data ---
     std::unordered_map<int, std::unique_ptr<DrawingNode>> nodes;
     int next_node_id = 0;
     SpatialIndex spatial_index{200};
@@ -196,6 +212,9 @@ struct WhiteboardGroup {
     // Candidate pool — blobs awaiting confirmation across multiple frames
     std::unordered_map<int, std::unique_ptr<CandidateNode>> candidates;
     int next_candidate_id = 0;
+
+    // --- Chunk pipeline data ---
+    std::unordered_map<uint64_t, std::unique_ptr<Chunk>> chunks;
 
     // Stroke view bounds (in pixels)
     int stroke_min_px_x = 0;
@@ -254,6 +273,8 @@ public:
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
     CanvasRenderMode GetRenderMode() const;
+    void SetPipelineMode(CanvasPipelineMode mode);
+    CanvasPipelineMode GetPipelineMode() const;
     bool IsRemoteProcess() const;
     cv::Size GetCanvasSize() const;
     void SyncRuntimeSettings();
@@ -391,6 +412,50 @@ private:
     static const int kDefaultCanvasHeight = 1080;
 
     // -----------------------------------------------------------------------
+    // Chunk pipeline constants
+    // -----------------------------------------------------------------------
+    static constexpr bool  kChunkEnableTemplateRefinement = true;
+    static const int       kChunkTemplateMatchPatchSize   = 64;
+    static const int       kChunkTemplateMatchSearchRadius = 15;
+    static constexpr float kChunkTemplateMaxCorrection    = 10.0f;
+    static constexpr bool  kChunkEnableJumpRejection      = false;
+    static constexpr bool  kChunkEnableNeighborBinMerge   = false;
+    static constexpr float kChunkMaxJumpPx              = 40.0f;
+    static const int       kChunkMinShapeVotes           = 5;
+    static constexpr double kChunkMaxShapeDist           = 0.7;
+    static constexpr float kChunkRectangleThreshold      = 3.0f;
+    static const int       kChunkFailedMatchPatience     = 10;
+    static const int       kChunkStillFramePatience      = 8;
+
+    // Anti-ghosting layers (chunk pipeline)
+    static constexpr bool  kEnableProximitySuppression = true;
+    static constexpr bool  kEnableGridReplace          = true;
+    static constexpr bool  kEnableGhostBlock           = true;
+    static constexpr bool  kEnableAbsenceErasure       = true;
+    static const int       kProximityRadius     = 30;
+    static const int       kGridCellSize        = 100;
+    static const int       kMinCellStrokePixels = 50;
+    static constexpr float kCellReplaceIoU      = 0.40f;
+    static constexpr float kCellGhostOverlap    = 0.35f;
+    static const int       kAbsenceEraseFrames  = 5;
+    static const int       kAbsenceEraseThr     = 10;
+
+    // Raw canvas quality (chunk pipeline)
+    static constexpr bool  kEnableBlurRejection   = true;
+    static constexpr bool  kEnableRawEdgeFeather   = false;
+    static constexpr float kBlurThreshold          = 30.0f;
+    static const int       kRawEdgeMargin          = 30;
+    static const int       kRawFeatherWidth        = 40;
+
+    // Chunk Grid constants
+    static const int kChunkWidth = 512;
+    int chunk_height_ = 0;  // Set on first frame to frame_h_
+
+    static const int kReferenceHeight = 1080;
+    int ScalePx(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight)); }
+    int ScaleArea(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight * frame_h_ / kReferenceHeight)); }
+
+    // -----------------------------------------------------------------------
     // Sub-canvas collection (protected by state_mutex_)
     // -----------------------------------------------------------------------
     std::vector<std::unique_ptr<WhiteboardGroup>> groups_;
@@ -436,6 +501,22 @@ private:
     std::atomic<bool> has_content_{false};
     std::atomic<bool> canvas_view_mode_{false};
     std::atomic<int>  render_mode_{static_cast<int>(CanvasRenderMode::kRaw)};
+    std::atomic<int>  pipeline_mode_{static_cast<int>(CanvasPipelineMode::kGraph)};
+
+    // -----------------------------------------------------------------------
+    // Chunk pipeline state
+    // -----------------------------------------------------------------------
+    struct ContourShape {
+        std::vector<cv::Point> contour;
+        cv::Point2f            centroid;
+        double                 hu[7];
+        double                 area = 0.0;
+    };
+    std::vector<ContourShape> canvas_contours_;
+    bool canvas_contours_dirty_ = true;
+    int  consecutive_failed_matches_ = 0;
+    float last_match_accuracy_ = 0.0f;
+    cv::Mat prev_frame_gray_;  // for LK flow (chunk pipeline)
     std::array<std::unique_ptr<WhiteboardGroup>, kGraphDebugSnapshotCount>
         graph_debug_snapshots_;
     int graph_debug_snapshot_frame_id_ = 0;
@@ -603,6 +684,45 @@ private:
     // Debug: 3x2 tile grid showing pipeline stages
     void RenderDebugGrid(const PipelineDebugState& state);
 
+    // -----------------------------------------------------------------------
+    // Chunk pipeline methods
+    // -----------------------------------------------------------------------
+    void ProcessFrameChunk(const cv::Mat& frame, const cv::Mat& gray,
+                           const cv::Mat& person_mask, float motion_fraction);
+
+    // Contour helpers (chunk pipeline)
+    std::vector<ContourShape> ExtractContourShapes(const cv::Mat& binary,
+                                                   cv::Point2f roi_offset) const;
+    void RebuildCanvasContours(WhiteboardGroup& group);
+    bool MatchContours(const std::vector<ContourShape>& frame_contours,
+                       const std::vector<ContourShape>& canvas_contours,
+                       cv::Point2f& out_pos, int& out_votes, int binSize);
+
+    // Sub-pixel refinement (chunk pipeline)
+    bool RefineWithTemplate(WhiteboardGroup& group, const cv::Mat& binary, const cv::Mat& gray,
+                            cv::Point2f& pos);
+
+    // Chunk Grid management
+    uint64_t GetChunkHash(int grid_x, int grid_y) const;
+    void EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y);
+
+    // Chunk painting
+    void PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
+                              const cv::Mat& enhanced_bgr, cv::Point2f camera_pos,
+                              const cv::Mat& no_update_mask = cv::Mat());
+    void PaintRawFrameToChunks(WhiteboardGroup& group, const cv::Mat& frame_bgr,
+                               cv::Point2f camera_pos,
+                               const cv::Mat& no_update_mask = cv::Mat());
+
+    // Chunk render caches
+    void RebuildStrokeRenderCacheChunk(WhiteboardGroup& group);
+    void RebuildRawRenderCacheChunk(WhiteboardGroup& group);
+
+    // Create new group (chunk pipeline)
+    void CreateSubCanvasChunk(const cv::Mat& frame_bgr, const cv::Mat& binary,
+                              const cv::Mat& enhanced_bgr,
+                              const std::vector<ContourShape>& seed_contours);
+
     int processed_frame_id_ = 0;
 };
 
@@ -646,6 +766,10 @@ extern "C" {
     __declspec(dllexport) void    SetCanvasEnhanceThreshold(float threshold);
     __declspec(dllexport) void    SetCanvasShowGraph(bool enabled);
     __declspec(dllexport) bool    IsCanvasShowGraph();
+
+    // Pipeline mode FFI
+    __declspec(dllexport) void    SetCanvasPipelineMode(int mode);
+    __declspec(dllexport) int     GetCanvasPipelineMode();
 
     // Graph debug FFI
     __declspec(dllexport) int     GetGraphNodeCount();

@@ -26,6 +26,8 @@ public:
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
     CanvasRenderMode GetRenderMode() const;
+    void SetPipelineMode(int mode);
+    int GetPipelineMode() const;
     cv::Size GetCanvasSize() const;
     int GetSubCanvasCount() const;
     int GetActiveSubCanvasIndex() const;

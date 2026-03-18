@@ -102,6 +102,7 @@ class _CameraScreenState extends State<CameraScreen>
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
+  bool _isChunkMode = false;
   WhiteboardCanvasRenderMode _canvasRenderMode =
       WhiteboardCanvasRenderMode.stroke;
   bool _isWhiteboardDebug = false;
@@ -1253,6 +1254,10 @@ class _CameraScreenState extends State<CameraScreen>
                   if (!enableWhiteboard && _isCanvasViewMode) {
                     _setCanvasViewMode(false);
                   }
+                  if (!enableWhiteboard && _isChunkMode) {
+                    _isChunkMode = false;
+                    NativeCameraService().setCanvasPipelineMode(0);
+                  }
 
                   setState(() {
                     _isWhiteboardMode = enableWhiteboard;
@@ -1313,6 +1318,21 @@ class _CameraScreenState extends State<CameraScreen>
                         ? WhiteboardCanvasRenderMode.stroke
                         : WhiteboardCanvasRenderMode.raw,
                   );
+                },
+              ),
+            // Pipeline mode toggle: Graph vs Chunk (only visible when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  _isChunkMode ? Icons.grid_view : Icons.account_tree,
+                  color: _isChunkMode ? Colors.orange : Colors.teal,
+                ),
+                tooltip: _isChunkMode ? 'Switch to Graph mode' : 'Switch to Picture mode',
+                onPressed: () {
+                  setState(() {
+                    _isChunkMode = !_isChunkMode;
+                  });
+                  NativeCameraService().setCanvasPipelineMode(_isChunkMode ? 1 : 0);
                 },
               ),
             // Reset Whiteboard (only visible when whiteboard mode is active)
