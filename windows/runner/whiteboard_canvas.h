@@ -76,6 +76,8 @@ struct CandidateNode {
 // ---------------------------------------------------------------------------
 // DrawingNode -- A single drawing entity on the canvas (replaces Chunk pixels)
 // ---------------------------------------------------------------------------
+static constexpr float kAbsenceScoreInitial = 3.5f;
+
 struct DrawingNode {
     int id = -1;                        // Unique ID within group
     cv::Mat binary_mask;                // CV_8UC1, tight to bbox
@@ -86,7 +88,7 @@ struct DrawingNode {
     double hu[7] = {};                  // Hu Moments for matching
     double area = 0.0;                  // Pixel area
     double max_area_seen = 0.0;         // Largest confirmed area across refreshes
-    int absence_count = 0;              // Frames visible-but-not-seen
+    float absence_score = kAbsenceScoreInitial; // EMA presence score: +1 when seen, -1 when absent; deleted when < 0
     int last_seen_frame = 0;
     int created_frame = 0;
     int seen_count = 0;                 // Number of frames this node was confirmed
@@ -337,7 +339,7 @@ private:
     static const int       kMinStrokePixelsForNewSC = 500;
     static const int       kMotionLongEdge = 256;
     static constexpr float kMinMotionFraction = 0.01f;
-    static constexpr float kMaxMotionFraction = 0.05f;
+    static constexpr float kMaxMotionFraction = 0.01f;
     static const int       kStillFramePatience = 1;
 
     // Worker queue
@@ -357,7 +359,7 @@ private:
     static const int        kGraphSeedCandidateLimit = 24;
 
     // Graph matching
-    static constexpr float  kStrokeClusterRadius = 75.0f; // Max centroid distance to cluster strokes together.
+    static constexpr float  kStrokeClusterRadius = 50.0f; // Max centroid distance to cluster strokes together.
     static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
     static const int        kKNeighbors = 5; // Number of nearest graph nodes to consider when matching a blob, and number of neighbors to store for each node.
@@ -380,7 +382,7 @@ private:
     static constexpr float kBattleReplaceOverlap = 0.5f; // Minimum IoU for an existing node to be replaced by a new blob with much better shape similarity.
 
     // KD-Tree + RANSAC matching
-    static constexpr double kKdTreeHuDistanceThreshold = 3.0; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
+    static constexpr double kKdTreeHuDistanceThreshold = 0.9; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kKdTreeMinBboxSimilarity   = 0.70f; // Minimum bounding box similarity for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kRansacInlierTolerancePx   = 5.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
     static constexpr int    kRansacMaxIterations        = 300; // Maximum RANSAC iterations per blob-node pair
@@ -399,8 +401,8 @@ private:
 
     // Candidate confirmation (new-stroke patience)
     static constexpr bool   kEnableCandidateStaging = false;      // Temporary bypass: add anchored new blobs directly to the graph.
-    static const int       kCandidateConfirmFrames = 5;   // Frames a blob must appear before becoming a node
-    static const int       kCandidateExpireFrames  = 3;   // Consecutive processed frames without confirmation before a candidate is discarded
+    static const int       kCandidateConfirmFrames = 3;   // Frames a blob must appear before becoming a node
+    static const int       kCandidateExpireFrames  = 1;   // Consecutive processed frames without confirmation before a candidate is discarded
     static constexpr float kCandidateMatchRadiusPx = 30.0f; // Max centroid distance to match blob to candidate
     static constexpr double kCandidateMatchShapeDist = 0.35; // Max shape distance to match blob to candidate
 
@@ -423,7 +425,7 @@ private:
     static constexpr bool  kChunkEnableNeighborBinMerge   = false;
     static constexpr float kChunkMaxJumpPx              = 40.0f;
     static const int       kChunkMinShapeVotes           = 5;
-    static constexpr double kChunkMaxShapeDist           = 0.7;
+    static constexpr double kChunkMaxShapeDist           = 0.9;
     static constexpr float kChunkRectangleThreshold      = 3.0f;
     static const int       kChunkFailedMatchPatience     = 10;
     static const int       kChunkStillFramePatience      = 8;
@@ -648,7 +650,8 @@ private:
     // Graph update: classify blobs, battle, and add nodes
     bool UpdateGraph(WhiteboardGroup& group,
                      std::vector<FrameBlob>& blobs,
-                     int current_frame);
+                     int current_frame,
+                     const cv::Rect& lecturer_canvas_rect = cv::Rect());
 
     // Sub-steps of UpdateGraph (extracted for readability)
     void ProcessCandidateBlobs(WhiteboardGroup& group,

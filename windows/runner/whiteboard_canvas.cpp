@@ -431,7 +431,7 @@ static int CopyGraphNodesToBuffer(const WhiteboardGroup& group,
         cursor[5] = node.centroid_canvas.x;
         cursor[6] = node.centroid_canvas.y;
         cursor[7] = static_cast<float>(node.area);
-        cursor[8] = static_cast<float>(node.absence_count);
+        cursor[8] = node.absence_score;
         cursor[9] = static_cast<float>(node.last_seen_frame);
         cursor[10] = static_cast<float>(node.created_frame);
         cursor[11] = static_cast<float>(node.neighbor_ids.size());
@@ -547,7 +547,7 @@ static std::unique_ptr<WhiteboardGroup> CloneGraphGroup(const WhiteboardGroup& s
         std::copy(source_node.hu, source_node.hu + 7, node->hu);
         node->area = source_node.area;
         node->max_area_seen = source_node.max_area_seen;
-        node->absence_count = source_node.absence_count;
+        node->absence_score = source_node.absence_score;
         node->last_seen_frame = source_node.last_seen_frame;
         node->created_frame = source_node.created_frame;
         node->seen_count = source_node.seen_count;
@@ -588,7 +588,7 @@ static void AppendShiftedNodeToGroup(WhiteboardGroup& target,
     std::copy(source.hu, source.hu + 7, node->hu);
     node->area = source.area;
     node->max_area_seen = std::max(source.max_area_seen, source.area);
-    node->absence_count = 0;
+    node->absence_score = kAbsenceScoreInitial;
     node->last_seen_frame = current_frame;
     node->created_frame = current_frame;
     node->seen_count = std::max(1, source.seen_count);
@@ -631,7 +631,7 @@ static int AppendFrameBlobToGroup(WhiteboardGroup& target,
     std::copy(blob.hu, blob.hu + 7, node->hu);
     node->area = blob.area;
     node->max_area_seen = blob.area;
-    node->absence_count = 0;
+    node->absence_score = kAbsenceScoreInitial;
     node->last_seen_frame = current_frame;
     node->created_frame = current_frame;
     node->seen_count = 1;
@@ -646,7 +646,7 @@ static int AppendFrameBlobToGroup(WhiteboardGroup& target,
 
 static cv::Rect BuildCroppedFrameRect(int frame_w, int frame_h) {
     const int crop_top = static_cast<int>(frame_h * 0.15);
-    const int crop_bottom = frame_h - static_cast<int>(frame_h * 0.90);
+    const int crop_bottom = frame_h - static_cast<int>(frame_h * 0.95);
     const int crop_left = static_cast<int>(frame_w * 0.05);
     const int crop_right = frame_w - static_cast<int>(frame_w * 0.95);
     return cv::Rect(
@@ -808,8 +808,19 @@ static cv::Mat BuildBinaryMask(const cv::Mat& gray,
         cv::Mat binary;
     cv::adaptiveThreshold(gray, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
-cv::THRESH_BINARY_INV, 51, 4);
+cv::THRESH_BINARY_INV, 51, 6);
     binary.setTo(0, no_update_mask);
+
+    // Remove salt-and-pepper noise: discard tiny connected components
+    {
+        cv::Mat labels, stats, centroids;
+        int n = cv::connectedComponentsWithStats(binary, labels, stats, centroids);
+        for (int i = 1; i < n; i++) {
+            if (stats.at<int>(i, cv::CC_STAT_AREA) < 10) {
+                binary.setTo(0, labels == i);
+            }
+        }
+    }
 
     // Dilate to connect close strokes
     cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(5, 5));
@@ -1859,16 +1870,10 @@ bool WhiteboardCanvas::ApplyMotionGate(const cv::Mat& gray,
     motion_gray.copyTo(prev_gray_);
 
     if (has_content && has_motion_reference) {
-        motion_too_low = motion_fraction < kMinMotionFraction &&
-                         frames_since_warp_ < kStillFramePatience;
+        // Still frames are always processed — only block fast motion.
+        motion_too_low = false;
         motion_too_high = kEnableHighMotionGate &&
                           motion_fraction > kMaxMotionFraction;
-    }
-
-    if (motion_too_low) {
-        frames_since_warp_++;
-    } else {
-        frames_since_warp_ = 0;
     }
 
     motion_frame_counter_++;
@@ -2129,13 +2134,13 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
         RecordProfileSample(ProfileStep::kCameraUpdate,
                             ElapsedMs(camera_update_start, SteadyClock::now()));
 
-        graph_updated = UpdateGraph(group, blobs, current_frame);
-        if (best_votes >= kMinVotesForCameraUpdate) {
-            group.last_lecturer_rect =
-                TranslateFrameRectToCanvas(lecturer_frame_rect, global_camera_pos_);
-        } else {
-            group.last_lecturer_rect = cv::Rect();
-        }
+        // Compute lecturer rect in canvas coords BEFORE UpdateGraph
+        // so absence tracking uses the current frame's lecturer position.
+        const cv::Rect current_lecturer_canvas =
+            TranslateFrameRectToCanvas(lecturer_frame_rect, global_camera_pos_);
+
+        graph_updated = UpdateGraph(group, blobs, current_frame, current_lecturer_canvas);
+        group.last_lecturer_rect = current_lecturer_canvas;
         recompute_has_content();
 
         // When graph overlay is on, always dirty caches so debug overlays
@@ -2495,7 +2500,8 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraphWithSeed(
 
 bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                                     std::vector<FrameBlob>& blobs,
-                                    int current_frame) {
+                                    int current_frame,
+                                    const cv::Rect& lecturer_canvas_rect) {
     bool graph_changed = false;
 
     const cv::Rect cropped_frame = BuildCroppedFrameRect(frame_w_, frame_h_);
@@ -2575,7 +2581,6 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
             canvas_bbox, blob.binary_mask, canvas_centroid,
             node.bbox_canvas, node.binary_mask, node.centroid_canvas);
 
-        node.absence_count = 0;
         node.last_seen_frame = current_frame;
         node.seen_count++;
         node.max_area_seen = std::max(std::max(node.max_area_seen, node.area), blob.area);
@@ -2602,6 +2607,99 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
     }
     RecordProfileSample(ProfileStep::kMatchedRefresh,
                         ElapsedMs(matched_refresh_start, SteadyClock::now()));
+
+    // ---------------------------------------------------------------
+    // 5b2. Absence tracking with asymmetric EMA
+    // ---------------------------------------------------------------
+    {
+        const auto absence_start = SteadyClock::now();
+
+        // Viewport in canvas coordinates
+        const cv::Rect viewport_canvas(
+            static_cast<int>(std::round(global_camera_pos_.x)),
+            static_cast<int>(std::round(global_camera_pos_.y)),
+            frame_w_, frame_h_);
+
+        // Lecturer rect in canvas coordinates (current frame)
+        const cv::Rect& lecturer_canvas = lecturer_canvas_rect;
+
+        // Collect IDs of all matched (seen) nodes this frame
+        std::unordered_set<int> seen_node_ids;
+        seen_node_ids.reserve(matched_blob_indices.size());
+        for (int bi : matched_blob_indices) {
+            seen_node_ids.insert(blobs[bi].matched_node_id);
+        }
+
+        // Find absent nodes: near a matched node, in viewport, not behind lecturer
+        static constexpr float kAbsenceNearbyRadius = 100.0f;
+        std::unordered_set<int> absent_node_ids;
+
+        for (int bi : matched_blob_indices) {
+            const auto& blob = blobs[bi];
+            auto node_it = group.nodes.find(blob.matched_node_id);
+            if (node_it == group.nodes.end()) continue;
+            const auto& matched_node = *node_it->second;
+
+            auto nearby_ids = group.spatial_index.QueryRadius(
+                matched_node.centroid_canvas, kAbsenceNearbyRadius);
+
+            for (int nearby_id : nearby_ids) {
+                if (seen_node_ids.count(nearby_id)) continue;
+                if (absent_node_ids.count(nearby_id)) continue;
+
+                auto nit = group.nodes.find(nearby_id);
+                if (nit == group.nodes.end()) continue;
+
+                const cv::Point2i centroid_px(
+                    static_cast<int>(std::round(nit->second->centroid_canvas.x)),
+                    static_cast<int>(std::round(nit->second->centroid_canvas.y)));
+                if (!viewport_canvas.contains(centroid_px)) continue;
+
+                if (lecturer_canvas.width > 0 && lecturer_canvas.height > 0 &&
+                    lecturer_canvas.contains(centroid_px)) continue;
+
+                absent_node_ids.insert(nearby_id);
+            }
+        }
+
+        // Apply asymmetric EMA: slow build when seen, fast decay when absent
+        static constexpr float kAbsenceAlphaSeen  = 0.9f;  // fast build
+        static constexpr float kAbsenceAlphaAbsent = 0.1f;  // slow decay
+
+        // Seen nodes: delta = +1
+        for (int nid : seen_node_ids) {
+            auto nit = group.nodes.find(nid);
+            if (nit == group.nodes.end()) continue;
+            // If also absent (near another matched node), delta cancels to 0
+            if (absent_node_ids.count(nid)) continue;
+            auto& node = *nit->second;
+            node.absence_score = node.absence_score * (1.0f - kAbsenceAlphaSeen)
+                               + 1.0f * kAbsenceAlphaSeen;
+        }
+
+        // Absent nodes: delta = -1
+        std::vector<int> nodes_to_remove;
+        for (int nid : absent_node_ids) {
+            // If also seen, delta cancels to 0 — skip
+            if (seen_node_ids.count(nid)) continue;
+            auto nit = group.nodes.find(nid);
+            if (nit == group.nodes.end()) continue;
+            auto& node = *nit->second;
+            node.absence_score = node.absence_score * (1.0f - kAbsenceAlphaAbsent)
+                               + (-1.0f) * kAbsenceAlphaAbsent;
+            if (node.absence_score < 0.0f) {
+                nodes_to_remove.push_back(nid);
+            }
+        }
+
+        for (int nid : nodes_to_remove) {
+            RemoveNodeFromGraph(group, nid);
+            graph_changed = true;
+        }
+
+        RecordProfileSample(ProfileStep::kAbsenceTracking,
+                            ElapsedMs(absence_start, SteadyClock::now()));
+    }
 
     // ---------------------------------------------------------------
     // 5c. Candidate-based new node placement
@@ -2858,7 +2956,7 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
                     std::copy(cand.hu, cand.hu + 7, nn->hu);
                     nn->area = cand.area;
                     nn->max_area_seen = cand.area;
-                    nn->absence_count = 0;
+                    nn->absence_score = kAbsenceScoreInitial;
                     nn->last_seen_frame = current_frame;
                     nn->created_frame = cand.created_frame;
                     nn->seen_count = cand.seen_count;
@@ -2992,7 +3090,8 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
         const double age_bonus = static_cast<double>(
             std::max(0, current_frame - node.created_frame)) * 10.0;
         const double neighbor_bonus = static_cast<double>(node.neighbor_ids.size()) * 15.0;
-        const double absence_penalty = static_cast<double>(node.absence_count) * 100.0;
+        const double absence_penalty = (node.absence_score < 0.0f)
+            ? static_cast<double>(-node.absence_score) * 100.0 : 0.0;
         return stable_area * 2.0 + seen_bonus + age_bonus + neighbor_bonus - absence_penalty;
     };
 
@@ -3062,8 +3161,8 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
         const int union_px = cv::countNonZero(union_mask);
         float iou = union_px > 0 ? static_cast<float>(overlap_px) / static_cast<float>(union_px) : 0.0f;
         float and_ratio = static_cast<float>(overlap_px) / static_cast<float>(std::min(a_px, b_px));
-        if (iou > 0.3f) return 1.0f;
-        if (std::max(a_px, b_px) > 100 && and_ratio > 0.4f) return 1.0f;
+        if (iou > 0.4f) return 1.0f;
+        if (std::max(a_px, b_px) > 100 && and_ratio > 0.6f) return 1.0f;
 
         return 0.0f;
     };
@@ -3119,9 +3218,9 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
             const int union_px = cv::countNonZero(union_mask);
             float iou = union_px > 0 ? static_cast<float>(overlap_px) / static_cast<float>(union_px) : 0.0f;
             float and_ratio = static_cast<float>(overlap_px) / static_cast<float>(std::min(a_px, b_px));
-            if (iou > 0.3f) return 1.0f;
+            if (iou > 0.4f) return 1.0f;
             // if the its a big shape use also and ratio to detect containment duplicates
-            if (std::max(a_px, b_px) > 100 && and_ratio > 0.4f) return 1.0f;
+            if (std::max(a_px, b_px) > 100 && and_ratio > 0.6f) return 1.0f;
         }
         return 0.0f;
     };
@@ -3287,7 +3386,7 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
         auto& removed = *remove_it->second;
         keep.created_frame = std::min(keep.created_frame, removed.created_frame);
         keep.last_seen_frame = std::max(keep.last_seen_frame, removed.last_seen_frame);
-        keep.absence_count = std::min(keep.absence_count, removed.absence_count);
+        keep.absence_score = std::max(keep.absence_score, removed.absence_score);
         keep.seen_count = std::max(1, keep.seen_count) + std::max(1, removed.seen_count);
         keep.in_view_count = std::max(keep.in_view_count, removed.in_view_count);
         keep.max_area_seen = std::max(
@@ -3644,7 +3743,7 @@ void WhiteboardCanvas::SeedGroupFromFrameBlobs(WhiteboardGroup& group,
         std::copy(blob.hu, blob.hu + 7, node->hu);
         node->area = blob.area;
         node->max_area_seen = blob.area;
-        node->absence_count = 0;
+        node->absence_score = kAbsenceScoreInitial;
         node->last_seen_frame = current_frame;
         node->created_frame = current_frame;
         node->seen_count = 1;
@@ -4465,19 +4564,6 @@ void WhiteboardCanvas::CreateSubCanvasChunk(const cv::Mat& frame_bgr,
 
 void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& gray,
                                            const cv::Mat& person_mask, float motion_fraction) {
-    // --- Person mask dilation (same as chunk pipeline) ---
-    bool has_person_mask = !person_mask.empty() && person_mask.size() == gray.size();
-    cv::Mat person_mask_dilated;
-    if (has_person_mask) {
-        cv::Mat small_mask;
-        cv::resize(person_mask, small_mask, cv::Size(), 0.25, 0.25, cv::INTER_NEAREST);
-        int pad = std::max(1, (int)(std::max(small_mask.cols, small_mask.rows) * 0.05));
-        pad |= 1;
-        cv::Mat k_dilate = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(pad, pad));
-        cv::dilate(small_mask, small_mask, k_dilate);
-        cv::resize(small_mask, person_mask_dilated, frame.size(), 0, 0, cv::INTER_NEAREST);
-    }
-
     // --- Binarize (graph-style) ---
     cv::Mat no_update_mask = BuildNoUpdateMask(gray, person_mask);
     int stroke_pixel_count = 0;
@@ -4489,10 +4575,6 @@ void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& g
     std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame);
     RecordProfileSample(ProfileStep::kBlobExtract,
                         ElapsedMs(blob_start, SteadyClock::now()));
-
-    // --- Extract frame contours (for chunk-style camera matching) ---
-    std::vector<ContourShape> frame_contours =
-        ExtractContourShapes(binary, cv::Point2f(0, 0));
 
     // --- Stroke reject filter ---
     const cv::Rect lecturer_frame_rect = ComputeMaskBoundingRect(person_mask);
@@ -4530,74 +4612,19 @@ void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& g
         ? static_cast<int>(groups_[active_group_idx_]->nodes.size())
         : 0;
 
-    // --- Step 1: Camera position from contour voting (chunk-style) ---
-    bool contour_matched = false;
-    if (has_active_group && !canvas_contours_.empty() && !frame_contours.empty()) {
-        if (canvas_contours_dirty_) {
-            RebuildCanvasContoursFromGraph(*groups_[active_group_idx_]);
-        }
-
-        int bin_sizes[] = {2, 5, 10};
-        for (int bin_size : bin_sizes) {
-            int tier_votes = 0;
-            cv::Point2f tier_pos;
-            if (MatchContours(frame_contours, canvas_contours_, tier_pos, tier_votes, bin_size)) {
-                if (tier_votes > kChunkMinShapeVotes && bin_size > 2) continue;
-                best_votes = tier_votes;
-                matched_pos = tier_pos;
-                contour_matched = true;
-                break;
-            }
-        }
-    }
-
-    // --- Step 2: Apply camera position ---
+    // --- Step 1: Camera position from blob-to-graph matching ---
     const bool graph_ready_for_matching =
         has_active_group && active_group_nodes >= kStableGraphNodeThreshold;
 
-    if (contour_matched && best_votes >= kMinVotesForCameraUpdate) {
-        // Jump rejection
-        if (kChunkEnableJumpRejection && matched_frame_counter_ > 0) {
-            float jump = (float)cv::norm(matched_pos - global_camera_pos_);
-            const float max_jump_px = (float)ScalePx((int)kChunkMaxJumpPx);
-            if (jump > max_jump_px) {
-                matched_pos = global_camera_pos_;
-            }
+    if (graph_ready_for_matching) {
+        const auto match_start = SteadyClock::now();
+        if (!blobs.empty()) {
+            auto& group = *groups_[active_group_idx_];
+            matched_pos = MatchBlobsToGraph(group, blobs, best_votes);
         }
-
-        // Velocity smoothing
-        const cv::Point2f frame_velocity = matched_pos - global_camera_pos_;
-        camera_velocity_ = kVelocitySmoothingAlpha * frame_velocity
-                         + (1.0f - kVelocitySmoothingAlpha) * camera_velocity_;
-
-        global_camera_pos_ = matched_pos;
-        global_frame_bootstrap_consumed_ = true;
-        matched_frame_counter_++;
-        last_vote_count_ = best_votes;
-    } else if (graph_ready_for_matching && !blobs.empty()) {
-        // Fallback: use graph RANSAC for camera position
-        int graph_votes = 0;
-        auto& group = *groups_[active_group_idx_];
-        cv::Point2f graph_pos = MatchBlobsToGraph(group, blobs, graph_votes);
-        RecordProfileSample(ProfileStep::kGraphMatch, 0);
-
-        if (graph_votes >= kMinVotesForCameraUpdate) {
-            const cv::Point2f frame_velocity = graph_pos - global_camera_pos_;
-            camera_velocity_ = kVelocitySmoothingAlpha * frame_velocity
-                             + (1.0f - kVelocitySmoothingAlpha) * camera_velocity_;
-            global_camera_pos_ = graph_pos;
-            global_frame_bootstrap_consumed_ = true;
-            matched_frame_counter_++;
-            last_vote_count_ = graph_votes;
-            best_votes = graph_votes;
-        } else if (graph_votes > 0) {
-            global_camera_pos_ += camera_velocity_;
-            camera_velocity_ *= 0.7f;
-            best_votes = graph_votes;
-        }
+        RecordProfileSample(ProfileStep::kGraphMatch,
+                            ElapsedMs(match_start, SteadyClock::now()));
     }
-
-    RecordProfileSample(ProfileStep::kCameraUpdate, 0);
 
     // --- Step 3: Filter blobs ---
     if (kEnableFrameStrokeRejectFilter) {
@@ -4614,10 +4641,6 @@ void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& g
                 groups_[active_group_idx_]->last_lecturer_rect = cv::Rect();
             }
             recompute_has_content();
-            // Build initial contours from seeded graph
-            if (active_group_idx_ >= 0 && active_group_idx_ < static_cast<int>(groups_.size())) {
-                RebuildCanvasContoursFromGraph(*groups_[active_group_idx_]);
-            }
             match_status = "HYBRID NEW GROUP (total=" + std::to_string(groups_.size()) + ")";
         } else {
             match_status = "HYBRID bootstrap waiting (strokes=" + std::to_string(stroke_pixel_count)
@@ -4635,8 +4658,6 @@ void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& g
             matched_frame_counter_ = 0;
             group.last_lecturer_rect = cv::Rect();
             recompute_has_content();
-            // Build initial contours from seeded graph
-            RebuildCanvasContoursFromGraph(group);
             match_status = "HYBRID RESET GRAPH GR" + std::to_string(active_group_idx_)
                          + " nodes=" + std::to_string(group.nodes.size());
         } else {
@@ -4645,24 +4666,71 @@ void WhiteboardCanvas::ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& g
 
     } else {
         auto& group = *groups_[active_group_idx_];
-        graph_updated = UpdateGraph(group, blobs, current_frame);
-        if (best_votes >= kMinVotesForCameraUpdate) {
-            group.last_lecturer_rect =
-                TranslateFrameRectToCanvas(lecturer_frame_rect, global_camera_pos_);
-        } else {
-            group.last_lecturer_rect = cv::Rect();
-        }
-        recompute_has_content();
+        const auto camera_update_start = SteadyClock::now();
 
-        // Rebuild canvas contours from graph for next frame's contour matching
-        if (graph_updated) {
-            RebuildCanvasContoursFromGraph(group);
+        if (best_votes >= kMinVotesForCameraUpdate) {
+            if (kEnablePhaseCorrelation) {
+                cv::Mat canvas_gray_roi = GetCanvasGrayRegion(
+                    group, (int)std::round(matched_pos.x), (int)std::round(matched_pos.y),
+                    frame.cols, frame.rows);
+                if (!canvas_gray_roi.empty() && canvas_gray_roi.size() == gray.size()) {
+                    cv::Mat frame_f, canvas_f;
+                    gray.convertTo(frame_f, CV_32F);
+                    canvas_gray_roi.convertTo(canvas_f, CV_32F);
+                    cv::Mat hann;
+                    cv::createHanningWindow(hann, frame_f.size(), CV_32F);
+                    cv::Point2d subpx = cv::phaseCorrelate(canvas_f, frame_f, hann);
+                    if (std::abs(subpx.x) < kVoteBinSize && std::abs(subpx.y) < kVoteBinSize) {
+                        matched_pos.x += (float)subpx.x;
+                        matched_pos.y += (float)subpx.y;
+                    }
+                }
+            }
+
+            if (kEnableJumpRejection && matched_frame_counter_ > 0) {
+                const cv::Point2f predicted_pos = global_camera_pos_ + camera_velocity_;
+                const float speed = static_cast<float>(cv::norm(camera_velocity_));
+                const float adaptive_limit = std::min(kMaxPredictedJumpPx,
+                    std::max(kMaxJumpPx, speed * 3.0f));
+                const float jump = static_cast<float>(cv::norm(matched_pos - predicted_pos));
+                if (jump > adaptive_limit) {
+                    matched_pos = predicted_pos;
+                }
+            }
+
+            const cv::Point2f frame_velocity = matched_pos - global_camera_pos_;
+            camera_velocity_ = kVelocitySmoothingAlpha * frame_velocity
+                             + (1.0f - kVelocitySmoothingAlpha) * camera_velocity_;
+
+            global_camera_pos_ = matched_pos;
+            global_frame_bootstrap_consumed_ = true;
+            matched_frame_counter_++;
+            last_vote_count_ = best_votes;
+        } else if (best_votes > 0) {
+            global_camera_pos_ += camera_velocity_;
+            camera_velocity_ *= 0.7f;
         }
+        RecordProfileSample(ProfileStep::kCameraUpdate,
+                            ElapsedMs(camera_update_start, SteadyClock::now()));
+
+        const cv::Rect current_lecturer_canvas =
+            TranslateFrameRectToCanvas(lecturer_frame_rect, global_camera_pos_);
+
+        graph_updated = UpdateGraph(group, blobs, current_frame, current_lecturer_canvas);
+        group.last_lecturer_rect = current_lecturer_canvas;
+        recompute_has_content();
 
         if (best_votes >= kMinVotesForCameraUpdate) {
             match_status = "HYBRID MATCHED GR" + std::to_string(active_group_idx_)
                          + " votes=" + std::to_string(best_votes)
-                         + (contour_matched ? " [contour]" : " [graph-fallback]")
+                         + " pos=(" + std::to_string((int)global_camera_pos_.x)
+                         + ","     + std::to_string((int)global_camera_pos_.y) + ")"
+                         + " nodes=" + std::to_string(group.nodes.size());
+        } else if (best_votes > 0) {
+            match_status = "HYBRID LOW CONFIDENCE GR"
+                         + std::to_string(active_group_idx_)
+                         + " votes=" + std::to_string(best_votes)
+                         + " (need " + std::to_string(kMinVotesForCameraUpdate) + ")"
                          + " nodes=" + std::to_string(group.nodes.size());
         } else {
             match_status = "HYBRID NO MATCH GR" + std::to_string(active_group_idx_)
@@ -4895,6 +4963,18 @@ void WhiteboardCanvas::ProcessFrameChunk(const cv::Mat& frame, const cv::Mat& gr
     cv::adaptiveThreshold(gray, binary, 255,
                           cv::ADAPTIVE_THRESH_GAUSSIAN_C,
                           cv::THRESH_BINARY_INV, 51, 5);
+
+    // Remove salt-and-pepper noise: discard tiny connected components
+    {
+        cv::Mat labels, stats, centroids;
+        int n = cv::connectedComponentsWithStats(binary, labels, stats, centroids);
+        for (int i = 1; i < n; i++) {
+            if (stats.at<int>(i, cv::CC_STAT_AREA) < 100) {
+                binary.setTo(0, labels == i);
+            }
+        }
+    }
+
     if (has_person_mask && !person_mask_dilated.empty()) {
         binary.setTo(0, person_mask_dilated);
     }

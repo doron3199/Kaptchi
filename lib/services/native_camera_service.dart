@@ -975,7 +975,7 @@ class NativeCameraService {
         bboxCanvas: Rect.fromLTWH(p[1], p[2], p[3], p[4]),
         centroid: Offset(p[5], p[6]),
         area: p[7],
-        absenceCount: p[8].toInt(),
+        absenceScore: p[8].toDouble(),
         lastSeenFrame: p[9].toInt(),
         createdFrame: p[10].toInt(),
         neighborCount: p[11].toInt(),

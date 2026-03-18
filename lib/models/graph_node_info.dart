@@ -5,7 +5,7 @@ class GraphNodeInfo {
   final Rect bboxCanvas;
   final Offset centroid;
   final double area;
-  final int absenceCount;
+  final double absenceScore;
   final int lastSeenFrame;
   final int createdFrame;
   final int neighborCount;
@@ -18,7 +18,7 @@ class GraphNodeInfo {
     required this.bboxCanvas,
     required this.centroid,
     required this.area,
-    required this.absenceCount,
+    required this.absenceScore,
     required this.lastSeenFrame,
     required this.createdFrame,
     required this.neighborCount,
@@ -36,7 +36,7 @@ class GraphNodeInfo {
       bboxCanvas: bboxCanvas.shift(Offset(dx, dy)),
       centroid: newCentroid,
       area: area,
-      absenceCount: absenceCount,
+      absenceScore: absenceScore,
       lastSeenFrame: lastSeenFrame,
       createdFrame: createdFrame,
       neighborCount: neighborCount,
