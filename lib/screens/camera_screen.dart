@@ -1651,85 +1651,6 @@ class _CameraScreenState extends State<CameraScreen>
                             ),
                           ),
                         ),
-                        // Sub-canvas navigation arrows
-                        if (Platform.isWindows && _isCanvasViewMode)
-                          ValueListenableBuilder<({int count, int active})>(
-                            valueListenable: _canvasNavNotifier,
-                            builder: (ctx, nav, _) {
-                              if (nav.count <= 1) {
-                                return const SizedBox.shrink();
-                              }
-                              return Positioned.fill(
-                                child: Padding(
-                                  padding: const EdgeInsets.only(bottom: 110),
-                                  child: Row(
-                                    mainAxisAlignment:
-                                        MainAxisAlignment.spaceBetween,
-                                    crossAxisAlignment:
-                                        CrossAxisAlignment.center,
-                                    children: [
-                                      _SubCanvasArrowButton(
-                                        icon: Icons.chevron_left,
-                                        enabled: nav.active > 0,
-                                        onPressed: () {
-                                          final nextSorted = nav.active - 1;
-                                          final vecIdx = NativeCameraService()
-                                              .getSortedSubCanvasIndex(
-                                                nextSorted,
-                                              );
-                                          if (vecIdx < 0) return;
-                                          NativeCameraService()
-                                              .setActiveSubCanvas(vecIdx);
-                                          _canvasNavNotifier.value = (
-                                            count: nav.count,
-                                            active: nextSorted,
-                                          );
-                                        },
-                                      ),
-                                      // Canvas index indicator
-                                      Container(
-                                        padding: const EdgeInsets.symmetric(
-                                          horizontal: 10,
-                                          vertical: 4,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: Colors.black54,
-                                          borderRadius: BorderRadius.circular(
-                                            12,
-                                          ),
-                                        ),
-                                        child: Text(
-                                          '${nav.active + 1} / ${nav.count}',
-                                          style: const TextStyle(
-                                            color: Colors.white,
-                                            fontSize: 13,
-                                          ),
-                                        ),
-                                      ),
-                                      _SubCanvasArrowButton(
-                                        icon: Icons.chevron_right,
-                                        enabled: nav.active < nav.count - 1,
-                                        onPressed: () {
-                                          final nextSorted = nav.active + 1;
-                                          final vecIdx = NativeCameraService()
-                                              .getSortedSubCanvasIndex(
-                                                nextSorted,
-                                              );
-                                          if (vecIdx < 0) return;
-                                          NativeCameraService()
-                                              .setActiveSubCanvas(vecIdx);
-                                          _canvasNavNotifier.value = (
-                                            count: nav.count,
-                                            active: nextSorted,
-                                          );
-                                        },
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              );
-                            },
-                          ),
                       ],
                     ),
                   ),
@@ -1768,6 +1689,78 @@ class _CameraScreenState extends State<CameraScreen>
                 child: Container(color: Colors.transparent),
               ),
             ),
+
+            // Sub-canvas navigation arrows (must be above edge detectors in z-order)
+            if (Platform.isWindows && _isCanvasViewMode)
+              ValueListenableBuilder<({int count, int active})>(
+                valueListenable: _canvasNavNotifier,
+                builder: (ctx, nav, _) {
+                  if (nav.count <= 1) {
+                    return const SizedBox.shrink();
+                  }
+                  return Positioned.fill(
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 110),
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          _SubCanvasArrowButton(
+                            icon: Icons.chevron_left,
+                            enabled: nav.active > 0,
+                            onPressed: () {
+                              final nextSorted = nav.active - 1;
+                              final vecIdx = NativeCameraService()
+                                  .getSortedSubCanvasIndex(nextSorted);
+                              if (vecIdx < 0) return;
+                              NativeCameraService()
+                                  .setActiveSubCanvas(vecIdx);
+                              _canvasNavNotifier.value = (
+                                count: nav.count,
+                                active: nextSorted,
+                              );
+                            },
+                          ),
+                          // Canvas index indicator
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            decoration: BoxDecoration(
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: Text(
+                              '${nav.active + 1} / ${nav.count}',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          _SubCanvasArrowButton(
+                            icon: Icons.chevron_right,
+                            enabled: nav.active < nav.count - 1,
+                            onPressed: () {
+                              final nextSorted = nav.active + 1;
+                              final vecIdx = NativeCameraService()
+                                  .getSortedSubCanvasIndex(nextSorted);
+                              if (vecIdx < 0) return;
+                              NativeCameraService()
+                                  .setActiveSubCanvas(vecIdx);
+                              _canvasNavNotifier.value = (
+                                count: nav.count,
+                                active: nextSorted,
+                              );
+                            },
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                },
+              ),
 
             // Left Sidebar (Filters)
             FilterSidebar(
