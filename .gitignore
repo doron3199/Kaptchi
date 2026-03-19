@@ -61,3 +61,16 @@ app.*.map.json
 /android/app/release
 .claude/
 images/
+
+# IDE / local config
+devtools_options.yaml
+windows/CMakeSettings.json
+
+# Auto-generated Flutter files
+windows/flutter/generated_plugin_registrant.cc
+windows/flutter/generated_plugin_registrant.h
+windows/flutter/generated_plugins.cmake
+
+# Build artifacts
+android/build/
+android/.kotlin/*
