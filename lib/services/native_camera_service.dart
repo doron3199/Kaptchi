@@ -199,6 +199,29 @@ typedef CombineGraphDebugSnapshotsFFI = bool Function(
 typedef CopyGraphDebugSnapshotFunc = Bool Function(Int32 sourceSlot, Int32 targetSlot);
 typedef CopyGraphDebugSnapshotFFI = bool Function(int sourceSlot, int targetSlot);
 
+// Flutter canvas overlay control
+typedef SetFlutterCanvasOverlayFunc = Void Function(Bool enabled);
+typedef SetFlutterCanvasOverlayDart = void Function(bool enabled);
+
+// Canvas version + full-res export FFI types
+typedef GetCanvasVersionFunc = Uint64 Function();
+typedef GetCanvasVersionDart = int Function();
+
+typedef GetCanvasFullResRgbaFunc = Bool Function(
+  Pointer<Uint8> buffer,
+  Int32 maxW,
+  Int32 maxH,
+  Pointer<Int32> outW,
+  Pointer<Int32> outH,
+);
+typedef GetCanvasFullResRgbaDart = bool Function(
+  Pointer<Uint8> buffer,
+  int maxW,
+  int maxH,
+  Pointer<Int32> outW,
+  Pointer<Int32> outH,
+);
+
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
   factory NativeCameraService() => _instance;
@@ -772,6 +795,85 @@ class NativeCameraService {
   bool isScreenCaptureActive() {
     _initializeScreenCapture();
     return _isScreenCaptureActive() == 1;
+  }
+
+  // --- Canvas Full-Res Export Methods ---
+
+  GetCanvasVersionDart? _getCanvasVersion;
+  GetCanvasFullResRgbaDart? _getCanvasFullResRgba;
+  SetFlutterCanvasOverlayDart? _setFlutterCanvasOverlay;
+  bool _canvasExportInitialized = false;
+
+  void _initializeCanvasExport() {
+    if (_canvasExportInitialized) return;
+    initialize();
+
+    try {
+      _getCanvasVersion = _nativeLib
+          .lookup<NativeFunction<GetCanvasVersionFunc>>('GetCanvasVersion')
+          .asFunction();
+    } catch (e) {
+      _getCanvasVersion = null;
+    }
+    try {
+      _getCanvasFullResRgba = _nativeLib
+          .lookup<NativeFunction<GetCanvasFullResRgbaFunc>>(
+            'GetCanvasFullResRgba',
+          )
+          .asFunction();
+    } catch (e) {
+      _getCanvasFullResRgba = null;
+    }
+    try {
+      _setFlutterCanvasOverlay = _nativeLib
+          .lookup<NativeFunction<SetFlutterCanvasOverlayFunc>>(
+            'SetFlutterCanvasOverlay',
+          )
+          .asFunction();
+    } catch (e) {
+      _setFlutterCanvasOverlay = null;
+    }
+
+    _canvasExportInitialized = true;
+  }
+
+  /// Returns the current canvas version counter (atomic, zero cost).
+  int getCanvasVersion() {
+    _initializeCanvasExport();
+    return _getCanvasVersion?.call() ?? 0;
+  }
+
+  /// Tell C++ whether Flutter is drawing the canvas overlay (skips C++ texture rendering).
+  void setFlutterCanvasOverlay(bool enabled) {
+    _initializeCanvasExport();
+    _setFlutterCanvasOverlay?.call(enabled);
+  }
+
+  /// Returns full-resolution RGBA bytes of the canvas, or null if unavailable.
+  ({Uint8List bytes, int width, int height})? getCanvasFullResRgba({
+    int maxWidth = 4096,
+    int maxHeight = 4096,
+  }) {
+    _initializeCanvasExport();
+    if (_getCanvasFullResRgba == null) return null;
+
+    final bufferSize = maxWidth * maxHeight * 4;
+    final buffer = malloc.allocate<Uint8>(bufferSize);
+    final outW = malloc.allocate<Int32>(4);
+    final outH = malloc.allocate<Int32>(4);
+    try {
+      final ok = _getCanvasFullResRgba!(buffer, maxWidth, maxHeight, outW, outH);
+      if (!ok) return null;
+      final w = outW.value;
+      final h = outH.value;
+      if (w <= 0 || h <= 0) return null;
+      final bytes = Uint8List.fromList(buffer.asTypedList(w * h * 4));
+      return (bytes: bytes, width: w, height: h);
+    } finally {
+      malloc.free(buffer);
+      malloc.free(outW);
+      malloc.free(outH);
+    }
   }
 
   // --- Graph Debug Methods ---

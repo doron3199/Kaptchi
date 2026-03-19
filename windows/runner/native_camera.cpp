@@ -522,7 +522,8 @@ void NativeCamera::RefreshDisplayFrame() {
 
     const bool canvas_view_requested =
         g_whiteboard_enabled.load() && g_whiteboard_canvas &&
-        g_whiteboard_canvas->IsCanvasViewMode();
+        g_whiteboard_canvas->IsCanvasViewMode() &&
+        !g_flutter_canvas_overlay.load();
 
     if (source_bgr.empty()) {
         NoteDisplayFrame(
@@ -631,7 +632,8 @@ void NativeCamera::ProcessingThreadLoop() {
         // Whiteboard canvas mode — incremental SLAM-like capture
         if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
             cv::Mat personMask;
-            const bool canvas_view_requested = g_whiteboard_canvas->IsCanvasViewMode();
+            const bool canvas_view_requested = g_whiteboard_canvas->IsCanvasViewMode() &&
+                !g_flutter_canvas_overlay.load();
             const bool remote_process = g_whiteboard_canvas->IsRemoteProcess();
             bool overview_success = false;
             bool used_fallback_frame = false;

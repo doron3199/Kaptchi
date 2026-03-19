@@ -40,7 +40,6 @@ enum class CanvasRenderMode : int {
 enum class CanvasPipelineMode : int {
     kGraph = 0,   // Graph-based entity pipeline (default)
     kChunk = 1,   // Chunk-based tile pipeline ("picture")
-    kHybrid = 2,  // Chunk camera mapping + graph entity display
 };
 
 // ---------------------------------------------------------------------------
@@ -280,6 +279,7 @@ public:
     CanvasPipelineMode GetPipelineMode() const;
     bool IsRemoteProcess() const;
     cv::Size GetCanvasSize() const;
+    uint64_t GetCanvasVersion() const { return canvas_version_.load(std::memory_order_relaxed); }
     void SyncRuntimeSettings();
     void InvalidateRenderCaches();
     void RecordRgbaCopyProfile(double duration_ms);
@@ -322,6 +322,8 @@ private:
     // Tuning constants
     // -----------------------------------------------------------------------
 
+    static constexpr bool kShowGraphOverlay = false;  // Compile-time toggle for graph debug overlay on canvas
+
     static constexpr bool kEnableMotionGate = true;
     static constexpr bool kEnableHighMotionGate = true; // Skip frame updates when motion exceeds kMaxMotionFraction.
     static const int       kMotionForceInterval = 1;
@@ -359,7 +361,8 @@ private:
     static const int        kGraphSeedCandidateLimit = 24;
 
     // Graph matching
-    static constexpr float  kStrokeClusterRadius = 50.0f; // Max centroid distance to cluster strokes together.
+    static constexpr float  kMaxAllowedRectangle = 15.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
+    static constexpr float  kStrokeClusterRadius = 70.0f; // Max centroid distance to cluster strokes together.
     static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
     static const int        kKNeighbors = 5; // Number of nearest graph nodes to consider when matching a blob, and number of neighbors to store for each node.
@@ -371,10 +374,16 @@ private:
     static constexpr bool   kEnableMergeOverlapShapeContainment = false;     // Merge existing nodes when overlap, shape distance, and containment all indicate a duplicate.
     static constexpr bool   kEnableMergeShiftedDuplicate = false;            // Merge translated duplicates using centroid-aligned mask overlap.
     static constexpr bool   kEnableCanonicalDuplicateRetention = false;      // Keep the strongest canonical node during merges instead of simply keeping the newest one.
-    static constexpr bool   kEnableMergeCenterAlignedDuplicate = true;     // Merge nodes when center-aligned bitwise AND exceeds threshold (catches shifted duplicates).
-    static constexpr bool   kEnableMergeSideAlignedDuplicate = true;       // Merge nodes when side-attached alignment bitwise AND exceeds threshold.
+    static constexpr bool   kEnableMergeCenterAlignedDuplicate = false;     // Merge nodes when center-aligned bitwise AND exceeds threshold (catches shifted duplicates).
+    static constexpr bool   kEnableMergeSideAlignedDuplicate = false;       // Merge nodes when side-attached alignment bitwise AND exceeds threshold.
     static constexpr bool   kEnableFrameStrokeRejectFilter = true;          // Reject whole frame blobs that touch the side margins or padded lecturer area before graph admission.
     static constexpr float kToFarToBeSame = 40.0f;
+
+    // Brute-force containment filter (deletes smaller duplicate strokes contained within larger ones)
+    static constexpr bool  kEnableContainmentFilter  = true;
+    static constexpr float kContainCentroidDist      = 10.0f;  // Max centroid distance to consider pair
+    static constexpr float kContainThreshold         = 0.30f;  // Fraction of smaller mask pixels that must overlap
+    static constexpr int   kContainStepPx            = 2;      // Brute-force slide step size in pixels
 
     // Battle thresholds
     static constexpr float kBattleCoexistOverlap = 0.15f; // Minimum IoU for a new blob to coexist with an existing node (no refresh or replacement).
@@ -385,7 +394,7 @@ private:
     static constexpr double kKdTreeHuDistanceThreshold = 0.9; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kKdTreeMinBboxSimilarity   = 0.70f; // Minimum bounding box similarity for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kRansacInlierTolerancePx   = 5.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
-    static constexpr int    kRansacMaxIterations        = 300; // Maximum RANSAC iterations per blob-node pair
+    static constexpr int    kRansacMaxIterations        = 500; // Maximum RANSAC iterations per blob-node pair
     static constexpr int    kMinRansacInliers           = 3; // Minimum inliers required for a blob-node match to be accepted
     static constexpr int    kKdTreeKnnNeighbors         = 5; // Number of nearest neighbors to retrieve from KD-Tree for each blob during matching
 
@@ -505,6 +514,9 @@ private:
     std::atomic<bool> canvas_view_mode_{false};
     std::atomic<int>  render_mode_{static_cast<int>(CanvasRenderMode::kRaw)};
     std::atomic<int>  pipeline_mode_{static_cast<int>(CanvasPipelineMode::kGraph)};
+    std::atomic<uint64_t> canvas_version_{0};
+
+    void BumpCanvasVersion() { canvas_version_.fetch_add(1, std::memory_order_relaxed); }
 
     // -----------------------------------------------------------------------
     // Chunk pipeline state
@@ -527,26 +539,7 @@ private:
     // -----------------------------------------------------------------------
     // Debug
     // -----------------------------------------------------------------------
-    struct ScDebugInfo {
-        std::string window_name;
-        int         debug_id  = -1;
-        bool        closed    = false;
-    };
-    std::vector<ScDebugInfo> sc_debug_infos_;
     int next_debug_id_ = 0;
-
-    struct PipelineDebugState {
-        cv::Mat frame;
-        cv::Mat gray_clean;
-        cv::Mat enhanced_bgr;
-        cv::Mat binary;
-        cv::Mat no_update_mask;
-        float   motion_fraction    = 0.0f;
-        int     stroke_pixel_count = 0;
-        cv::Point2f shift;
-        std::string match_status;
-        bool    created_new_sc     = false;
-    };
 
     enum class ProfileStep : size_t {
         kQueueSubmit = 0,
@@ -620,19 +613,6 @@ private:
                          float& motion_fraction,
                          bool& motion_too_low,
                          bool& motion_too_high);
-    void RenderMotionGateDebug(const cv::Mat& frame,
-                               const cv::Mat& gray,
-                               const cv::Mat& no_update_mask,
-                               float motion_fraction,
-                               bool motion_too_low);
-    void RenderFrameDebug(const cv::Mat& frame,
-                          const cv::Mat& gray,
-                          const cv::Mat& binary,
-                          const cv::Mat& no_update_mask,
-                          float motion_fraction,
-                          int stroke_pixel_count,
-                          const std::string& match_status,
-                          bool created_new_sc);
 
     // Graph-based blob extraction
     std::vector<FrameBlob> ExtractFrameBlobs(const cv::Mat& binary,
@@ -684,18 +664,6 @@ private:
 
     // Update bounds from all nodes
     void UpdateGroupBounds(WhiteboardGroup& group);
-
-    // Debug: 3x2 tile grid showing pipeline stages
-    void RenderDebugGrid(const PipelineDebugState& state);
-
-    // -----------------------------------------------------------------------
-    // Hybrid pipeline methods
-    // -----------------------------------------------------------------------
-    void ProcessFrameHybrid(const cv::Mat& frame, const cv::Mat& gray,
-                            const cv::Mat& person_mask, float motion_fraction);
-    void RebuildCanvasContoursFromGraph(WhiteboardGroup& group);
-    void RebuildStrokeRenderCacheHybrid(WhiteboardGroup& group);
-    void RebuildRawRenderCacheHybrid(WhiteboardGroup& group);
 
     // -----------------------------------------------------------------------
     // Chunk pipeline methods
@@ -750,7 +718,7 @@ extern std::atomic<float> g_canvas_zoom;
 extern std::atomic<bool>  g_whiteboard_debug;
 extern std::atomic<float> g_yolo_fps;
 extern std::atomic<float> g_canvas_enhance_threshold;
-extern std::atomic<bool>  g_canvas_show_graph;
+extern std::atomic<bool>  g_flutter_canvas_overlay;
 
 // ---------------------------------------------------------------------------
 // FFI exports
@@ -777,8 +745,6 @@ extern "C" {
 
     __declspec(dllexport) void    SetWhiteboardDebug(bool enabled);
     __declspec(dllexport) void    SetCanvasEnhanceThreshold(float threshold);
-    __declspec(dllexport) void    SetCanvasShowGraph(bool enabled);
-    __declspec(dllexport) bool    IsCanvasShowGraph();
 
     // Pipeline mode FFI
     __declspec(dllexport) void    SetCanvasPipelineMode(int mode);
@@ -800,4 +766,9 @@ extern "C" {
     __declspec(dllexport) bool    CompareGraphSnapshotNodes(int slot_a, int id_a, int slot_b, int id_b, float* result);
     __declspec(dllexport) bool    CombineGraphDebugSnapshots(int slot_a, int anchor_id_a, int slot_b, int anchor_id_b);
     __declspec(dllexport) bool    CopyGraphDebugSnapshot(int source_slot, int target_slot);
+
+    // Canvas version + full-res export
+    __declspec(dllexport) uint64_t GetCanvasVersion();
+    __declspec(dllexport) bool     GetCanvasFullResRgba(uint8_t* buffer, int max_w, int max_h, int* out_w, int* out_h);
+    __declspec(dllexport) void     SetFlutterCanvasOverlay(bool enabled);
 }

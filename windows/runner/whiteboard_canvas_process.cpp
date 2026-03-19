@@ -375,9 +375,7 @@ private:
             : CanvasRenderMode::kStroke;
         {
             int pm = static_cast<int>(shared_->pipeline_mode);
-            if (pm == static_cast<int>(CanvasPipelineMode::kHybrid))
-                snapshot.pipeline_mode = CanvasPipelineMode::kHybrid;
-            else if (pm == static_cast<int>(CanvasPipelineMode::kChunk))
+            if (pm == static_cast<int>(CanvasPipelineMode::kChunk))
                 snapshot.pipeline_mode = CanvasPipelineMode::kChunk;
             else
                 snapshot.pipeline_mode = CanvasPipelineMode::kGraph;

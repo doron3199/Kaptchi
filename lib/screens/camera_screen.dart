@@ -29,7 +29,7 @@ import '../services/filters_service.dart';
 import '../widgets/mobile_connection_dialog.dart';
 import '../widgets/video_source_sheet.dart';
 import '../widgets/zoomable_stream_view.dart';
-import 'graph_debug_screen.dart';
+import '../widgets/canvas_image_viewer.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
@@ -46,8 +46,6 @@ class CameraScreen extends StatefulWidget {
   @override
   State<CameraScreen> createState() => _CameraScreenState();
 }
-
-enum WhiteboardCanvasRenderMode { stroke, raw }
 
 class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
@@ -102,13 +100,7 @@ class _CameraScreenState extends State<CameraScreen>
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
-  int _pipelineMode = 0; // 0=Graph, 1=Chunk, 2=Hybrid
-  WhiteboardCanvasRenderMode _canvasRenderMode =
-      WhiteboardCanvasRenderMode.stroke;
-  bool _isWhiteboardDebug = false;
-  double _canvasPanX = 0.5;
-  double _canvasPanY = 0.5;
-  double _canvasZoom = 1.0;
+  int _pipelineMode = 0; // 0=Graph, 1=Chunk
   Timer? _canvasPollTimer;
   // Notifier for canvas navigation state — updated by the poll timer without
   // a full setState rebuild (prevents live-view flicker).
@@ -155,28 +147,6 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasNavNotifier.value = (count: 0, active: 0);
   }
 
-  void _applyCanvasViewport(
-    double panX,
-    double panY,
-    double zoom, {
-    bool immediate = false,
-  }) {
-    final nextPanX = panX.clamp(0.0, 1.0);
-    final nextPanY = panY.clamp(0.0, 1.0);
-    final nextZoom = zoom.clamp(1.0, 8.0);
-    if ((_canvasPanX - nextPanX).abs() < 0.0001 &&
-        (_canvasPanY - nextPanY).abs() < 0.0001 &&
-        (_canvasZoom - nextZoom).abs() < 0.0001) {
-      return;
-    }
-
-    setState(() {
-      _canvasPanX = nextPanX;
-      _canvasPanY = nextPanY;
-      _canvasZoom = nextZoom;
-    });
-  }
-
   void _setCanvasViewMode(bool enabled) {
     setState(() {
       _isCanvasViewMode = enabled;
@@ -184,15 +154,7 @@ class _CameraScreenState extends State<CameraScreen>
       _viewOffset = Offset.zero;
     });
     NativeCameraService().setCanvasViewMode(enabled);
-  }
-
-  void _setCanvasRenderMode(WhiteboardCanvasRenderMode mode) {
-    setState(() {
-      _canvasRenderMode = mode;
-    });
-    NativeCameraService().setCanvasRenderMode(
-      mode == WhiteboardCanvasRenderMode.raw ? 1 : 0,
-    );
+    NativeCameraService().setFlutterCanvasOverlay(enabled);
   }
 
   void _resetWhiteboardUiState() {
@@ -1260,6 +1222,9 @@ class _CameraScreenState extends State<CameraScreen>
                     _startCanvasPollTimer();
                   } else {
                     _stopCanvasPollTimer();
+                    if (_isCanvasViewMode) {
+                      _setCanvasViewMode(false);
+                    }
                   }
 
                   NativeCameraService().setPanoramaEnabled(enableWhiteboard);
@@ -1277,50 +1242,23 @@ class _CameraScreenState extends State<CameraScreen>
                   _setCanvasViewMode(!_isCanvasViewMode);
                 },
               ),
-            if (Platform.isWindows && _isWhiteboardMode && _isCanvasViewMode)
-              IconButton(
-                icon: Icon(
-                  _canvasRenderMode == WhiteboardCanvasRenderMode.raw
-                      ? Icons.photo
-                      : Icons.brush,
-                  color: _canvasRenderMode == WhiteboardCanvasRenderMode.raw
-                      ? Colors.deepPurple
-                      : Colors.indigo,
-                ),
-                tooltip: _canvasRenderMode == WhiteboardCanvasRenderMode.raw
-                    ? AppLocalizations.of(context)!.showStrokeView
-                    : AppLocalizations.of(context)!.showRawView,
-                onPressed: () {
-                  _setCanvasRenderMode(
-                    _canvasRenderMode == WhiteboardCanvasRenderMode.raw
-                        ? WhiteboardCanvasRenderMode.stroke
-                        : WhiteboardCanvasRenderMode.raw,
-                  );
-                },
-              ),
             // Pipeline mode toggle: Graph vs Chunk (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(
                 icon: Icon(
                   _pipelineMode == 0
                       ? Icons.account_tree
-                      : _pipelineMode == 1
-                          ? Icons.grid_view
-                          : Icons.merge_type,
+                      : Icons.grid_view,
                   color: _pipelineMode == 0
                       ? Colors.teal
-                      : _pipelineMode == 1
-                          ? Colors.orange
-                          : Colors.purple,
+                      : Colors.orange,
                 ),
                 tooltip: _pipelineMode == 0
                     ? 'Switch to Picture mode'
-                    : _pipelineMode == 1
-                        ? 'Switch to Hybrid mode'
-                        : 'Switch to Graph mode',
+                    : 'Switch to Graph mode',
                 onPressed: () {
                   setState(() {
-                    _pipelineMode = (_pipelineMode + 1) % 3;
+                    _pipelineMode = (_pipelineMode + 1) % 2;
                   });
                   NativeCameraService().setCanvasPipelineMode(_pipelineMode);
                 },
@@ -1333,36 +1271,6 @@ class _CameraScreenState extends State<CameraScreen>
                 onPressed: () {
                   NativeCameraService().resetPanorama();
                   _resetWhiteboardUiState();
-                  _applyCanvasViewport(0.5, 0.5, 1.0, immediate: true);
-                },
-              ),
-            // Graph debug view (only visible when whiteboard mode is active)
-            if (Platform.isWindows && _isWhiteboardMode)
-              IconButton(
-                icon: const Icon(Icons.account_tree_outlined),
-                tooltip: 'Graph Debug',
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => const GraphDebugScreen(),
-                  ),
-                ),
-              ),
-            // Debug toggle (only visible when whiteboard mode is active)
-            if (Platform.isWindows && _isWhiteboardMode)
-              IconButton(
-                icon: Icon(
-                  Icons.bug_report,
-                  color: _isWhiteboardDebug ? Colors.orange : null,
-                ),
-                tooltip: _isWhiteboardDebug
-                    ? 'Hide debug windows'
-                    : 'Show debug windows',
-                onPressed: () {
-                  setState(() {
-                    _isWhiteboardDebug = !_isWhiteboardDebug;
-                  });
-                  NativeCameraService().setWhiteboardDebug(_isWhiteboardDebug);
                 },
               ),
             IconButton(
@@ -1468,7 +1376,6 @@ class _CameraScreenState extends State<CameraScreen>
                                             setState(() {
                                               _currentZoom = zoom;
                                               _viewOffset = offset;
-                                              // viewportSize is no longer needed - we use screenshot capture
                                             });
                                           },
                                       onSendZoomCommand: _isCanvasViewMode
@@ -1476,6 +1383,10 @@ class _CameraScreenState extends State<CameraScreen>
                                           : _sendZoomCommand,
                                       child: windowsChild,
                                     ),
+                                    if (_isCanvasViewMode)
+                                      const Positioned.fill(
+                                        child: CanvasImageViewer(),
+                                      ),
                                   ],
                                 );
                               },
