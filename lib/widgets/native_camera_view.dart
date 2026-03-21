@@ -2,7 +2,8 @@ import 'package:flutter/material.dart';
 import '../services/native_camera_service.dart';
 
 class NativeCameraView extends StatefulWidget {
-  const NativeCameraView({super.key});
+  final double? overrideAspectRatio;
+  const NativeCameraView({super.key, this.overrideAspectRatio});
 
   @override
   State<NativeCameraView> createState() => _NativeCameraViewState();
@@ -58,6 +59,26 @@ class _NativeCameraViewState extends State<NativeCameraView> {
       return const Center(child: CircularProgressIndicator());
     }
 
+    final ar = widget.overrideAspectRatio;
+    if (ar != null) {
+      // Canvas mode: height-based sizing with pan & zoom via InteractiveViewer
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final h = constraints.maxHeight;
+          final w = h * ar;
+          return InteractiveViewer(
+            constrained: false,
+            minScale: 0.5,
+            maxScale: 10.0,
+            child: SizedBox(
+              width: w,
+              height: h,
+              child: Texture(textureId: _textureId!),
+            ),
+          );
+        },
+      );
+    }
     return AspectRatio(
       aspectRatio: 16 / 9,
       child: Texture(textureId: _textureId!),

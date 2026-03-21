@@ -34,11 +34,12 @@ constexpr DWORD kStateReadLockTimeoutMs = 8;
 constexpr DWORD kHelperStartTimeoutMs = 5000;
 constexpr DWORD kHelperLoopWaitMs = 15;
 constexpr int kNoSubCanvasRequest = -1;
-constexpr int kFallbackCanvasWidth = 1;
-constexpr int kFallbackCanvasHeight = 1;
-constexpr int kYoloPerfLogMinFrames = 30;
-const auto kYoloPerfLogMinInterval = std::chrono::seconds(10);
-
+constexpr int kDefaultCanvasWidth = 1920;
+constexpr int kDefaultCanvasHeight = 1080;
+constexpr int kMaxGraphNodes = 512;
+constexpr int kMaxGraphNodeFloats = kMaxGraphNodes * 14;
+constexpr int kMaxGraphContourFloats = 500000;
+constexpr DWORD kGraphCompareTimeoutMs = 2000;
 bool g_is_helper_process = false;
 std::string g_helper_session_id;
 
@@ -50,6 +51,7 @@ struct SharedState {
     LONG whiteboard_enabled = 0;
     LONG canvas_view_mode = 0;
     LONG render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
+    LONG pipeline_mode = static_cast<LONG>(CanvasPipelineMode::kGraph);
     LONG whiteboard_debug = 0;
     LONG reset_requested = 0;
     LONG pending_active_subcanvas = kNoSubCanvasRequest;
@@ -63,8 +65,8 @@ struct SharedState {
     LONG overview_req_width = 0;
     LONG overview_req_height = 0;
     LONG has_content = 0;
-    LONG canvas_width = kFallbackCanvasWidth;
-    LONG canvas_height = kFallbackCanvasHeight;
+    LONG canvas_width = kDefaultCanvasWidth;
+    LONG canvas_height = kDefaultCanvasHeight;
     LONG subcanvas_count = 0;
     LONG active_subcanvas = -1;
     LONG frame_available = 0;
@@ -76,27 +78,36 @@ struct SharedState {
     LONG viewport_height = 0;
     LONG overview_width = 0;
     LONG overview_height = 0;
+    LONG graph_node_count = 0;
+    LONG graph_node_floats_written = 0;
+    LONG graph_contour_floats_written = 0;
+    LONG graph_bounds_x = 0;
+    LONG graph_bounds_y = 0;
+    LONG graph_bounds_w = 0;
+    LONG graph_bounds_h = 0;
+    LONG graph_bounds_valid = 0;
+    LONG graph_compare_request_id = 0;
+    LONG graph_compare_node_a = -1;
+    LONG graph_compare_node_b = -1;
+    LONG graph_compare_result_ready = 0;
+    LONG graph_compare_result_ok = 0;
+    LONG graph_compare_result_id = 0;
     unsigned char frame_bgr[kMaxFrameBytes];
     unsigned char person_mask[kMaxMaskBytes];
     unsigned char viewport_bgr[kMaxFrameBytes];
     unsigned char overview_bgr[kMaxOverviewBytes];
+    float graph_nodes[kMaxGraphNodeFloats];
+    float graph_contours[kMaxGraphContourFloats];
+    float graph_compare_result[5];
 };
 #pragma pack(pop)
-
-struct HelperYoloPerfStats {
-    double inference_ms = 0.0;
-    int frames = 0;
-    int refreshes = 0;
-    int reuses = 0;
-    std::chrono::time_point<std::chrono::steady_clock> last_log =
-        std::chrono::steady_clock::now();
-};
 
 struct HelperStateSnapshot {
     bool shutdown = false;
     bool enabled = false;
     bool canvas_view_mode = false;
     CanvasRenderMode render_mode = CanvasRenderMode::kStroke;
+    CanvasPipelineMode pipeline_mode = CanvasPipelineMode::kGraph;
     bool debug_enabled = false;
     bool reset_requested = false;
     int requested_active_subcanvas = kNoSubCanvasRequest;
@@ -110,6 +121,9 @@ struct HelperStateSnapshot {
     cv::Mat frame;
     cv::Mat person_mask;
     bool has_new_frame = false;
+    int graph_compare_request_id = 0;
+    int graph_compare_node_a = -1;
+    int graph_compare_node_b = -1;
 };
 
 std::wstring Utf16FromUtf8(const std::string& utf8) {
@@ -160,37 +174,6 @@ void Unlock(HANDLE mutex_handle) {
     }
 }
 
-double DurationMs(const std::chrono::steady_clock::time_point& start,
-                  const std::chrono::steady_clock::time_point& end) {
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-void MaybePrintYoloPerfLog(HelperYoloPerfStats& stats) {
-    const auto now = std::chrono::steady_clock::now();
-    const bool enough_frames = stats.frames >= kYoloPerfLogMinFrames;
-    const bool enough_time =
-        stats.frames > 0 && (now - stats.last_log) >= kYoloPerfLogMinInterval;
-
-    if (!enough_frames && !enough_time) return;
-
-    const double frames = static_cast<double>(std::max(1, stats.frames));
-    const double refreshes = static_cast<double>(std::max(1, stats.refreshes));
-    const double elapsed_seconds = std::max(
-        0.001,
-        std::chrono::duration<double>(now - stats.last_log).count());
-    const double fps = frames / elapsed_seconds;
-    std::cout << "[WhiteboardYoloPerf] frames=" << stats.frames
-              << " refreshes=" << stats.refreshes
-              << " reused=" << stats.reuses
-              << " fps=" << fps
-              << " avgMs/frame=" << (stats.inference_ms / frames)
-              << " avgMs/refresh=" << (stats.inference_ms / refreshes)
-              << std::endl;
-
-    stats = HelperYoloPerfStats();
-    stats.last_log = now;
-}
-
 class ScopedHandle {
 public:
     ScopedHandle() = default;
@@ -229,10 +212,14 @@ public:
         }
 
         WhiteboardCanvas canvas;
-        HelperYoloPerfStats yolo_perf_stats;
         cv::Mat last_viewport;
         cv::Mat last_overview;
-        cv::Size latest_output_size(0, 0);
+        cv::Size latest_output_size(kDefaultCanvasWidth, kDefaultCanvasHeight);
+        int last_graph_compare_request_id = 0;
+        int graph_compare_result_id = 0;
+        bool graph_compare_result_ready = false;
+        bool graph_compare_result_ok = false;
+        float graph_compare_result[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
 
         while (true) {
             WaitForSingleObject(wake_event_.get(), kHelperLoopWaitMs);
@@ -252,6 +239,7 @@ public:
 
             canvas.SetCanvasViewMode(snapshot.canvas_view_mode);
             canvas.SetRenderMode(snapshot.render_mode);
+            canvas.SetPipelineMode(snapshot.pipeline_mode);
 
             if (snapshot.reset_requested) {
                 canvas.Reset();
@@ -265,14 +253,9 @@ public:
             if (snapshot.has_new_frame && !snapshot.frame.empty()) {
                 latest_output_size = snapshot.frame.size();
                 cv::Mat person_mask = snapshot.person_mask;
-                if (person_mask.empty()) {
-                    const auto yolo_start = std::chrono::steady_clock::now();
+                if (person_mask.empty() || person_mask.size() != snapshot.frame.size() ||
+                    person_mask.type() != CV_8UC1) {
                     person_mask = GetWhiteboardPersonMask(snapshot.frame);
-                    const auto yolo_end = std::chrono::steady_clock::now();
-                    yolo_perf_stats.inference_ms += DurationMs(yolo_start, yolo_end);
-                    yolo_perf_stats.refreshes++;
-                    yolo_perf_stats.frames++;
-                    MaybePrintYoloPerfLog(yolo_perf_stats);
                 }
                 canvas.ProcessFrame(snapshot.frame, person_mask);
             }
@@ -315,7 +298,25 @@ public:
                 last_overview.release();
             }
 
-            WriteResults(canvas, last_viewport, last_overview);
+            if (snapshot.graph_compare_request_id > 0 &&
+                snapshot.graph_compare_request_id != last_graph_compare_request_id) {
+                std::fill(std::begin(graph_compare_result), std::end(graph_compare_result), 0.0f);
+                graph_compare_result_ok = canvas.CompareGraphNodes(
+                    snapshot.graph_compare_node_a,
+                    snapshot.graph_compare_node_b,
+                    graph_compare_result);
+                graph_compare_result_id = snapshot.graph_compare_request_id;
+                graph_compare_result_ready = true;
+                last_graph_compare_request_id = snapshot.graph_compare_request_id;
+            }
+
+            WriteResults(canvas,
+                         last_viewport,
+                         last_overview,
+                         graph_compare_result_ready,
+                         graph_compare_result_id,
+                         graph_compare_result_ok,
+                         graph_compare_result);
         }
 
         return EXIT_SUCCESS;
@@ -372,6 +373,13 @@ private:
         snapshot.render_mode = shared_->render_mode == static_cast<LONG>(CanvasRenderMode::kRaw)
             ? CanvasRenderMode::kRaw
             : CanvasRenderMode::kStroke;
+        {
+            int pm = static_cast<int>(shared_->pipeline_mode);
+            if (pm == static_cast<int>(CanvasPipelineMode::kChunk))
+                snapshot.pipeline_mode = CanvasPipelineMode::kChunk;
+            else
+                snapshot.pipeline_mode = CanvasPipelineMode::kGraph;
+        }
         snapshot.debug_enabled = shared_->whiteboard_debug != 0;
         snapshot.reset_requested = shared_->reset_requested != 0;
         snapshot.requested_active_subcanvas = shared_->pending_active_subcanvas;
@@ -382,6 +390,9 @@ private:
         snapshot.yolo_fps = shared_->yolo_fps;
         snapshot.viewport_size = cv::Size(shared_->viewport_req_width, shared_->viewport_req_height);
         snapshot.overview_size = cv::Size(shared_->overview_req_width, shared_->overview_req_height);
+        snapshot.graph_compare_request_id = static_cast<int>(shared_->graph_compare_request_id);
+        snapshot.graph_compare_node_a = static_cast<int>(shared_->graph_compare_node_a);
+        snapshot.graph_compare_node_b = static_cast<int>(shared_->graph_compare_node_b);
 
         shared_->reset_requested = 0;
         shared_->pending_active_subcanvas = kNoSubCanvasRequest;
@@ -413,7 +424,11 @@ private:
 
     void WriteResults(WhiteboardCanvas& canvas,
                       const cv::Mat& viewport,
-                      const cv::Mat& overview) {
+                      const cv::Mat& overview,
+                      bool graph_compare_result_ready,
+                      int graph_compare_result_id,
+                      bool graph_compare_result_ok,
+                      const float* graph_compare_result) {
         if (!shared_) return;
 
         // Read canvas state BEFORE acquiring the shared mutex.
@@ -426,6 +441,26 @@ private:
         const int subcanvas_count = has_content ? canvas.GetSubCanvasCount() : 0;
         const int active_subcanvas = has_content ? canvas.GetActiveSubCanvasIndex() : -1;
 
+        // Pre-read graph debug data outside the shared mutex
+        int graph_node_count = 0;
+        int graph_node_floats = 0;
+        int graph_contour_floats = 0;
+        int graph_bounds[4] = {0, 0, 0, 0};
+        bool graph_bounds_valid = false;
+        float local_graph_nodes[kMaxGraphNodeFloats];
+        // Use a heap buffer for contours (too large for stack)
+        static thread_local std::vector<float> local_graph_contours(kMaxGraphContourFloats);
+
+        if (has_content) {
+            graph_node_count = canvas.GetGraphNodeCount();
+            if (graph_node_count > 0) {
+                graph_node_floats = canvas.GetGraphNodes(local_graph_nodes, kMaxGraphNodes) * 14;
+                graph_contour_floats = canvas.GetGraphNodeContours(
+                    local_graph_contours.data(), kMaxGraphContourFloats);
+                graph_bounds_valid = canvas.GetGraphCanvasBounds(graph_bounds);
+            }
+        }
+
         if (!WaitAndLock(mutex_.get(), 50)) return;
 
         shared_->helper_alive = 1;
@@ -434,12 +469,24 @@ private:
         shared_->canvas_height = canvas_size.height;
         shared_->subcanvas_count = subcanvas_count;
         shared_->active_subcanvas = active_subcanvas;
+        shared_->graph_compare_result_ready = graph_compare_result_ready ? 1 : 0;
+        shared_->graph_compare_result_ok = graph_compare_result_ok ? 1 : 0;
+        shared_->graph_compare_result_id = graph_compare_result_id;
+        if (graph_compare_result != nullptr) {
+            std::memcpy(shared_->graph_compare_result,
+                        graph_compare_result,
+                        sizeof(shared_->graph_compare_result));
+        }
 
         if (!has_content) {
             shared_->viewport_width = 0;
             shared_->viewport_height = 0;
             shared_->overview_width = 0;
             shared_->overview_height = 0;
+            shared_->graph_node_count = 0;
+            shared_->graph_node_floats_written = 0;
+            shared_->graph_contour_floats_written = 0;
+            shared_->graph_bounds_valid = 0;
             Unlock(mutex_.get());
             return;
         }
@@ -462,6 +509,26 @@ private:
         } else {
             shared_->overview_width = 0;
             shared_->overview_height = 0;
+        }
+
+        // Write graph debug data
+        shared_->graph_node_count = graph_node_count;
+        shared_->graph_node_floats_written = graph_node_floats;
+        shared_->graph_contour_floats_written = graph_contour_floats;
+        if (graph_node_floats > 0) {
+            std::memcpy(shared_->graph_nodes, local_graph_nodes,
+                        static_cast<size_t>(graph_node_floats) * sizeof(float));
+        }
+        if (graph_contour_floats > 0) {
+            std::memcpy(shared_->graph_contours, local_graph_contours.data(),
+                        static_cast<size_t>(graph_contour_floats) * sizeof(float));
+        }
+        shared_->graph_bounds_valid = graph_bounds_valid ? 1 : 0;
+        if (graph_bounds_valid) {
+            shared_->graph_bounds_x = graph_bounds[0];
+            shared_->graph_bounds_y = graph_bounds[1];
+            shared_->graph_bounds_w = graph_bounds[2];
+            shared_->graph_bounds_h = graph_bounds[3];
         }
 
         Unlock(mutex_.get());
@@ -489,10 +556,12 @@ struct WhiteboardCanvasHelperClient::Impl {
     std::atomic<bool> cached_has_content{false};
     std::atomic<bool> cached_canvas_view_mode{false};
     std::atomic<int> cached_render_mode{static_cast<int>(CanvasRenderMode::kStroke)};
-    std::atomic<int> cached_canvas_width{kFallbackCanvasWidth};
-    std::atomic<int> cached_canvas_height{kFallbackCanvasHeight};
+    std::atomic<int> cached_pipeline_mode{static_cast<int>(CanvasPipelineMode::kGraph)};
+    std::atomic<int> cached_canvas_width{kDefaultCanvasWidth};
+    std::atomic<int> cached_canvas_height{kDefaultCanvasHeight};
     std::atomic<int> cached_subcanvas_count{0};
     std::atomic<int> cached_active_subcanvas{-1};
+    mutable std::atomic<int> next_graph_compare_request_id{1};
 
     ~Impl() {
         if (shared) {
@@ -508,6 +577,8 @@ struct WhiteboardCanvasHelperClient::Impl {
                                       std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(shared->render_mode),
                                  std::memory_order_relaxed);
+        cached_pipeline_mode.store(static_cast<int>(shared->pipeline_mode),
+                                   std::memory_order_relaxed);
         cached_canvas_width.store(std::max(1L, shared->canvas_width),
                                   std::memory_order_relaxed);
         cached_canvas_height.store(std::max(1L, shared->canvas_height),
@@ -523,8 +594,10 @@ struct WhiteboardCanvasHelperClient::Impl {
         cached_canvas_view_mode.store(false, std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(CanvasRenderMode::kStroke),
                                  std::memory_order_relaxed);
-        cached_canvas_width.store(kFallbackCanvasWidth, std::memory_order_relaxed);
-        cached_canvas_height.store(kFallbackCanvasHeight, std::memory_order_relaxed);
+        cached_pipeline_mode.store(static_cast<int>(CanvasPipelineMode::kGraph),
+                                   std::memory_order_relaxed);
+        cached_canvas_width.store(kDefaultCanvasWidth, std::memory_order_relaxed);
+        cached_canvas_height.store(kDefaultCanvasHeight, std::memory_order_relaxed);
         cached_subcanvas_count.store(0, std::memory_order_relaxed);
         cached_active_subcanvas.store(-1, std::memory_order_relaxed);
     }
@@ -591,14 +664,15 @@ bool WhiteboardCanvasHelperClient::Start() {
     std::memset(impl_->shared, 0, sizeof(SharedState));
     impl_->shared->magic = kSharedMagic;
     impl_->shared->render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
+    impl_->shared->pipeline_mode = static_cast<LONG>(CanvasPipelineMode::kGraph);
     impl_->shared->pending_active_subcanvas = kNoSubCanvasRequest;
     impl_->shared->pan_x = 0.5f;
     impl_->shared->pan_y = 0.5f;
     impl_->shared->zoom = 1.0f;
     impl_->shared->enhance_threshold = 5.0f;
     impl_->shared->yolo_fps = 2.0f;
-    impl_->shared->canvas_width = kFallbackCanvasWidth;
-    impl_->shared->canvas_height = kFallbackCanvasHeight;
+    impl_->shared->canvas_width = kDefaultCanvasWidth;
+    impl_->shared->canvas_height = kDefaultCanvasHeight;
     impl_->ResetCachedState();
 
     wchar_t exe_path[MAX_PATH] = {0};
@@ -724,6 +798,10 @@ bool WhiteboardCanvasHelperClient::IsReady() const {
 void WhiteboardCanvasHelperClient::ProcessFrame(const cv::Mat& frame, const cv::Mat& person_mask) {
     if (!IsReady() || frame.empty() || !IsValidFrameSize(frame.cols, frame.rows)) return;
 
+    const bool has_person_mask =
+        !person_mask.empty() && person_mask.size() == frame.size() &&
+        person_mask.type() == CV_8UC1;
+
     impl_->WithLock(kFrameSubmitLockTimeoutMs, [&]() {
         impl_->RefreshCachedStateUnsafe();
         const size_t frame_bytes = FrameBytesForSize(frame.cols, frame.rows);
@@ -731,7 +809,7 @@ void WhiteboardCanvasHelperClient::ProcessFrame(const cv::Mat& frame, const cv::
         impl_->shared->frame_width = frame.cols;
         impl_->shared->frame_height = frame.rows;
 
-        if (!person_mask.empty() && person_mask.size() == frame.size()) {
+        if (has_person_mask) {
             const size_t mask_bytes = MaskBytesForSize(frame.cols, frame.rows);
             std::memcpy(impl_->shared->person_mask, person_mask.data, mask_bytes);
             impl_->shared->mask_width = person_mask.cols;
@@ -864,8 +942,23 @@ CanvasRenderMode WhiteboardCanvasHelperClient::GetRenderMode() const {
         : CanvasRenderMode::kStroke;
 }
 
+void WhiteboardCanvasHelperClient::SetPipelineMode(int mode) {
+    if (!IsReady()) return;
+    impl_->cached_pipeline_mode.store(mode, std::memory_order_relaxed);
+    impl_->WithLock(20, [&]() {
+        impl_->shared->pipeline_mode = static_cast<LONG>(mode);
+        impl_->RefreshCachedStateUnsafe();
+    });
+    impl_->SignalHelper();
+}
+
+int WhiteboardCanvasHelperClient::GetPipelineMode() const {
+    if (!IsReady()) return static_cast<int>(CanvasPipelineMode::kGraph);
+    return impl_->cached_pipeline_mode.load(std::memory_order_relaxed);
+}
+
 cv::Size WhiteboardCanvasHelperClient::GetCanvasSize() const {
-    if (!IsReady()) return cv::Size(kFallbackCanvasWidth, kFallbackCanvasHeight);
+    if (!IsReady()) return cv::Size(kDefaultCanvasWidth, kDefaultCanvasHeight);
     impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
         impl_->RefreshCachedStateUnsafe();
     });
@@ -917,6 +1010,109 @@ void WhiteboardCanvasHelperClient::SyncSettings(bool debug_enabled,
         impl_->RefreshCachedStateUnsafe();
     });
     impl_->SignalHelper();
+}
+
+int WhiteboardCanvasHelperClient::GetGraphNodeCount() const {
+    if (!IsReady()) return 0;
+    int count = 0;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        count = static_cast<int>(impl_->shared->graph_node_count);
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphNodes(float* buffer, int max_nodes) const {
+    if (!IsReady() || !buffer || max_nodes <= 0) return 0;
+    int count = 0;
+    impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
+        const int total_floats = static_cast<int>(impl_->shared->graph_node_floats_written);
+        const int available_nodes = total_floats / 14;
+        count = std::min(available_nodes, max_nodes);
+        if (count > 0) {
+            std::memcpy(buffer, impl_->shared->graph_nodes,
+                        static_cast<size_t>(count) * 14 * sizeof(float));
+        }
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphNodeContours(float* buffer, int max_floats) const {
+    if (!IsReady() || !buffer || max_floats <= 0) return 0;
+    int written = 0;
+    impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
+        const int available = static_cast<int>(impl_->shared->graph_contour_floats_written);
+        written = std::min(available, max_floats);
+        if (written > 0) {
+            std::memcpy(buffer, impl_->shared->graph_contours,
+                        static_cast<size_t>(written) * sizeof(float));
+        }
+    });
+    return written;
+}
+
+bool WhiteboardCanvasHelperClient::GetGraphCanvasBounds(int* bounds) const {
+    if (!IsReady() || !bounds) return false;
+    bool valid = false;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        valid = impl_->shared->graph_bounds_valid != 0;
+        if (valid) {
+            bounds[0] = static_cast<int>(impl_->shared->graph_bounds_x);
+            bounds[1] = static_cast<int>(impl_->shared->graph_bounds_y);
+            bounds[2] = static_cast<int>(impl_->shared->graph_bounds_w);
+            bounds[3] = static_cast<int>(impl_->shared->graph_bounds_h);
+        }
+    });
+    return valid;
+}
+
+bool WhiteboardCanvasHelperClient::CompareGraphNodes(int id_a, int id_b, float* result) const {
+    if (!IsReady() || !result) return false;
+
+    const int request_id =
+        impl_->next_graph_compare_request_id.fetch_add(1, std::memory_order_relaxed);
+    const bool queued = impl_->WithLock(20, [&]() {
+        impl_->shared->graph_compare_node_a = id_a;
+        impl_->shared->graph_compare_node_b = id_b;
+        impl_->shared->graph_compare_request_id = request_id;
+        impl_->shared->graph_compare_result_ready = 0;
+        impl_->shared->graph_compare_result_ok = 0;
+        impl_->shared->graph_compare_result_id = 0;
+    });
+    if (!queued) return false;
+
+    impl_->SignalHelper();
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kGraphCompareTimeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool ready = false;
+        bool ok = false;
+        float local_result[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+
+        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+            ready = impl_->shared->graph_compare_result_ready != 0 &&
+                    impl_->shared->graph_compare_result_id == request_id;
+            if (ready) {
+                ok = impl_->shared->graph_compare_result_ok != 0;
+                if (ok) {
+                    std::memcpy(local_result,
+                                impl_->shared->graph_compare_result,
+                                sizeof(local_result));
+                }
+            }
+        });
+
+        if (ready) {
+            if (ok) {
+                std::memcpy(result, local_result, sizeof(local_result));
+            }
+            return ok;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return false;
 }
 
 void SetWhiteboardCanvasHelperProcessMode(bool helper_mode, const std::string& session_id) {

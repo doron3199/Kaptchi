@@ -3,6 +3,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:ffi/ffi.dart';
+import '../models/graph_node_info.dart';
+import 'app_logger.dart';
 
 typedef GetTextureIdFunc = Int64 Function();
 typedef GetTextureId = int Function();
@@ -94,6 +96,13 @@ typedef SetWhiteboardDebug = void Function(bool enabled);
 typedef SetCanvasEnhanceThresholdFunc = Void Function(Float threshold);
 typedef SetCanvasEnhanceThreshold = void Function(double threshold);
 
+// Pipeline mode FFI types
+typedef SetCanvasPipelineModeFunc = Void Function(Int32 mode);
+typedef SetCanvasPipelineMode = void Function(int mode);
+
+typedef GetCanvasPipelineModeFunc = Int32 Function();
+typedef GetCanvasPipelineMode = int Function();
+
 // Sub-canvas navigation FFI types
 typedef GetSubCanvasCountFunc = Int32 Function();
 typedef GetSubCanvasCount = int Function();
@@ -109,6 +118,102 @@ typedef GetSortedSubCanvasIndex = int Function(int pos);
 
 typedef GetSortedPositionFunc = Int32 Function(Int32 idx);
 typedef GetSortedPosition = int Function(int idx);
+
+// Graph debug FFI types
+typedef GetGraphNodeCountFunc = Int32 Function();
+typedef GetGraphNodeCount = int Function();
+
+typedef GetGraphNodesFunc = Int32 Function(Pointer<Float> buffer, Int32 maxNodes);
+typedef GetGraphNodesFFI = int Function(Pointer<Float> buffer, int maxNodes);
+
+typedef GetGraphNodeNeighborsFunc = Int32 Function(
+  Int32 nodeId, Pointer<Int32> neighbors, Int32 maxNeighbors);
+typedef GetGraphNodeNeighborsFFI = int Function(
+  int nodeId, Pointer<Int32> neighbors, int maxNeighbors);
+
+typedef CompareGraphNodesFunc = Bool Function(
+  Int32 idA, Int32 idB, Pointer<Float> result);
+typedef CompareGraphNodesFFI = bool Function(
+  int idA, int idB, Pointer<Float> result);
+
+typedef MoveGraphNodeFunc = Bool Function(
+  Int32 nodeId, Float newCx, Float newCy);
+typedef MoveGraphNodeFFI = bool Function(
+  int nodeId, double newCx, double newCy);
+
+typedef GetGraphCanvasBoundsFunc = Bool Function(Pointer<Int32> bounds);
+typedef GetGraphCanvasBoundsFFI = bool Function(Pointer<Int32> bounds);
+
+typedef GetGraphNodeContoursFunc = Int32 Function(Pointer<Float> buffer, Int32 maxFloats);
+typedef GetGraphNodeContoursFFI = int Function(Pointer<Float> buffer, int maxFloats);
+
+typedef CaptureGraphDebugSnapshotFunc = Bool Function(Int32 slot);
+typedef CaptureGraphDebugSnapshotFFI = bool Function(int slot);
+
+typedef GetGraphSnapshotNodeCountFunc = Int32 Function(Int32 slot);
+typedef GetGraphSnapshotNodeCountFFI = int Function(int slot);
+
+typedef GetGraphSnapshotNodesFunc = Int32 Function(
+  Int32 slot, Pointer<Float> buffer, Int32 maxNodes);
+typedef GetGraphSnapshotNodesFFI = int Function(
+  int slot, Pointer<Float> buffer, int maxNodes);
+
+typedef GetGraphSnapshotCanvasBoundsFunc = Bool Function(
+  Int32 slot, Pointer<Int32> bounds);
+typedef GetGraphSnapshotCanvasBoundsFFI = bool Function(
+  int slot, Pointer<Int32> bounds);
+
+typedef GetGraphSnapshotNodeContoursFunc = Int32 Function(
+  Int32 slot, Pointer<Float> buffer, Int32 maxFloats);
+typedef GetGraphSnapshotNodeContoursFFI = int Function(
+  int slot, Pointer<Float> buffer, int maxFloats);
+
+typedef CompareGraphSnapshotNodesFunc = Bool Function(
+  Int32 slotA,
+  Int32 idA,
+  Int32 slotB,
+  Int32 idB,
+  Pointer<Float> result,
+);
+typedef CompareGraphSnapshotNodesFFI = bool Function(
+  int slotA,
+  int idA,
+  int slotB,
+  int idB,
+  Pointer<Float> result,
+);
+
+typedef CombineGraphDebugSnapshotsFunc = Bool Function(
+  Int32 slotA,
+  Int32 anchorIdA,
+  Int32 slotB,
+  Int32 anchorIdB,
+);
+typedef CombineGraphDebugSnapshotsFFI = bool Function(
+  int slotA,
+  int anchorIdA,
+  int slotB,
+  int anchorIdB,
+);
+
+typedef CopyGraphDebugSnapshotFunc = Bool Function(Int32 sourceSlot, Int32 targetSlot);
+typedef CopyGraphDebugSnapshotFFI = bool Function(int sourceSlot, int targetSlot);
+
+// Canvas full-res export FFI types
+typedef GetCanvasFullResRgbaFunc = Bool Function(
+  Pointer<Uint8> buffer,
+  Int32 maxW,
+  Int32 maxH,
+  Pointer<Int32> outW,
+  Pointer<Int32> outH,
+);
+typedef GetCanvasFullResRgbaDart = bool Function(
+  Pointer<Uint8> buffer,
+  int maxW,
+  int maxH,
+  Pointer<Int32> outW,
+  Pointer<Int32> outH,
+);
 
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
@@ -145,6 +250,8 @@ class NativeCameraService {
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
   late SetWhiteboardDebug _setWhiteboardDebug;
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
+  late SetCanvasPipelineMode _setCanvasPipelineMode;
+  late GetCanvasPipelineMode _getCanvasPipelineMode;
 
   // Sub-canvas navigation bindings
   late GetSubCanvasCount _getSubCanvasCount;
@@ -249,6 +356,16 @@ class NativeCameraService {
     _setCanvasEnhanceThreshold = _nativeLib
         .lookup<NativeFunction<SetCanvasEnhanceThresholdFunc>>(
           'SetCanvasEnhanceThreshold',
+        )
+        .asFunction();
+    _setCanvasPipelineMode = _nativeLib
+        .lookup<NativeFunction<SetCanvasPipelineModeFunc>>(
+          'SetCanvasPipelineMode',
+        )
+        .asFunction();
+    _getCanvasPipelineMode = _nativeLib
+        .lookup<NativeFunction<GetCanvasPipelineModeFunc>>(
+          'GetCanvasPipelineMode',
         )
         .asFunction();
 
@@ -479,6 +596,19 @@ class NativeCameraService {
     _setCanvasEnhanceThreshold(threshold);
   }
 
+  /// Set the canvas pipeline mode (0 = Graph, 1 = Chunk).
+  /// Switching mode resets the canvas.
+  void setCanvasPipelineMode(int mode) {
+    initialize();
+    _setCanvasPipelineMode(mode);
+  }
+
+  /// Get the current canvas pipeline mode (0 = Graph, 1 = Chunk).
+  int getCanvasPipelineMode() {
+    initialize();
+    return _getCanvasPipelineMode();
+  }
+
   // --- Sub-canvas Navigation Methods ---
 
   /// Returns the number of active sub-canvases
@@ -658,6 +788,507 @@ class NativeCameraService {
   bool isScreenCaptureActive() {
     _initializeScreenCapture();
     return _isScreenCaptureActive() == 1;
+  }
+
+  // --- Canvas Full-Res Export Methods ---
+
+  GetCanvasFullResRgbaDart? _getCanvasFullResRgba;
+  bool _canvasExportInitialized = false;
+
+  void _initializeCanvasExport() {
+    if (_canvasExportInitialized) return;
+    initialize();
+
+    try {
+      _getCanvasFullResRgba = _nativeLib
+          .lookup<NativeFunction<GetCanvasFullResRgbaFunc>>(
+            'GetCanvasFullResRgba',
+          )
+          .asFunction();
+    } catch (e) {
+      _getCanvasFullResRgba = null;
+    }
+
+    _canvasExportInitialized = true;
+  }
+
+  /// Returns full-resolution RGBA bytes of the canvas, or null if unavailable.
+  ({Uint8List bytes, int width, int height})? getCanvasFullResRgba({
+    int maxWidth = 4096,
+    int maxHeight = 4096,
+  }) {
+    _initializeCanvasExport();
+    if (_getCanvasFullResRgba == null) return null;
+
+    final bufferSize = maxWidth * maxHeight * 4;
+    final buffer = malloc.allocate<Uint8>(bufferSize);
+    final outW = malloc.allocate<Int32>(4);
+    final outH = malloc.allocate<Int32>(4);
+    try {
+      final ok = _getCanvasFullResRgba!(buffer, maxWidth, maxHeight, outW, outH);
+      if (!ok) return null;
+      final w = outW.value;
+      final h = outH.value;
+      if (w <= 0 || h <= 0) return null;
+      final bytes = Uint8List.fromList(buffer.asTypedList(w * h * 4));
+      return (bytes: bytes, width: w, height: h);
+    } finally {
+      malloc.free(buffer);
+      malloc.free(outW);
+      malloc.free(outH);
+    }
+  }
+
+  // --- Graph Debug Methods ---
+
+  late GetGraphNodeCount _getGraphNodeCount;
+  late GetGraphNodesFFI _getGraphNodes;
+  late GetGraphNodeNeighborsFFI _getGraphNodeNeighbors;
+  late CompareGraphNodesFFI _compareGraphNodes;
+  late MoveGraphNodeFFI _moveGraphNode;
+  late GetGraphCanvasBoundsFFI _getGraphCanvasBounds;
+  GetGraphNodeContoursFFI? _getGraphNodeContours;
+  late CaptureGraphDebugSnapshotFFI _captureGraphDebugSnapshot;
+  late GetGraphSnapshotNodeCountFFI _getGraphSnapshotNodeCount;
+  late GetGraphSnapshotNodesFFI _getGraphSnapshotNodes;
+  late GetGraphSnapshotCanvasBoundsFFI _getGraphSnapshotCanvasBounds;
+  GetGraphSnapshotNodeContoursFFI? _getGraphSnapshotNodeContours;
+  late CompareGraphSnapshotNodesFFI _compareGraphSnapshotNodes;
+  late CombineGraphDebugSnapshotsFFI _combineGraphDebugSnapshots;
+  late CopyGraphDebugSnapshotFFI _copyGraphDebugSnapshot;
+
+  bool _graphDebugInitialized = false;
+
+  void _initializeGraphDebug() {
+    if (_graphDebugInitialized) return;
+    AppLogger.ffi('_initializeGraphDebug: starting, _isInitialized=$_isInitialized');
+    try {
+      initialize();
+    } catch (e) {
+      AppLogger.ffi('_initializeGraphDebug: initialize() threw: $e');
+      rethrow;
+    }
+    AppLogger.ffi('_initializeGraphDebug: base initialize() done');
+
+    try {
+      _getGraphNodeCount = _nativeLib
+          .lookup<NativeFunction<GetGraphNodeCountFunc>>('GetGraphNodeCount')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphNodeCount: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphNodeCount FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphNodes = _nativeLib
+          .lookup<NativeFunction<GetGraphNodesFunc>>('GetGraphNodes')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphNodes: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphNodes FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphNodeNeighbors = _nativeLib
+          .lookup<NativeFunction<GetGraphNodeNeighborsFunc>>('GetGraphNodeNeighbors')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphNodeNeighbors: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphNodeNeighbors FAILED: $e');
+      rethrow;
+    }
+    try {
+      _compareGraphNodes = _nativeLib
+          .lookup<NativeFunction<CompareGraphNodesFunc>>('CompareGraphNodes')
+          .asFunction();
+      AppLogger.ffi('  lookup CompareGraphNodes: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup CompareGraphNodes FAILED: $e');
+      rethrow;
+    }
+    try {
+      _moveGraphNode = _nativeLib
+          .lookup<NativeFunction<MoveGraphNodeFunc>>('MoveGraphNode')
+          .asFunction();
+      AppLogger.ffi('  lookup MoveGraphNode: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup MoveGraphNode FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphCanvasBounds = _nativeLib
+          .lookup<NativeFunction<GetGraphCanvasBoundsFunc>>('GetGraphCanvasBounds')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphCanvasBounds: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphCanvasBounds FAILED: $e');
+      rethrow;
+    }
+
+    // Optional: may not exist if C++ DLL hasn't been rebuilt
+    try {
+      _getGraphNodeContours = _nativeLib
+          .lookup<NativeFunction<GetGraphNodeContoursFunc>>('GetGraphNodeContours')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphNodeContours: OK');
+    } catch (e) {
+      _getGraphNodeContours = null;
+      AppLogger.ffi('  lookup GetGraphNodeContours: not found (optional) - $e');
+    }
+
+    try {
+      _captureGraphDebugSnapshot = _nativeLib
+          .lookup<NativeFunction<CaptureGraphDebugSnapshotFunc>>(
+            'CaptureGraphDebugSnapshot',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup CaptureGraphDebugSnapshot: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup CaptureGraphDebugSnapshot FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphSnapshotNodeCount = _nativeLib
+          .lookup<NativeFunction<GetGraphSnapshotNodeCountFunc>>(
+            'GetGraphSnapshotNodeCount',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphSnapshotNodeCount: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphSnapshotNodeCount FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphSnapshotNodes = _nativeLib
+          .lookup<NativeFunction<GetGraphSnapshotNodesFunc>>(
+            'GetGraphSnapshotNodes',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphSnapshotNodes: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphSnapshotNodes FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphSnapshotCanvasBounds = _nativeLib
+          .lookup<NativeFunction<GetGraphSnapshotCanvasBoundsFunc>>(
+            'GetGraphSnapshotCanvasBounds',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphSnapshotCanvasBounds: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphSnapshotCanvasBounds FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphSnapshotNodeContours = _nativeLib
+          .lookup<NativeFunction<GetGraphSnapshotNodeContoursFunc>>(
+            'GetGraphSnapshotNodeContours',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphSnapshotNodeContours: OK');
+    } catch (e) {
+      _getGraphSnapshotNodeContours = null;
+      AppLogger.ffi(
+        '  lookup GetGraphSnapshotNodeContours: not found (optional) - $e',
+      );
+    }
+    try {
+      _compareGraphSnapshotNodes = _nativeLib
+          .lookup<NativeFunction<CompareGraphSnapshotNodesFunc>>(
+            'CompareGraphSnapshotNodes',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup CompareGraphSnapshotNodes: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup CompareGraphSnapshotNodes FAILED: $e');
+      rethrow;
+    }
+    try {
+      _combineGraphDebugSnapshots = _nativeLib
+          .lookup<NativeFunction<CombineGraphDebugSnapshotsFunc>>(
+            'CombineGraphDebugSnapshots',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup CombineGraphDebugSnapshots: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup CombineGraphDebugSnapshots FAILED: $e');
+      rethrow;
+    }
+    try {
+      _copyGraphDebugSnapshot = _nativeLib
+          .lookup<NativeFunction<CopyGraphDebugSnapshotFunc>>(
+            'CopyGraphDebugSnapshot',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup CopyGraphDebugSnapshot: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup CopyGraphDebugSnapshot FAILED: $e');
+      rethrow;
+    }
+
+    _graphDebugInitialized = true;
+    AppLogger.ffi('_initializeGraphDebug: completed successfully');
+  }
+
+  List<GraphNodeInfo> _decodeGraphNodes(Pointer<Float> buffer, int actual) {
+    final nodes = <GraphNodeInfo>[];
+    for (int i = 0; i < actual; i++) {
+      final p = buffer + i * 15;
+      nodes.add(GraphNodeInfo(
+        id: p[0].toInt(),
+        bboxCanvas: Rect.fromLTWH(p[1], p[2], p[3], p[4]),
+        centroid: Offset(p[5], p[6]),
+        area: p[7],
+        absenceScore: p[8].toDouble(),
+        lastSeenFrame: p[9].toInt(),
+        createdFrame: p[10].toInt(),
+        neighborCount: p[11].toInt(),
+        canvasOrigin: Offset(p[12], p[13]),
+        matchDistance: p[14].toInt(),
+      ));
+    }
+    return nodes;
+  }
+
+  List<GraphNodeInfo> _readGraphNodes({
+    required int count,
+    required int Function(Pointer<Float>, int) reader,
+    required String logLabel,
+  }) {
+    if (count <= 0) return [];
+
+    final buffer = malloc.allocate<Float>(count * 15 * 4);
+    try {
+      final actual = reader(buffer, count);
+      AppLogger.graphDebug(
+        '$logLabel: reader returned $actual nodes (requested $count)',
+      );
+      return _decodeGraphNodes(buffer, actual);
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  Rect? _readGraphBounds({
+    required bool Function(Pointer<Int32>) reader,
+    required String logLabel,
+  }) {
+    final buffer = malloc.allocate<Int32>(4 * 4);
+    try {
+      final ok = reader(buffer);
+      AppLogger.graphDebug('$logLabel: bounds ok=$ok');
+      if (!ok) return null;
+      final minX = buffer[0].toDouble();
+      final minY = buffer[1].toDouble();
+      final maxX = buffer[2].toDouble();
+      final maxY = buffer[3].toDouble();
+      AppLogger.graphDebug('$logLabel: ($minX, $minY) -> ($maxX, $maxY)');
+      return Rect.fromLTRB(minX, minY, maxX, maxY);
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  Map<int, List<Offset>> _readGraphContours({
+    required int Function(Pointer<Float>, int)? reader,
+    required String logLabel,
+  }) {
+    if (reader == null) return {};
+
+    const maxFloats = 500000;
+    final buffer = malloc.allocate<Float>(maxFloats * 4);
+    try {
+      final written = reader(buffer, maxFloats);
+      AppLogger.graphDebug('$logLabel: reader wrote $written floats');
+      final result = <int, List<Offset>>{};
+      int i = 0;
+      while (i + 1 < written) {
+        final nodeId = buffer[i].toInt();
+        final numPoints = buffer[i + 1].toInt();
+        i += 2;
+        final points = <Offset>[];
+        for (int j = 0; j < numPoints && i + 1 < written; j++) {
+          points.add(Offset(buffer[i], buffer[i + 1]));
+          i += 2;
+        }
+        result[nodeId] = points;
+      }
+      return result;
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  int getGraphNodeCount() {
+    _initializeGraphDebug();
+    final count = _getGraphNodeCount();
+    AppLogger.graphDebug('getGraphNodeCount() returned $count');
+    return count;
+  }
+
+  List<GraphNodeInfo> getGraphNodes() {
+    _initializeGraphDebug();
+    final count = _getGraphNodeCount();
+    AppLogger.graphDebug('getGraphNodes: _getGraphNodeCount=$count');
+    return _readGraphNodes(
+      count: count,
+      reader: (buffer, maxNodes) => _getGraphNodes(buffer, maxNodes),
+      logLabel: 'getGraphNodes',
+    );
+  }
+
+  List<int> getNodeNeighbors(int nodeId) {
+    _initializeGraphDebug();
+    const maxNeighbors = 32;
+    final buffer = malloc.allocate<Int32>(maxNeighbors * 4);
+    try {
+      final count = _getGraphNodeNeighbors(nodeId, buffer, maxNeighbors);
+      return [for (int i = 0; i < count; i++) buffer[i]];
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  NodeComparison? compareNodes(int idA, int idB) {
+    _initializeGraphDebug();
+    final buffer = malloc.allocate<Float>(5 * 4);
+    try {
+      final ok = _compareGraphNodes(idA, idB, buffer);
+      AppLogger.graphDebug(
+          'compareNodes($idA, $idB): ok=$ok');
+      if (!ok) return null;
+      return NodeComparison(
+        shapeDistance: buffer[0],
+        centroidDistance: buffer[1],
+        bboxIntersectionArea: buffer[2],
+        andOverlapPixels: buffer[3],
+        maskOverlapRatio: buffer[4],
+      );
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  bool moveNode(int id, double cx, double cy) {
+    _initializeGraphDebug();
+    return _moveGraphNode(id, cx, cy);
+  }
+
+  Rect? getCanvasBounds() {
+    _initializeGraphDebug();
+    return _readGraphBounds(
+      reader: (buffer) => _getGraphCanvasBounds(buffer),
+      logLabel: 'getCanvasBounds',
+    );
+  }
+
+  /// Returns a map of node_id -> list of contour points (in canvas coordinates).
+  Map<int, List<Offset>> getGraphNodeContours() {
+    _initializeGraphDebug();
+    return _readGraphContours(
+      reader: _getGraphNodeContours == null
+          ? null
+          : (buffer, maxFloats) => _getGraphNodeContours!(buffer, maxFloats),
+      logLabel: 'getGraphNodeContours',
+    );
+  }
+
+  bool captureGraphSnapshot(int slot) {
+    _initializeGraphDebug();
+    final ok = _captureGraphDebugSnapshot(slot);
+    AppLogger.graphDebug('captureGraphSnapshot($slot): ok=$ok');
+    return ok;
+  }
+
+  List<GraphNodeInfo> getGraphSnapshotNodes(int slot) {
+    _initializeGraphDebug();
+    final count = _getGraphSnapshotNodeCount(slot);
+    AppLogger.graphDebug('getGraphSnapshotNodes($slot): count=$count');
+    return _readGraphNodes(
+      count: count,
+      reader: (buffer, maxNodes) => _getGraphSnapshotNodes(slot, buffer, maxNodes),
+      logLabel: 'getGraphSnapshotNodes($slot)',
+    );
+  }
+
+  Rect? getGraphSnapshotCanvasBounds(int slot) {
+    _initializeGraphDebug();
+    return _readGraphBounds(
+      reader: (buffer) => _getGraphSnapshotCanvasBounds(slot, buffer),
+      logLabel: 'getGraphSnapshotCanvasBounds($slot)',
+    );
+  }
+
+  Map<int, List<Offset>> getGraphSnapshotNodeContours(int slot) {
+    _initializeGraphDebug();
+    return _readGraphContours(
+      reader: _getGraphSnapshotNodeContours == null
+          ? null
+          : (buffer, maxFloats) =>
+              _getGraphSnapshotNodeContours!(slot, buffer, maxFloats),
+      logLabel: 'getGraphSnapshotNodeContours($slot)',
+    );
+  }
+
+  GraphSnapshotComparison? compareGraphSnapshotNodes(
+    int slotA,
+    int idA,
+    int slotB,
+    int idB,
+  ) {
+    _initializeGraphDebug();
+    final buffer = malloc.allocate<Float>(6 * 4);
+    try {
+      final ok = _compareGraphSnapshotNodes(slotA, idA, slotB, idB, buffer);
+      AppLogger.graphDebug(
+        'compareGraphSnapshotNodes($slotA:$idA, $slotB:$idB): ok=$ok',
+      );
+      if (!ok) return null;
+      return GraphSnapshotComparison(
+        shapeDistance: buffer[0],
+        widthRatio: buffer[1],
+        heightRatio: buffer[2],
+        longEdgeSimilarity: buffer[3],
+        shortEdgeSimilarity: buffer[4],
+        averageEdgeSimilarity: buffer[5],
+      );
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  bool combineGraphSnapshots(
+    int slotA,
+    int slotB, {
+    int? anchorIdA,
+    int? anchorIdB,
+  }) {
+    _initializeGraphDebug();
+    final resolvedAnchorIdA =
+        anchorIdA != null && anchorIdB != null ? anchorIdA : -1;
+    final resolvedAnchorIdB =
+        anchorIdA != null && anchorIdB != null ? anchorIdB : -1;
+    final ok = _combineGraphDebugSnapshots(
+      slotA,
+      resolvedAnchorIdA,
+      slotB,
+      resolvedAnchorIdB,
+    );
+    AppLogger.graphDebug(
+      'combineGraphSnapshots($slotA:$resolvedAnchorIdA, '
+      '$slotB:$resolvedAnchorIdB): ok=$ok',
+    );
+    return ok;
+  }
+
+  bool copyGraphSnapshot(int sourceSlot, int targetSlot) {
+    _initializeGraphDebug();
+    final ok = _copyGraphDebugSnapshot(sourceSlot, targetSlot);
+    AppLogger.graphDebug(
+      'copyGraphSnapshot($sourceSlot -> $targetSlot): ok=$ok',
+    );
+    return ok;
   }
 }
 
