@@ -718,7 +718,6 @@ extern std::atomic<float> g_canvas_zoom;
 extern std::atomic<bool>  g_whiteboard_debug;
 extern std::atomic<float> g_yolo_fps;
 extern std::atomic<float> g_canvas_enhance_threshold;
-extern std::atomic<bool>  g_flutter_canvas_overlay;
 
 // ---------------------------------------------------------------------------
 // FFI exports
@@ -770,5 +769,4 @@ extern "C" {
     // Canvas version + full-res export
     __declspec(dllexport) uint64_t GetCanvasVersion();
     __declspec(dllexport) bool     GetCanvasFullResRgba(uint8_t* buffer, int max_w, int max_h, int* out_w, int* out_h);
-    __declspec(dllexport) void     SetFlutterCanvasOverlay(bool enabled);
 }

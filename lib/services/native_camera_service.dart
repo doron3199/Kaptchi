@@ -199,14 +199,7 @@ typedef CombineGraphDebugSnapshotsFFI = bool Function(
 typedef CopyGraphDebugSnapshotFunc = Bool Function(Int32 sourceSlot, Int32 targetSlot);
 typedef CopyGraphDebugSnapshotFFI = bool Function(int sourceSlot, int targetSlot);
 
-// Flutter canvas overlay control
-typedef SetFlutterCanvasOverlayFunc = Void Function(Bool enabled);
-typedef SetFlutterCanvasOverlayDart = void Function(bool enabled);
-
-// Canvas version + full-res export FFI types
-typedef GetCanvasVersionFunc = Uint64 Function();
-typedef GetCanvasVersionDart = int Function();
-
+// Canvas full-res export FFI types
 typedef GetCanvasFullResRgbaFunc = Bool Function(
   Pointer<Uint8> buffer,
   Int32 maxW,
@@ -799,22 +792,13 @@ class NativeCameraService {
 
   // --- Canvas Full-Res Export Methods ---
 
-  GetCanvasVersionDart? _getCanvasVersion;
   GetCanvasFullResRgbaDart? _getCanvasFullResRgba;
-  SetFlutterCanvasOverlayDart? _setFlutterCanvasOverlay;
   bool _canvasExportInitialized = false;
 
   void _initializeCanvasExport() {
     if (_canvasExportInitialized) return;
     initialize();
 
-    try {
-      _getCanvasVersion = _nativeLib
-          .lookup<NativeFunction<GetCanvasVersionFunc>>('GetCanvasVersion')
-          .asFunction();
-    } catch (e) {
-      _getCanvasVersion = null;
-    }
     try {
       _getCanvasFullResRgba = _nativeLib
           .lookup<NativeFunction<GetCanvasFullResRgbaFunc>>(
@@ -824,29 +808,8 @@ class NativeCameraService {
     } catch (e) {
       _getCanvasFullResRgba = null;
     }
-    try {
-      _setFlutterCanvasOverlay = _nativeLib
-          .lookup<NativeFunction<SetFlutterCanvasOverlayFunc>>(
-            'SetFlutterCanvasOverlay',
-          )
-          .asFunction();
-    } catch (e) {
-      _setFlutterCanvasOverlay = null;
-    }
 
     _canvasExportInitialized = true;
-  }
-
-  /// Returns the current canvas version counter (atomic, zero cost).
-  int getCanvasVersion() {
-    _initializeCanvasExport();
-    return _getCanvasVersion?.call() ?? 0;
-  }
-
-  /// Tell C++ whether Flutter is drawing the canvas overlay (skips C++ texture rendering).
-  void setFlutterCanvasOverlay(bool enabled) {
-    _initializeCanvasExport();
-    _setFlutterCanvasOverlay?.call(enabled);
   }
 
   /// Returns full-resolution RGBA bytes of the canvas, or null if unavailable.

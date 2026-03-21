@@ -63,7 +63,6 @@ std::atomic<float> g_canvas_zoom{1.0f};
 std::atomic<bool>  g_whiteboard_debug{false};
 std::atomic<float> g_yolo_fps{2.0f};
 std::atomic<float> g_canvas_enhance_threshold{5.0f};
-std::atomic<bool>  g_flutter_canvas_overlay{false};
 
 // ============================================================================
 //  SECTION 2: Static helpers
@@ -5374,12 +5373,10 @@ bool GetCanvasFullResRgba(uint8_t* buffer, int max_w, int max_h,
     const cv::Size canvas_size = g_whiteboard_canvas->GetCanvasSize();
     if (canvas_size.width <= 0 || canvas_size.height <= 0) return false;
 
-    // Scale to fit within max_w x max_h, preserving aspect ratio, capped at 4096
-    const int cap_w = std::min(max_w, 4096);
-    const int cap_h = std::min(max_h, 4096);
+    // Scale to fit within max_w x max_h, preserving aspect ratio (no hard cap)
     const double scale = std::min(
-        (double)cap_w / canvas_size.width,
-        (double)cap_h / canvas_size.height);
+        (double)max_w / canvas_size.width,
+        (double)max_h / canvas_size.height);
     const int scaled_w = std::max(1, (int)std::round(canvas_size.width * scale));
     const int scaled_h = std::max(1, (int)std::round(canvas_size.height * scale));
 
@@ -5405,6 +5402,3 @@ bool GetCanvasFullResRgba(uint8_t* buffer, int max_w, int max_h,
     return copied;
 }
 
-void SetFlutterCanvasOverlay(bool enabled) {
-    g_flutter_canvas_overlay.store(enabled);
-}

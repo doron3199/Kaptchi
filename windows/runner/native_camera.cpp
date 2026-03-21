@@ -522,8 +522,7 @@ void NativeCamera::RefreshDisplayFrame() {
 
     const bool canvas_view_requested =
         g_whiteboard_enabled.load() && g_whiteboard_canvas &&
-        g_whiteboard_canvas->IsCanvasViewMode() &&
-        !g_flutter_canvas_overlay.load();
+        g_whiteboard_canvas->IsCanvasViewMode();
 
     if (source_bgr.empty()) {
         NoteDisplayFrame(
@@ -546,17 +545,26 @@ void NativeCamera::RefreshDisplayFrame() {
     if (canvas_view_requested) {
         const bool has_canvas_content = g_whiteboard_canvas->HasContent();
         if (has_canvas_content) {
+            // Use canvas size so Flutter gets full-res image
+            cv::Size overview_size = g_whiteboard_canvas->GetCanvasSize();
+            const int kMaxDim = 4096;
+            if (overview_size.width > kMaxDim || overview_size.height > kMaxDim) {
+                const float scale = static_cast<float>(kMaxDim) /
+                    std::max(overview_size.width, overview_size.height);
+                overview_size.width  = std::max(1, static_cast<int>(overview_size.width  * scale));
+                overview_size.height = std::max(1, static_cast<int>(overview_size.height * scale));
+            }
+
             cv::Mat canvas_out;
             if (g_whiteboard_canvas->GetOverview(
-                    display_bgr.size(),
+                    overview_size,
                     canvas_out)) {
                 display_bgr = canvas_out;
                 canvas_out.copyTo(last_canvas_frame);
                 canvas_hold_frame.release();
                 showing_canvas = true;
                 overview_success = true;
-            } else if (!last_canvas_frame.empty() &&
-                       last_canvas_frame.size() == display_bgr.size()) {
+            } else if (!last_canvas_frame.empty()) {
                 last_canvas_frame.copyTo(display_bgr);
                 showing_canvas = true;
                 used_fallback_frame = true;
@@ -632,8 +640,7 @@ void NativeCamera::ProcessingThreadLoop() {
         // Whiteboard canvas mode — incremental SLAM-like capture
         if (g_whiteboard_enabled.load() && g_whiteboard_canvas) {
             cv::Mat personMask;
-            const bool canvas_view_requested = g_whiteboard_canvas->IsCanvasViewMode() &&
-                !g_flutter_canvas_overlay.load();
+            const bool canvas_view_requested = g_whiteboard_canvas->IsCanvasViewMode();
             const bool remote_process = g_whiteboard_canvas->IsRemoteProcess();
             bool overview_success = false;
             bool used_fallback_frame = false;
@@ -663,17 +670,28 @@ void NativeCamera::ProcessingThreadLoop() {
             g_whiteboard_bridge_perf_stats.submitted_frames++;
 
             bool showing_canvas = false;
-            
+
             // If canvas view mode is active and we have content, replace the
             // live frame with the latest finished canvas viewport. The Flutter
             // overview bar drives the panorama pan/zoom through SetPanoramaViewport.
             if (canvas_view_requested) {
                 const bool has_canvas_content = g_whiteboard_canvas->HasContent();
                 if (has_canvas_content) {
+                    // Use canvas size so Flutter gets full-res image
+                    cv::Size overview_size = g_whiteboard_canvas->GetCanvasSize();
+                    // Cap to 4096 to avoid absurd texture sizes
+                    const int kMaxDim = 4096;
+                    if (overview_size.width > kMaxDim || overview_size.height > kMaxDim) {
+                        const float scale = static_cast<float>(kMaxDim) /
+                            std::max(overview_size.width, overview_size.height);
+                        overview_size.width  = std::max(1, static_cast<int>(overview_size.width  * scale));
+                        overview_size.height = std::max(1, static_cast<int>(overview_size.height * scale));
+                    }
+
                     cv::Mat canvas_out;
                     const bool got_lock =
                         g_whiteboard_canvas->GetOverview(
-                            frame.size(),
+                            overview_size,
                             canvas_out);
 
                     if (got_lock) {
@@ -683,9 +701,8 @@ void NativeCamera::ProcessingThreadLoop() {
                         g_whiteboard_bridge_perf_stats.canvas_frames++;
                         showing_canvas = true;
                         overview_success = true;
-                    } else if (!last_canvas_frame.empty() &&
-                               last_canvas_frame.size() == frame.size()) {
-                        // Keep showing the last mapped canvas instead of falling back to live.
+                    } else if (!last_canvas_frame.empty()) {
+                        // Keep showing the last canvas frame (may differ in size from camera frame).
                         last_canvas_frame.copyTo(frame);
                         g_whiteboard_bridge_perf_stats.canvas_misses++;
                         showing_canvas = true;

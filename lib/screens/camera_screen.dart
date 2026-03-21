@@ -29,7 +29,6 @@ import '../services/filters_service.dart';
 import '../widgets/mobile_connection_dialog.dart';
 import '../widgets/video_source_sheet.dart';
 import '../widgets/zoomable_stream_view.dart';
-import '../widgets/canvas_image_viewer.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
@@ -100,6 +99,7 @@ class _CameraScreenState extends State<CameraScreen>
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
+  double? _canvasAspectRatio; // null = use default 16:9
   int _pipelineMode = 0; // 0=Graph, 1=Chunk
   Timer? _canvasPollTimer;
   // Notifier for canvas navigation state — updated by the poll timer without
@@ -127,16 +127,30 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasPollTimer?.cancel();
     _canvasPollTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
       if (!mounted || !Platform.isWindows) return;
-      final count = NativeCameraService().getSubCanvasCount();
-      final activeVec = NativeCameraService().getActiveSubCanvasIndex();
+      final svc = NativeCameraService();
+      final count = svc.getSubCanvasCount();
+      final activeVec = svc.getActiveSubCanvasIndex();
       // Convert raw vector index to spatial sorted position
       final sortedPos = activeVec < 0
           ? 0
-          : NativeCameraService().getSortedPosition(activeVec);
+          : svc.getSortedPosition(activeVec);
       final activeIdx = sortedPos < 0 ? 0 : sortedPos;
       final cur = _canvasNavNotifier.value;
       if (count != cur.count || activeIdx != cur.active) {
         _canvasNavNotifier.value = (count: count, active: activeIdx);
+      }
+      // Update canvas aspect ratio for texture sizing
+      if (_isCanvasViewMode) {
+        final sz = svc.getPanoramaCanvasSize();
+        if (sz.width > 0 && sz.height > 0) {
+          final newAr = sz.width / sz.height;
+          if (_canvasAspectRatio == null ||
+              (newAr - _canvasAspectRatio!).abs() > 0.01) {
+            setState(() {
+              _canvasAspectRatio = newAr;
+            });
+          }
+        }
       }
     });
   }
@@ -150,11 +164,11 @@ class _CameraScreenState extends State<CameraScreen>
   void _setCanvasViewMode(bool enabled) {
     setState(() {
       _isCanvasViewMode = enabled;
+      _canvasAspectRatio = enabled ? _canvasAspectRatio : null;
       _currentZoom = 1.0;
       _viewOffset = Offset.zero;
     });
     NativeCameraService().setCanvasViewMode(enabled);
-    NativeCameraService().setFlutterCanvasOverlay(enabled);
   }
 
   void _resetWhiteboardUiState() {
@@ -870,6 +884,61 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  /// Captures the full canvas image (not just the visible portion).
+  Future<void> _captureFullCanvas() async {
+    if (!Platform.isWindows) return;
+
+    _flashController.forward(from: 0.0);
+
+    try {
+      // Use actual canvas size so capture is not downscaled
+      final canvasSize = NativeCameraService().getPanoramaCanvasSize();
+      final maxDim = canvasSize.width > 0 && canvasSize.height > 0
+          ? canvasSize.width.ceil().clamp(1, 16384)
+          : 4096;
+      final maxDimH = canvasSize.height > 0
+          ? canvasSize.height.ceil().clamp(1, 16384)
+          : 4096;
+      final result = NativeCameraService().getCanvasFullResRgba(
+        maxWidth: maxDim,
+        maxHeight: maxDimH,
+      );
+      if (result == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Failed to get canvas image')),
+          );
+        }
+        return;
+      }
+
+      // Convert RGBA to PNG
+      final image = await ui.ImmutableBuffer.fromUint8List(result.bytes)
+          .then((buffer) => ui.ImageDescriptor.raw(
+                buffer,
+                width: result.width,
+                height: result.height,
+                pixelFormat: ui.PixelFormat.rgba8888,
+              ))
+          .then((descriptor) => descriptor.instantiateCodec())
+          .then((codec) => codec.getNextFrame())
+          .then((frame) => frame.image);
+
+      final byteData =
+          await image.toByteData(format: ui.ImageByteFormat.png);
+      if (!mounted || byteData == null) return;
+
+      final pngBytes = byteData.buffer.asUint8List();
+      GalleryService.instance.addImage(pngBytes, result.width, result.height);
+    } catch (e) {
+      debugPrint('Error capturing full canvas: $e');
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error capturing canvas: $e')),
+      );
+    }
+  }
+
   /// Captures the current frame and opens CropScreen for 4-point perspective crop.
   Future<void> _captureAndCrop() async {
     if (!Platform.isWindows) return;
@@ -1242,6 +1311,13 @@ class _CameraScreenState extends State<CameraScreen>
                   _setCanvasViewMode(!_isCanvasViewMode);
                 },
               ),
+            // Capture full canvas (only visible in canvas view mode)
+            if (Platform.isWindows && _isCanvasViewMode)
+              IconButton(
+                icon: const Icon(Icons.photo_camera, color: Colors.amber),
+                tooltip: 'Capture full canvas',
+                onPressed: _captureFullCanvas,
+              ),
             // Pipeline mode toggle: Graph vs Chunk (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(
@@ -1357,35 +1433,37 @@ class _CameraScreenState extends State<CameraScreen>
                                           ),
                                         ],
                                       )
-                                    : const NativeCameraView();
+                                    : NativeCameraView(
+                                        overrideAspectRatio:
+                                            _isCanvasViewMode
+                                                ? _canvasAspectRatio
+                                                : null,
+                                      );
 
                                 return Stack(
                                   fit: StackFit.expand,
                                   children: [
-                                    ZoomableStreamView(
-                                      enabled: true,
-                                      currentZoom: _currentZoom,
-                                      viewOffset: _viewOffset,
-                                      isDigitalZoomOverride:
-                                          _isDigitalZoomOverride,
-                                      lockedPhoneZoom: _lockedPhoneZoom,
-                                      isStreamMode: _isStreamMode,
-                                      phoneMaxZoom: _phoneMaxZoom,
-                                      onTransformChanged:
-                                          (zoom, offset, viewportSize) {
-                                            setState(() {
-                                              _currentZoom = zoom;
-                                              _viewOffset = offset;
-                                            });
-                                          },
-                                      onSendZoomCommand: _isCanvasViewMode
-                                          ? (_) {}
-                                          : _sendZoomCommand,
-                                      child: windowsChild,
-                                    ),
                                     if (_isCanvasViewMode)
-                                      const Positioned.fill(
-                                        child: CanvasImageViewer(),
+                                      windowsChild
+                                    else
+                                      ZoomableStreamView(
+                                        enabled: true,
+                                        currentZoom: _currentZoom,
+                                        viewOffset: _viewOffset,
+                                        isDigitalZoomOverride:
+                                            _isDigitalZoomOverride,
+                                        lockedPhoneZoom: _lockedPhoneZoom,
+                                        isStreamMode: _isStreamMode,
+                                        phoneMaxZoom: _phoneMaxZoom,
+                                        onTransformChanged:
+                                            (zoom, offset, viewportSize) {
+                                              setState(() {
+                                                _currentZoom = zoom;
+                                                _viewOffset = offset;
+                                              });
+                                            },
+                                        onSendZoomCommand: _sendZoomCommand,
+                                        child: windowsChild,
                                       ),
                                   ],
                                 );
