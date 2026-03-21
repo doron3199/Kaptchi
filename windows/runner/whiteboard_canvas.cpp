@@ -74,6 +74,36 @@ using SteadyClock = std::chrono::steady_clock;
 
 static void BuildFrameBlobNeighborGraph(std::vector<FrameBlob>& blobs, int k);
 
+// ---------------------------------------------------------------------------
+// EnhanceFrameBlobs — apply WhiteboardEnhance to each blob's color_pixels
+// so the raw render cache shows clean dark strokes on white background.
+// Each blob bbox is padded before enhancement to avoid DoG edge artifacts,
+// then cropped back to the original bbox.
+// A negative threshold disables enhancement entirely.
+// ---------------------------------------------------------------------------
+static constexpr int kEnhancePadding = 10; // > DOG_K/2 = 7
+
+static void EnhanceFrameBlobs(std::vector<FrameBlob>& blobs,
+                               const cv::Mat& frame_bgr,
+                               float threshold) {
+    if (threshold < 0.0f || frame_bgr.empty()) return;
+    for (auto& blob : blobs) {
+        if (blob.color_pixels.empty()) continue;
+        // Expand bbox by padding, clamp to frame bounds
+        int px0 = std::max(0, blob.bbox.x - kEnhancePadding);
+        int py0 = std::max(0, blob.bbox.y - kEnhancePadding);
+        int px1 = std::min(frame_bgr.cols, blob.bbox.x + blob.bbox.width + kEnhancePadding);
+        int py1 = std::min(frame_bgr.rows, blob.bbox.y + blob.bbox.height + kEnhancePadding);
+        cv::Rect padded(px0, py0, px1 - px0, py1 - py0);
+        cv::Mat enhanced = WhiteboardEnhance(frame_bgr(padded).clone(), threshold);
+        // Crop back to original bbox within the padded result
+        int cx = blob.bbox.x - px0;
+        int cy = blob.bbox.y - py0;
+        blob.color_pixels = enhanced(cv::Rect(cx, cy,
+                                               blob.bbox.width, blob.bbox.height)).clone();
+    }
+}
+
 static std::mutex& WhiteboardLogMutex() {
     static std::mutex mutex;
     return mutex;
@@ -1943,6 +1973,9 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
     std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame);
     RecordProfileSample(ProfileStep::kBlobExtract,
                         ElapsedMs(blob_extract_start, SteadyClock::now()));
+
+    // Enhance blob color pixels for cleaner raw render cache
+    EnhanceFrameBlobs(blobs, frame, g_canvas_enhance_threshold.load());
 
     std::lock_guard<std::mutex> state_lock(state_mutex_);
 
@@ -3848,6 +3881,7 @@ void WhiteboardCanvas::CreateSubCanvas(const cv::Mat& frame_bgr,
     // If no blobs were extracted, try extracting them now
     if (blobs.empty()) {
         blobs = ExtractFrameBlobs(binary, frame_bgr);
+        EnhanceFrameBlobs(blobs, frame_bgr, g_canvas_enhance_threshold.load());
     }
 
     SeedGroupFromFrameBlobs(*group, blobs, current_frame);
@@ -5046,6 +5080,7 @@ bool WhiteboardCanvas::CaptureGraphDebugSnapshot(int slot,
     cv::Mat no_update_mask = BuildNoUpdateMask(gray, cropped_person_mask);
     cv::Mat binary = BuildBinaryMask(gray, no_update_mask, stroke_pixel_count);
     std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame_roi);
+    EnhanceFrameBlobs(blobs, frame_roi, g_canvas_enhance_threshold.load());
     if (kEnableFrameStrokeRejectFilter) {
         FilterFrameBlobsForCanvas(blobs, stroke_reject_mask, kKNeighbors);
     }
