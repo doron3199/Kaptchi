@@ -324,9 +324,8 @@ private:
 
     static constexpr bool kShowGraphOverlay = false;  // Compile-time toggle for graph debug overlay on canvas
 
-    static constexpr bool kEnableMotionGate = true;
-    static constexpr bool kEnableHighMotionGate = true; // Skip frame updates when motion exceeds kMaxMotionFraction.
-    static const int       kMotionForceInterval = 1;
+    static constexpr bool kEnableMotionGate = true; // Skip frames when motion exceeds kMaxMotionFraction.
+    static constexpr float kMaxMotionFraction = 0.08f;
 
     // Alignment improvements
     // Merge duplicate threshold: max centroid distance to consider nodes as potentially same
@@ -340,9 +339,6 @@ private:
     // Sub-canvas creation
     static const int       kMinStrokePixelsForNewSC = 500;
     static const int       kMotionLongEdge = 256;
-    static constexpr float kMinMotionFraction = 0.01f;
-    static constexpr float kMaxMotionFraction = 0.01f;
-    static const int       kStillFramePatience = 1;
 
     // Worker queue
     static const int       kQueueDepth         = 1;
@@ -361,8 +357,9 @@ private:
     static const int        kGraphSeedCandidateLimit = 24;
 
     // Graph matching
-    static constexpr float  kMaxAllowedRectangle = 15.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
+    static constexpr float  kMaxAllowedRectangle = 1500.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
     static constexpr float  kStrokeClusterRadius = 70.0f; // Max centroid distance to cluster strokes together.
+    static const int        kDilationClusterKernel = 15;    // Dilation kernel size for proximity-based clustering (0 = disabled).
     static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
     static const int        kKNeighbors = 5; // Number of nearest graph nodes to consider when matching a blob, and number of neighbors to store for each node.
@@ -380,7 +377,7 @@ private:
     static constexpr float kToFarToBeSame = 40.0f;
 
     // Brute-force containment filter (deletes smaller duplicate strokes contained within larger ones)
-    static constexpr bool  kEnableContainmentFilter  = true;
+    static constexpr bool  kEnableContainmentFilter  = false; // Enable brute-force containment check for duplicate removal (expensive, use with caution)
     static constexpr float kContainCentroidDist      = 10.0f;  // Max centroid distance to consider pair
     static constexpr float kContainThreshold         = 0.30f;  // Fraction of smaller mask pixels that must overlap
     static constexpr int   kContainStepPx            = 2;      // Brute-force slide step size in pixels
@@ -393,7 +390,7 @@ private:
     // KD-Tree + RANSAC matching
     static constexpr double kKdTreeHuDistanceThreshold = 0.9; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kKdTreeMinBboxSimilarity   = 0.70f; // Minimum bounding box similarity for a blob-node pair to be considered a potential match (pre-RANSAC).
-    static constexpr float  kRansacInlierTolerancePx   = 5.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
+    static constexpr float  kRansacInlierTolerancePx   = 15.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
     static constexpr int    kRansacMaxIterations        = 500; // Maximum RANSAC iterations per blob-node pair
     static constexpr int    kMinRansacInliers           = 3; // Minimum inliers required for a blob-node match to be accepted
     static constexpr int    kKdTreeKnnNeighbors         = 5; // Number of nearest neighbors to retrieve from KD-Tree for each blob during matching
@@ -503,9 +500,7 @@ private:
     // Motion gate
     // -----------------------------------------------------------------------
     cv::Mat prev_gray_;
-    int     frames_since_warp_ = 0;
     int     matched_frame_counter_ = 0;
-    int     motion_frame_counter_ = 0;
 
     // -----------------------------------------------------------------------
     // Atomic flags
@@ -611,7 +606,6 @@ private:
     static const char* ProfileStepName(ProfileStep step);
     bool ApplyMotionGate(const cv::Mat& gray,
                          float& motion_fraction,
-                         bool& motion_too_low,
                          bool& motion_too_high);
 
     // Graph-based blob extraction

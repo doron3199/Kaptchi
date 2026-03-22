@@ -1689,9 +1689,7 @@ void WhiteboardCanvas::Reset() {
     next_debug_id_ = 0;
     frame_w_ = 0;
     frame_h_ = 0;
-    frames_since_warp_ = 0;
     matched_frame_counter_ = 0;
-    motion_frame_counter_ = 0;
     processed_frame_id_ = 0;
 
     perf_stats_ = PerformanceStats();
@@ -1860,10 +1858,8 @@ void WhiteboardCanvas::WorkerLoop() {
 
 bool WhiteboardCanvas::ApplyMotionGate(const cv::Mat& gray,
                                        float& motion_fraction,
-                                       bool& motion_too_low,
                                        bool& motion_too_high) {
     motion_fraction = 0.0f;
-    motion_too_low = false;
     motion_too_high = false;
 
     if (!kEnableMotionGate) {
@@ -1871,8 +1867,6 @@ bool WhiteboardCanvas::ApplyMotionGate(const cv::Mat& gray,
     }
 
     cv::Mat motion_gray;
-    const bool has_content = has_content_.load();
-    bool has_motion_reference = false;
     const float motion_scale = ComputeScaleForLongEdge(gray.size(), kMotionLongEdge);
     if (motion_scale < 0.999f) {
         cv::resize(gray, motion_gray, cv::Size(), motion_scale, motion_scale,
@@ -1882,31 +1876,17 @@ bool WhiteboardCanvas::ApplyMotionGate(const cv::Mat& gray,
     }
 
     if (!prev_gray_.empty() && prev_gray_.size() == motion_gray.size()) {
-        has_motion_reference = true;
         cv::Mat diff;
         cv::absdiff(motion_gray, prev_gray_, diff);
         cv::threshold(diff, diff, 10, 255, cv::THRESH_BINARY);
         motion_fraction = static_cast<float>(cv::countNonZero(diff)) /
                           static_cast<float>(std::max<size_t>(1, diff.total()));
+        motion_too_high = motion_fraction > kMaxMotionFraction;
     }
 
     motion_gray.copyTo(prev_gray_);
 
-    if (has_content && has_motion_reference) {
-        // Still frames are always processed — only block fast motion.
-        motion_too_low = false;
-        motion_too_high = kEnableHighMotionGate &&
-                          motion_fraction > kMaxMotionFraction;
-    }
-
-    motion_frame_counter_++;
-    bool force_process = (kMotionForceInterval > 0)
-                       && (motion_frame_counter_ >= kMotionForceInterval);
-    if (force_process) {
-        motion_frame_counter_ = 0;
-    }
-
-    return !force_process && (motion_too_low || motion_too_high);
+    return motion_too_high;
 }
 
 void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv::Mat& person_mask) {
@@ -1941,11 +1921,10 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
     // STAGE 1: Motion gate
     // -------------------------------------------------------------------
     float motion_fraction = 0.0f;
-    bool motion_too_low = false;
     bool motion_too_high = false;
     const auto motion_start = SteadyClock::now();
     const bool motion_gated = ApplyMotionGate(
-        gray, motion_fraction, motion_too_low, motion_too_high);
+        gray, motion_fraction, motion_too_high);
     RecordProfileSample(ProfileStep::kMotionGate,
                         ElapsedMs(motion_start, SteadyClock::now()));
 
@@ -2285,6 +2264,31 @@ WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary,
             if (d < kStrokeClusterRadius) {
                 unite((int)i, (int)j);
             }
+        }
+    }
+
+    // 2b. Dilation-based clustering: unite components that touch after dilation
+    if (kDilationClusterKernel > 0) {
+        cv::Mat dilated_binary, dilated_labels;
+        cv::Mat dilation_kernel = cv::getStructuringElement(
+            cv::MORPH_RECT, cv::Size(kDilationClusterKernel, kDilationClusterKernel));
+        cv::dilate(binary, dilated_binary, dilation_kernel);
+        cv::connectedComponents(dilated_binary, dilated_labels);
+
+        // Look up each component's dilated-CC label via its centroid
+        std::unordered_map<int, int> label_to_first;
+        for (size_t i = 0; i < components.size(); i++) {
+            int cx = std::clamp((int)std::round(components[i].centroid.x),
+                                0, dilated_labels.cols - 1);
+            int cy = std::clamp((int)std::round(components[i].centroid.y),
+                                0, dilated_labels.rows - 1);
+            int dl = dilated_labels.at<int>(cy, cx);
+            if (dl == 0) continue;  // background
+            auto it = label_to_first.find(dl);
+            if (it == label_to_first.end())
+                label_to_first[dl] = (int)i;
+            else
+                unite((int)i, it->second);
         }
     }
 
