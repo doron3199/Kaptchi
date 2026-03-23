@@ -351,7 +351,7 @@ static GraphMatchResult MatchWithKdTreeRansac(
             const float tgt_ratio = static_cast<float>(std::max(tgt_bb.width, tgt_bb.height))
                                   / std::max(1.0f, static_cast<float>(std::min(tgt_bb.width, tgt_bb.height)));
 
-            static constexpr float kLineAspectRatio = 5.0f;
+            static constexpr float kLineAspectRatio = 10.0f;
             if (src_ratio > kLineAspectRatio && tgt_ratio > kLineAspectRatio) {
                 const float long_sim  = LongEdgeSimilarity(src_bb, tgt_bb);
                 const float short_sim = ShortEdgeSimilarity(src_bb, tgt_bb);
@@ -1177,19 +1177,13 @@ static void DrawGraphOverlay(cv::Mat& canvas,
         cv::rectangle(canvas, rc, box_color, 1);
 
         const cv::Point c_rc = to_render_point(node.centroid_canvas);
-        for (int nid : node.neighbor_ids) {
-            if (nid < node.id) continue;
-            auto nit = group.nodes.find(nid);
-            if (nit == group.nodes.end()) continue;
-            const cv::Point n_rc = to_render_point(nit->second->centroid_canvas);
-            cv::line(canvas, c_rc, n_rc, cv::Scalar(0, 200, 0), 1);
-        }
         cv::circle(canvas, c_rc, 3, cv::Scalar(0, 0, 255), -1);
 
-        std::string label = std::to_string(node.id);
-        label += " s" + std::to_string(node.seen_count);
+        std::ostringstream lbl;
+        lbl << "s" << node.seen_count
+            << " a" << std::fixed << std::setprecision(1) << node.absence_score;
         cv::Point label_pos(rc.x, rc.y + rc.height + 28);
-        DebugText(canvas, label, label_pos, 0.9, cv::Scalar(200, 200, 200));
+        DebugText(canvas, lbl.str(), label_pos, 0.9, cv::Scalar(200, 200, 200));
     }
 
 }
@@ -2764,6 +2758,93 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
             const int mid = static_cast<int>(offset_xs.size() / 2);
             const cv::Point2f final_offset(offset_xs[mid], offset_ys[mid]);
 
+            // --- Pre-admission duplicate check ---
+            // We already know the blob's canvas position from neighbor offsets.
+            // Query nearby existing nodes and check Hu shape distance + bbox similarity.
+            // If a similar node exists, refresh it instead of creating a duplicate.
+            // Skip nodes created this same frame (e.g. "22").
+            static constexpr double kPreAdmitMaxShapeDist = 0.35;
+            static constexpr float  kPreAdmitMinBboxSim   = 0.70f;
+
+            const cv::Point2f canvas_centroid = blob.centroid + final_offset;
+            const cv::Rect canvas_bbox(
+                blob.bbox.x + static_cast<int>(std::round(final_offset.x)),
+                blob.bbox.y + static_cast<int>(std::round(final_offset.y)),
+                blob.bbox.width, blob.bbox.height);
+
+            int existing_match_id = -1;
+            double best_shape_dist = 1e9;
+            const float search_r = std::max(kMergeSearchRadiusPx,
+                std::max(static_cast<float>(blob.bbox.width),
+                         static_cast<float>(blob.bbox.height)) * 0.5f);
+            const auto nearby_nodes = group.spatial_index.QueryRadius(
+                canvas_centroid, search_r);
+
+            for (int nid : nearby_nodes) {
+                auto nit = group.nodes.find(nid);
+                if (nit == group.nodes.end()) continue;
+                const auto& existing = *nit->second;
+
+                // Never merge with a node created in the same frame
+                if (existing.created_frame == current_frame) continue;
+
+                // Skip nodes already refreshed this frame (by matched blob path)
+                if (existing.last_seen_frame == current_frame) continue;
+
+                // Hu shape distance
+                const double shape_dist = cv::matchShapes(
+                    blob.contour, existing.contour, cv::CONTOURS_MATCH_I2, 0);
+                if (shape_dist >= kPreAdmitMaxShapeDist) continue;
+
+                // Bbox similarity gate — prevent matching unrelated shapes
+                const float long_sim = LongEdgeSimilarity(canvas_bbox, existing.bbox_canvas);
+                const float short_sim = ShortEdgeSimilarity(canvas_bbox, existing.bbox_canvas);
+                if (long_sim < kPreAdmitMinBboxSim || short_sim < kPreAdmitMinBboxSim) continue;
+
+                if (shape_dist < best_shape_dist) {
+                    best_shape_dist = shape_dist;
+                    existing_match_id = nid;
+                }
+            }
+
+            if (existing_match_id >= 0) {
+                auto nit = group.nodes.find(existing_match_id);
+                if (nit != group.nodes.end()) {
+                    auto& node = *nit->second;
+
+                    // Compute mask overlap to decide battle outcome
+                    const MaskRelation rel = ComputeMaskRelation(
+                        canvas_bbox, blob.binary_mask, canvas_centroid,
+                        node.bbox_canvas, node.binary_mask, node.centroid_canvas);
+                    const float overlap_iou = rel.valid ? rel.overlap_over_min : 0.0f;
+
+                    if (overlap_iou < kBattleCoexistOverlap) {
+                        // Too little overlap — coexist: add as a new node
+                        // (fall through to AppendFrameBlobToGroup below)
+                    } else {
+                        // Enough overlap — this is the same stroke
+                        node.last_seen_frame = current_frame;
+                        node.seen_count++;
+                        node.max_area_seen = std::max(node.max_area_seen, blob.area);
+                        node.absence_score = std::min(
+                            node.absence_score + 1.0f, kAbsenceScoreInitial);
+
+                        if (overlap_iou >= kBattleRefreshOverlap &&
+                            blob.area > node.area) {
+                            // Strong overlap + bigger blob: refresh visuals
+                            RefreshNodeFromBlob(group, node, blob,
+                                                canvas_centroid, canvas_bbox);
+                            graph_changed = true;
+                        }
+
+                        blob_to_graph_node_id[blob_index] = existing_match_id;
+                        placed.push_back(blob_index);
+                        placed_any = true;
+                        continue;
+                    }
+                }
+            }
+
             const int node_id = AppendFrameBlobToGroup(
                 group, blob, final_offset, anchor_node_ids, current_frame);
 
@@ -2789,38 +2870,27 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
 
 
 // ---------------------------------------------------------------------------
-// MergeOverlappingNodes — collapse duplicate graph nodes without erasing notes
+// MergeOverlappingNodes — unified duplicate merge via mask overlap + sliding window
+//
+// Two-tier check per candidate pair:
+//   1. Canvas-aligned overlap: cheap ROI intersection of masks at their stored
+//      canvas positions.  Catches exact and near-exact duplicates.
+//   2. Sliding-window overlap: translates the smaller mask over a ±kMergeSlideMaxPx
+//      pixel grid around its canvas position and keeps the best overlap ratio.
+//      Catches duplicates shifted by camera-offset jitter between frames.
+//
+// Candidate selection: centroid within kMergeSearchRadiusPx  OR  any bbox overlap.
 // ---------------------------------------------------------------------------
 void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
                                              int current_frame,
                                              bool& graph_changed) {
-                                                static constexpr float kMergeBboxOverlap = 0.70f;
-    static constexpr double kMergeShapeDist = 0.5;
-    static constexpr double kMergeAlignedShapeDist = 0.22;
-    static constexpr float kMergeAlignedMaskOverlap = 0.72f;
-    static constexpr float kMergeSmallerMaskOverlapDuplicate = 0.50f;
-    static constexpr float kMergeAlignedAreaRatioMin = 0.45f;
-    static constexpr float kMergeContainmentMin = 0.35f;
-    static constexpr float kMergeBboxAreaRatio = 0.70f;
-    static constexpr float kMergeBboxIoU = 0.70f;
 
-    // Close-proximity duplicate: centroids within this distance + similar bbox
-    static constexpr float kMergeProximityDistPx = 30.0f;
-    static constexpr float kMergeProximityBboxSimilarity = 0.80f;
-
-    // Center-aligned and side-aligned duplicate thresholds
-    static constexpr float kMergeCenterAlignedOverlap = 0.60f;   // AND/min_pixels when centroids aligned
-    static constexpr float kMergeSideAlignedOverlap   = 0.60f;   // AND/min_pixels when snapped to same edge
-
-    auto compute_aligned_mask_overlap = [&](const DrawingNode& a,
-                                            const DrawingNode& b) -> float {
-        if (a.binary_mask.empty() || b.binary_mask.empty()) return 0.0f;
-        if (a.binary_mask.cols <= 0 || a.binary_mask.rows <= 0 ||
-            b.binary_mask.cols <= 0 || b.binary_mask.rows <= 0) {
-            return 0.0f;
-        }
-
-        // Only compute overlap on the intersection region (no union-sized alloc)
+    // --- Canvas-aligned mask overlap (fast path) ---
+    // Computes overlap / min_pixels using the intersection ROI of the two
+    // bboxes — no allocation beyond the intersection region.
+    auto canvas_aligned_overlap = [](const DrawingNode& a,
+                                     const DrawingNode& b,
+                                     int a_px, int b_px) -> float {
         const cv::Rect isect = a.bbox_canvas & b.bbox_canvas;
         if (isect.empty()) return 0.0f;
 
@@ -2843,157 +2913,87 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
         cv::Mat overlap_mask;
         cv::bitwise_and(a.binary_mask(a_local), b.binary_mask(b_local), overlap_mask);
         const int overlap_px = cv::countNonZero(overlap_mask);
-        const int min_px = std::min(cv::countNonZero(a.binary_mask),
-                                    cv::countNonZero(b.binary_mask));
+        const int min_px = std::min(a_px, b_px);
         if (min_px <= 0) return 0.0f;
         return static_cast<float>(overlap_px) / static_cast<float>(min_px);
     };
 
-    auto canonical_score = [&](const DrawingNode& node) -> double {
-        const double stable_area = std::max(node.max_area_seen, node.area);
-        const double seen_bonus = static_cast<double>(std::max(1, node.seen_count)) * 250.0;
-        const double age_bonus = static_cast<double>(
-            std::max(0, current_frame - node.created_frame)) * 10.0;
-        const double neighbor_bonus = static_cast<double>(node.neighbor_ids.size()) * 15.0;
-        const double absence_penalty = (node.absence_score < 0.0f)
-            ? static_cast<double>(-node.absence_score) * 100.0 : 0.0;
-        return stable_area * 2.0 + seen_bonus + age_bonus + neighbor_bonus - absence_penalty;
-    };
-
-    // Compute bbox width/height similarity (min/max for each dimension)
-    auto bbox_dimension_similarity = [](const cv::Rect& a, const cv::Rect& b) -> float {
-        const float w_sim = static_cast<float>(std::min(a.width, b.width)) /
-                            static_cast<float>(std::max(1, std::max(a.width, b.width)));
-        const float h_sim = static_cast<float>(std::min(a.height, b.height)) /
-                            static_cast<float>(std::max(1, std::max(a.height, b.height)));
-        return std::min(w_sim, h_sim);
-    };
-
-    // Center-aligned overlap: translate both masks so their centroids coincide,
-    // then compute bitwise AND / min_pixels.
-    auto compute_center_aligned_overlap = [](const DrawingNode& a,
-                                             const DrawingNode& b) -> float {
-        if (a.binary_mask.empty() || b.binary_mask.empty()) return 0.0f;
-        const float centroid_dist = static_cast<float>(cv::norm(a.centroid_canvas - b.centroid_canvas));
-        if (centroid_dist > WhiteboardCanvas::kToFarToBeSame) return 0.0f;
-        const int a_px = cv::countNonZero(a.binary_mask);
-        const int b_px = cv::countNonZero(b.binary_mask);
+    // --- Sliding-window mask overlap (slow path for shifted duplicates) ---
+    // Places both masks in a common canvas large enough to accommodate the slide
+    // range, then translates the smaller mask in a grid search to find the
+    // offset that maximises overlap / min_pixels.
+    auto sliding_window_overlap = [](const DrawingNode& a,
+                                     const DrawingNode& b,
+                                     int a_px, int b_px,
+                                     int slide_max_x, int slide_max_y,
+                                     int slide_step) -> float {
         if (a_px <= 0 || b_px <= 0) return 0.0f;
 
-        // Place both masks in a common canvas centered on (0,0) at each centroid
-        const int a_cx = a.binary_mask.cols / 2;
-        const int a_cy = a.binary_mask.rows / 2;
-        const int b_cx = b.binary_mask.cols / 2;
-        const int b_cy = b.binary_mask.rows / 2;
+        // Identify smaller / bigger by pixel count
+        const DrawingNode& smaller = (a_px <= b_px) ? a : b;
+        const DrawingNode& bigger  = (a_px <= b_px) ? b : a;
+        const int min_px = std::min(a_px, b_px);
 
-        const int half_w = std::max(std::max(a_cx, a.binary_mask.cols - a_cx),
-                                    std::max(b_cx, b.binary_mask.cols - b_cx));
-        const int half_h = std::max(std::max(a_cy, a.binary_mask.rows - a_cy),
-                                    std::max(b_cy, b.binary_mask.rows - b_cy));
-        const int uw = half_w * 2;
-        const int uh = half_h * 2;
-        if (uw <= 0 || uh <= 0) return 0.0f;
+        // Common canvas: big enough for bigger mask + slide margin on each side
+        const int margin_x = slide_max_x + 1;
+        const int margin_y = slide_max_y + 1;
+        const int cw = bigger.binary_mask.cols + 2 * margin_x;
+        const int ch = bigger.binary_mask.rows + 2 * margin_y;
+        if (cw <= 0 || ch <= 0) return 0.0f;
 
-        cv::Mat a_aligned = cv::Mat::zeros(uh, uw, CV_8UC1);
-        cv::Mat b_aligned = cv::Mat::zeros(uh, uw, CV_8UC1);
+        // Place bigger mask at fixed position (margin, margin)
+        cv::Mat big_canvas = cv::Mat::zeros(ch, cw, CV_8UC1);
+        cv::Rect big_roi(margin_x, margin_y,
+                         bigger.binary_mask.cols, bigger.binary_mask.rows);
+        big_roi &= cv::Rect(0, 0, cw, ch);
+        if (big_roi.empty()) return 0.0f;
+        bigger.binary_mask(cv::Rect(0, 0, big_roi.width, big_roi.height))
+            .copyTo(big_canvas(big_roi));
 
-        const int a_ox = half_w - a_cx;
-        const int a_oy = half_h - a_cy;
-        const int b_ox = half_w - b_cx;
-        const int b_oy = half_h - b_cy;
+        // Base offset for smaller mask: its canvas-relative position to bigger
+        const int base_ox = margin_x +
+            (smaller.bbox_canvas.x - bigger.bbox_canvas.x);
+        const int base_oy = margin_y +
+            (smaller.bbox_canvas.y - bigger.bbox_canvas.y);
 
-        cv::Rect a_roi(a_ox, a_oy, a.binary_mask.cols, a.binary_mask.rows);
-        cv::Rect b_roi(b_ox, b_oy, b.binary_mask.cols, b.binary_mask.rows);
-        a_roi &= cv::Rect(0, 0, uw, uh);
-        b_roi &= cv::Rect(0, 0, uw, uh);
-        if (a_roi.empty() || b_roi.empty()) return 0.0f;
+        float best_ratio = 0.0f;
 
-        // Increase thickness by dilating masks
-        cv::Mat thick_a, thick_b;
-        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-        cv::dilate(a.binary_mask(cv::Rect(0, 0, a_roi.width, a_roi.height)), thick_a, kernel);
-        cv::dilate(b.binary_mask(cv::Rect(0, 0, b_roi.width, b_roi.height)), thick_b, kernel);
-        thick_a.copyTo(a_aligned(a_roi));
-        thick_b.copyTo(b_aligned(b_roi));
+        for (int dy = -slide_max_y; dy <= slide_max_y; dy += slide_step) {
+            for (int dx = -slide_max_x; dx <= slide_max_x; dx += slide_step) {
+                cv::Rect small_roi(base_ox + dx, base_oy + dy,
+                                   smaller.binary_mask.cols,
+                                   smaller.binary_mask.rows);
+                cv::Rect canvas_bounds(0, 0, cw, ch);
+                cv::Rect clipped = small_roi & canvas_bounds;
+                if (clipped.empty()) continue;
 
-        cv::Mat overlap;
-        cv::bitwise_and(a_aligned, b_aligned, overlap);
-        const int overlap_px = cv::countNonZero(overlap);
+                // Source ROI within smaller mask
+                cv::Rect src_roi(clipped.x - small_roi.x,
+                                 clipped.y - small_roi.y,
+                                 clipped.width, clipped.height);
+                if (src_roi.x < 0 || src_roi.y < 0 ||
+                    src_roi.x + src_roi.width > smaller.binary_mask.cols ||
+                    src_roi.y + src_roi.height > smaller.binary_mask.rows) {
+                    continue;
+                }
 
-        // IoU calculation
-        cv::Mat union_mask;
-        cv::bitwise_or(a_aligned, b_aligned, union_mask);
-        const int union_px = cv::countNonZero(union_mask);
-        float iou = union_px > 0 ? static_cast<float>(overlap_px) / static_cast<float>(union_px) : 0.0f;
-        float and_ratio = static_cast<float>(overlap_px) / static_cast<float>(std::min(a_px, b_px));
-        if (iou > 0.4f) return 1.0f;
-        if (std::max(a_px, b_px) > 100 && and_ratio > 0.6f) return 1.0f;
-
-        return 0.0f;
-    };
-
-    // Side-aligned overlap: snap both masks to each edge (top, bottom, left, right)
-    // of a common bounding box, compute AND/min for each, return the max.
-    auto compute_side_aligned_overlap = [](const DrawingNode& a,
-                                           const DrawingNode& b) -> float {
-        if (a.binary_mask.empty() || b.binary_mask.empty()) return 0.0f;
-        const float centroid_dist = static_cast<float>(cv::norm(a.centroid_canvas - b.centroid_canvas));
-        if (centroid_dist > WhiteboardCanvas::kToFarToBeSame) return 0.0f;
-        const int a_px = cv::countNonZero(a.binary_mask);
-        const int b_px = cv::countNonZero(b.binary_mask);
-        if (a_px <= 0 || b_px <= 0) return 0.0f;
-
-        const int uw = std::max(a.binary_mask.cols, b.binary_mask.cols);
-        const int uh = std::max(a.binary_mask.rows, b.binary_mask.rows);
-        if (uw <= 0 || uh <= 0) return 0.0f;
-
-        struct Snap { int a_ox, a_oy, b_ox, b_oy; };
-        const Snap snaps[4] = {
-            {0, 0, 0, 0},
-            {uw - a.binary_mask.cols, 0, uw - b.binary_mask.cols, 0},
-            {0, uh - a.binary_mask.rows, 0, uh - b.binary_mask.rows},
-            {uw - a.binary_mask.cols, uh - a.binary_mask.rows,
-             uw - b.binary_mask.cols, uh - b.binary_mask.rows},
-        };
-
-        for (const auto& s : snaps) {
-            cv::Mat a_aligned = cv::Mat::zeros(uh, uw, CV_8UC1);
-            cv::Mat b_aligned = cv::Mat::zeros(uh, uw, CV_8UC1);
-
-            cv::Rect a_roi(s.a_ox, s.a_oy, a.binary_mask.cols, a.binary_mask.rows);
-            cv::Rect b_roi(s.b_ox, s.b_oy, b.binary_mask.cols, b.binary_mask.rows);
-            a_roi &= cv::Rect(0, 0, uw, uh);
-            b_roi &= cv::Rect(0, 0, uw, uh);
-            if (a_roi.empty() || b_roi.empty()) continue;
-
-            // Increase thickness by dilating masks
-            cv::Mat thick_a, thick_b;
-            cv::Mat kernel = cv::getStructuringElement(cv::MORPH_ELLIPSE, cv::Size(5, 5));
-            cv::dilate(a.binary_mask(cv::Rect(0, 0, a_roi.width, a_roi.height)), thick_a, kernel);
-            cv::dilate(b.binary_mask(cv::Rect(0, 0, b_roi.width, b_roi.height)), thick_b, kernel);
-            thick_a.copyTo(a_aligned(a_roi));
-            thick_b.copyTo(b_aligned(b_roi));
-
-            cv::Mat overlap;
-            cv::bitwise_and(a_aligned, b_aligned, overlap);
-            const int overlap_px = cv::countNonZero(overlap);
-
-            cv::Mat union_mask;
-            cv::bitwise_or(a_aligned, b_aligned, union_mask);
-            const int union_px = cv::countNonZero(union_mask);
-            float iou = union_px > 0 ? static_cast<float>(overlap_px) / static_cast<float>(union_px) : 0.0f;
-            float and_ratio = static_cast<float>(overlap_px) / static_cast<float>(std::min(a_px, b_px));
-            if (iou > 0.4f) return 1.0f;
-            // if the its a big shape use also and ratio to detect containment duplicates
-            if (std::max(a_px, b_px) > 100 && and_ratio > 0.6f) return 1.0f;
+                cv::Mat overlap;
+                cv::bitwise_and(smaller.binary_mask(src_roi),
+                                big_canvas(clipped), overlap);
+                const int overlap_px = cv::countNonZero(overlap);
+                const float ratio = static_cast<float>(overlap_px) /
+                                    static_cast<float>(min_px);
+                if (ratio > best_ratio) best_ratio = ratio;
+                if (best_ratio >= 1.0f) return 1.0f; // early out
+            }
         }
-        return 0.0f;
+        return best_ratio;
     };
 
     std::vector<std::pair<int, int>> merge_pairs;
     std::unordered_set<int> marked_for_removal;
 
-    // Cache countNonZero per node to avoid redundant full-mask scans
+    // Cache countNonZero per node
     std::unordered_map<int, int> pixel_count_cache;
     auto get_pixel_count = [&](int id, const cv::Mat& mask) -> int {
         auto it = pixel_count_cache.find(id);
@@ -3003,20 +3003,18 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
         return px;
     };
 
-    // Neighbor-based merge: for each node, only check its neighbors + nearby nodes
     for (const auto& pair : group.nodes) {
         const int id_a = pair.first;
         if (marked_for_removal.count(id_a)) continue;
         const auto& a = *pair.second;
+        if (a.binary_mask.empty()) continue;
 
-        // Build candidate set: graph neighbors + spatial proximity query
+        // Build candidate set: graph neighbors + spatial proximity
         std::unordered_set<int> candidate_ids;
         for (int nid : a.neighbor_ids) {
             candidate_ids.insert(nid);
         }
-        // Also query spatial index for close-proximity nodes that may not
-        // be graph neighbors yet (e.g. freshly added duplicates)
-        const float search_radius = std::max(kMergeProximityDistPx,
+        const float search_radius = std::max(kMergeSearchRadiusPx,
             std::max(static_cast<float>(a.bbox_canvas.width),
                      static_cast<float>(a.bbox_canvas.height)) * 0.5f);
         const auto nearby = group.spatial_index.QueryRadius(
@@ -3028,197 +3026,53 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
 
         for (int id_b : candidate_ids) {
             if (marked_for_removal.count(id_b)) continue;
-            // Avoid duplicate pair evaluation: only process A < B
-            if (id_a > id_b) continue;
+            if (id_a > id_b) continue; // process each pair once
             auto it_b = group.nodes.find(id_b);
             if (it_b == group.nodes.end()) continue;
             const auto& b = *it_b->second;
+            if (b.binary_mask.empty()) continue;
 
+            // Never merge nodes that were created in the same frame
+            // (e.g. "22" — two identical glyphs placed together)
+            if (a.created_frame == b.created_frame) continue;
+
+            // --- Gate: centroid proximity OR any bbox intersection ---
             const float centroid_dist =
                 static_cast<float>(cv::norm(a.centroid_canvas - b.centroid_canvas));
+            const bool bboxes_intersect = !(a.bbox_canvas & b.bbox_canvas).empty();
+            if (centroid_dist > kMergeSearchRadiusPx && !bboxes_intersect) continue;
 
-            // --- Close-proximity duplicate: close centroids + similar bbox dimensions ---
-            const bool proximity_duplicate = kEnableMergeProximityDuplicate &&
-                centroid_dist <= kMergeProximityDistPx &&
-                bbox_dimension_similarity(a.bbox_canvas, b.bbox_canvas)
-                    >= kMergeProximityBboxSimilarity;
+            const int a_px = get_pixel_count(id_a, a.binary_mask);
+            const int b_px = get_pixel_count(id_b, b.binary_mask);
+            if (a_px <= 0 || b_px <= 0) continue;
 
-            // --- Original merge criteria ---
-            const cv::Rect isect = a.bbox_canvas & b.bbox_canvas;
-            const int isect_area = isect.empty() ? 0 : isect.width * isect.height;
-            const int area_a = std::max(1, a.bbox_canvas.width * a.bbox_canvas.height);
-            const int area_b = std::max(1, b.bbox_canvas.width * b.bbox_canvas.height);
-            const int min_area = std::min(area_a, area_b);
+            // Tier 1: canvas-aligned overlap (cheap)
+            float best_overlap = canvas_aligned_overlap(a, b, a_px, b_px);
 
-            const float bbox_overlap = (min_area > 0)
-                ? static_cast<float>(isect_area) / static_cast<float>(min_area) : 0.0f;
-            const int bbox_union_area = area_a + area_b - isect_area;
-            const float bbox_area_ratio = static_cast<float>(min_area) /
-                static_cast<float>(std::max(area_a, area_b));
-            const float bbox_iou = static_cast<float>(isect_area) /
-                static_cast<float>(std::max(1, bbox_union_area));
-
-            const bool near_identical_bbox =
-                bbox_area_ratio >= kMergeBboxAreaRatio && bbox_iou >= kMergeBboxIoU;
-            const float max_dim = static_cast<float>(std::max(
-                std::max(a.bbox_canvas.width, a.bbox_canvas.height),
-                std::max(b.bbox_canvas.width, b.bbox_canvas.height)));
-            const float centroid_limit = std::max(60.0f, max_dim * 0.45f);
-            const float area_ratio = static_cast<float>(
-                std::min(a.area, b.area) / std::max(1.0, std::max(a.area, b.area)));
-
-            const bool maybe_shifted = bbox_overlap < kMergeBboxOverlap &&
-                centroid_dist <= centroid_limit && area_ratio >= kMergeAlignedAreaRatioMin;
-
-            const bool allow_bbox = kEnableMergeNearIdenticalBbox && near_identical_bbox;
-            const bool allow_overlap_shape = kEnableMergeOverlapShapeContainment &&
-                                             bbox_overlap >= kMergeBboxOverlap;
-            const bool allow_shifted = kEnableMergeShiftedDuplicate && maybe_shifted;
-
-            const MaskRelation raw_rel = ComputeMaskRelation(
-                a.bbox_canvas, a.binary_mask, a.centroid_canvas,
-                b.bbox_canvas, b.binary_mask, b.centroid_canvas);
-            const bool smaller_mask_overlap_duplicate = kEnableMergeSmallerMaskOverlap &&
-                raw_rel.valid &&
-                raw_rel.overlap_over_min >= kMergeSmallerMaskOverlapDuplicate;
-
-            // Center-aligned duplicate: align centroids, check AND/min
-            const bool allow_center_aligned = kEnableMergeCenterAlignedDuplicate &&
-                centroid_dist <= centroid_limit;
-            // Side-aligned duplicate: snap to each corner, check AND/min
-            const bool allow_side_aligned = kEnableMergeSideAlignedDuplicate &&
-                centroid_dist <= centroid_limit;
-
-            if (!proximity_duplicate && !allow_bbox && !allow_overlap_shape &&
-                !allow_shifted && !smaller_mask_overlap_duplicate &&
-                !allow_center_aligned && !allow_side_aligned) {
-                continue;
+            // Tier 2: sliding window (only if tier 1 didn't already pass)
+            if (best_overlap < kMergeOverlapThreshold) {
+                best_overlap = std::max(best_overlap,
+                    sliding_window_overlap(a, b, a_px, b_px,
+                                           kMergeSlideMaxX, kMergeSlideMaxY,
+                                           kMergeSlideStepPx));
             }
 
-            bool should_merge = proximity_duplicate || allow_bbox;
-            bool merged_by_alignment = false;
+            if (best_overlap < kMergeOverlapThreshold) continue;
 
-            if (!should_merge) {
-                const double shape_dist = cv::matchShapes(a.contour, b.contour,
-                                                          cv::CONTOURS_MATCH_I2, 0);
-                const float containment_min = raw_rel.valid
-                    ? std::min(raw_rel.overlap_over_first, raw_rel.overlap_over_second)
-                    : 0.0f;
-
-                should_merge = allow_overlap_shape && shape_dist < kMergeShapeDist &&
-                    containment_min >= kMergeContainmentMin;
-
-                if (!should_merge && allow_shifted && shape_dist < kMergeAlignedShapeDist) {
-                    should_merge = compute_aligned_mask_overlap(a, b) >= kMergeAlignedMaskOverlap;
-                }
-
-                if (!should_merge && smaller_mask_overlap_duplicate) {
-                    should_merge = true;
-                }
-
-                // Center-aligned duplicate check
-                if (!should_merge && allow_center_aligned) {
-                    const float center_overlap = compute_center_aligned_overlap(a, b);
-                    if (center_overlap >= kMergeCenterAlignedOverlap) {
-                        should_merge = true;
-                        merged_by_alignment = true;
-                    }
-                }
-
-                // Side-aligned duplicate check
-                if (!should_merge && allow_side_aligned) {
-                    const float side_overlap = compute_side_aligned_overlap(a, b);
-                    if (side_overlap >= kMergeSideAlignedOverlap) {
-                        should_merge = true;
-                        merged_by_alignment = true;
-                    }
-                }
+            // Decide which node to keep: prefer larger mask, break ties by area
+            int keep_id = id_a;
+            int remove_id = id_b;
+            if (b_px > a_px) {
+                std::swap(keep_id, remove_id);
+            } else if (b_px == a_px && b.area > a.area) {
+                std::swap(keep_id, remove_id);
             }
-
-            if (should_merge) {
-                int keep_id = id_a;
-                int remove_id = id_b;
-
-                // Always keep the node with the larger mask area, or if equal, the higher canonical score
-                if (raw_rel.second_px > raw_rel.first_px) {
-                    std::swap(keep_id, remove_id);
-                } else if (raw_rel.second_px == raw_rel.first_px) {
-                    if (canonical_score(b) > canonical_score(a)) {
-                        std::swap(keep_id, remove_id);
-                    }
-                }
-                merge_pairs.emplace_back(keep_id, remove_id);
-                marked_for_removal.insert(remove_id);
-            }
+            merge_pairs.emplace_back(keep_id, remove_id);
+            marked_for_removal.insert(remove_id);
         }
     }
 
-    // --- Canvas-aligned containment check ---
-    // For pairs with intersecting bboxes, check if the smaller mask is
-    // contained in the bigger mask at their actual canvas positions.
-    if (kEnableContainmentFilter) {
-        for (const auto& pair_a : group.nodes) {
-            const int id_a = pair_a.first;
-            if (marked_for_removal.count(id_a)) continue;
-            const auto& a = *pair_a.second;
-            if (a.binary_mask.empty()) continue;
-
-            const auto nearby = group.spatial_index.QueryRadius(
-                a.centroid_canvas,
-                std::max(static_cast<float>(a.bbox_canvas.width),
-                         static_cast<float>(a.bbox_canvas.height)) * 1.5f);
-
-            for (int id_b : nearby) {
-                if (id_b <= id_a) continue;
-                if (marked_for_removal.count(id_b)) continue;
-                auto it_b = group.nodes.find(id_b);
-                if (it_b == group.nodes.end()) continue;
-                const auto& b = *it_b->second;
-                if (b.binary_mask.empty()) continue;
-
-                // Must have intersecting bboxes for containment
-                const cv::Rect isect = a.bbox_canvas & b.bbox_canvas;
-                if (isect.empty()) continue;
-
-                // Determine smaller / larger by pixel area (cached)
-                const int a_px = get_pixel_count(id_a, a.binary_mask);
-                const int b_px = get_pixel_count(id_b, b.binary_mask);
-                const auto& smaller_node = (a_px <= b_px) ? a : b;
-                const auto& bigger_node  = (a_px <= b_px) ? b : a;
-                const int smaller_id = (a_px <= b_px) ? id_a : id_b;
-                const int bigger_id  = (a_px <= b_px) ? id_b : id_a;
-                const int smaller_px = std::min(a_px, b_px);
-                if (smaller_px <= 0) continue;
-
-                // Single canvas-aligned overlap check using intersection ROI
-                const cv::Rect s_local(isect.x - smaller_node.bbox_canvas.x,
-                                       isect.y - smaller_node.bbox_canvas.y,
-                                       isect.width, isect.height);
-                const cv::Rect b_local(isect.x - bigger_node.bbox_canvas.x,
-                                       isect.y - bigger_node.bbox_canvas.y,
-                                       isect.width, isect.height);
-
-                if (s_local.x < 0 || s_local.y < 0 ||
-                    s_local.x + s_local.width > smaller_node.binary_mask.cols ||
-                    s_local.y + s_local.height > smaller_node.binary_mask.rows) continue;
-                if (b_local.x < 0 || b_local.y < 0 ||
-                    b_local.x + b_local.width > bigger_node.binary_mask.cols ||
-                    b_local.y + b_local.height > bigger_node.binary_mask.rows) continue;
-
-                cv::Mat contain_overlap;
-                cv::bitwise_and(smaller_node.binary_mask(s_local),
-                                bigger_node.binary_mask(b_local), contain_overlap);
-                const int overlap_px = cv::countNonZero(contain_overlap);
-                const float ratio = static_cast<float>(overlap_px) /
-                                    static_cast<float>(smaller_px);
-                if (ratio >= kContainThreshold) {
-                    merge_pairs.emplace_back(bigger_id, smaller_id);
-                    marked_for_removal.insert(smaller_id);
-                }
-            }
-        }
-    }
-
+    // --- Apply merges ---
     for (const auto& mp : merge_pairs) {
         auto keep_it = group.nodes.find(mp.first);
         auto remove_it = group.nodes.find(mp.second);

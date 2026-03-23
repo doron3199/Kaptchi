@@ -310,7 +310,7 @@ private:
 
     // Graph matching
     static constexpr float  kMaxAllowedRectangle = 15.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
-    static constexpr float  kStrokeClusterRadius = 70.0f; // Max centroid distance to cluster strokes together.
+    static constexpr float  kStrokeClusterRadius = 1.0f; // Max centroid distance to cluster strokes together.
     static const int        kDilationClusterKernel = 0;    // Dilation kernel size for proximity-based clustering (0 = disabled).
     static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
@@ -318,34 +318,24 @@ private:
     static constexpr double kFrameGraphAnchorShapeDist = 0.20;       // Maximum shape distance for a blob to be trusted as a frame-graph anchor.
     static const int        kFrameGraphAnchorNeighbors = 4;          // Number of nearby matched blobs used to estimate a new blob's canvas position.
 
-    // Duplicate-avoidance toggles
-    static constexpr bool   kEnableMergeProximityDuplicate = true;           // Merge nodes when centroids are close and bbox dimensions are similar.
-    static constexpr bool   kEnableMergeSmallerMaskOverlap = true;          // Merge nodes when smaller mask overlap ratio exceeds threshold.
-    static constexpr bool   kEnableMergeNearIdenticalBbox = false;           // Merge existing nodes when their bbox size and IoU are almost identical.
-    static constexpr bool   kEnableMergeOverlapShapeContainment = false;     // Merge existing nodes when overlap, shape distance, and containment all indicate a duplicate.
-    static constexpr bool   kEnableMergeShiftedDuplicate = false;            // Merge translated duplicates using centroid-aligned mask overlap.
-    static constexpr bool   kEnableCanonicalDuplicateRetention = false;      // Keep the strongest canonical node during merges instead of simply keeping the newest one.
-    static constexpr bool   kEnableMergeCenterAlignedDuplicate = false;     // Merge nodes when center-aligned bitwise AND exceeds threshold (catches shifted duplicates).
-    static constexpr bool   kEnableMergeSideAlignedDuplicate = false;       // Merge nodes when side-attached alignment bitwise AND exceeds threshold.
+    // Duplicate merge (unified: canvas-aligned overlap + sliding window)
     static constexpr bool   kEnableFrameStrokeRejectFilter = true;          // Reject whole frame blobs that touch the side margins or padded lecturer area before graph admission.
-    static constexpr float kToFarToBeSame = 40.0f;
-
-    // Brute-force containment filter (deletes smaller duplicate strokes contained within larger ones)
-    static constexpr bool  kEnableContainmentFilter  = false; // Enable brute-force containment check for duplicate removal (expensive, use with caution)
-    static constexpr float kContainCentroidDist      = 25.0f;  // Max centroid distance to consider pair
-    static constexpr float kContainThreshold         = 0.50f;  // Fraction of smaller mask pixels that must overlap
-    static constexpr int   kContainStepPx            = 2;      // Brute-force slide step size in pixels
+    static constexpr float  kMergeOverlapThreshold    = 0.50f;  // overlap_px / min_pixels to trigger merge
+    static constexpr float  kMergeSearchRadiusPx      = 40.0f;  // Max centroid distance to consider a pair
+    static constexpr int    kMergeSlideMaxX             = 30;    // Horizontal half-range of sliding window (±pixels)
+    static constexpr int    kMergeSlideMaxY             = 15;     // Vertical half-range of sliding window (±pixels)
+    static constexpr int    kMergeSlideStepPx           = 3;     // Step size for sliding window search
 
     // Battle thresholds
-    static constexpr float kBattleCoexistOverlap = 0.15f; // Minimum IoU for a new blob to coexist with an existing node (no refresh or replacement).
-    static constexpr float kBattleRefreshOverlap = 0.6f; // Minimum IoU for an existing node to be refreshed by a new blob with better shape similarity.
+    static constexpr float kBattleCoexistOverlap = 0.10f; // Minimum IoU for a new blob to coexist with an existing node (no refresh or replacement).
+    static constexpr float kBattleRefreshOverlap = 0.3f; // Minimum IoU for an existing node to be refreshed by a new blob with better shape similarity.
     static constexpr float kBattleReplaceOverlap = 0.5f; // Minimum IoU for an existing node to be replaced by a new blob with much better shape similarity.
 
     // KD-Tree + RANSAC matching
     static constexpr double kKdTreeHuDistanceThreshold = 0.9; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kKdTreeMinBboxSimilarity   = 0.70f; // Minimum bounding box similarity for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kRansacInlierTolerancePx   = 5.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
-    static constexpr int    kRansacMaxIterations        = 500; // Maximum RANSAC iterations per blob-node pair
+    static constexpr int    kRansacMaxIterations        = 300; // Maximum RANSAC iterations per blob-node pair
     static constexpr int    kMinRansacInliers           = 3; // Minimum inliers required for a blob-node match to be accepted
     static constexpr int    kKdTreeKnnNeighbors         = 5; // Number of nearest neighbors to retrieve from KD-Tree for each blob during matching
 
