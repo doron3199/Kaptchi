@@ -96,13 +96,6 @@ typedef SetWhiteboardDebug = void Function(bool enabled);
 typedef SetCanvasEnhanceThresholdFunc = Void Function(Float threshold);
 typedef SetCanvasEnhanceThreshold = void Function(double threshold);
 
-// Pipeline mode FFI types
-typedef SetCanvasPipelineModeFunc = Void Function(Int32 mode);
-typedef SetCanvasPipelineMode = void Function(int mode);
-
-typedef GetCanvasPipelineModeFunc = Int32 Function();
-typedef GetCanvasPipelineMode = int Function();
-
 // Sub-canvas navigation FFI types
 typedef GetSubCanvasCountFunc = Int32 Function();
 typedef GetSubCanvasCount = int Function();
@@ -250,9 +243,6 @@ class NativeCameraService {
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
   late SetWhiteboardDebug _setWhiteboardDebug;
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
-  late SetCanvasPipelineMode _setCanvasPipelineMode;
-  late GetCanvasPipelineMode _getCanvasPipelineMode;
-
   // Sub-canvas navigation bindings
   late GetSubCanvasCount _getSubCanvasCount;
   late GetActiveSubCanvasIndex _getActiveSubCanvasIndex;
@@ -356,16 +346,6 @@ class NativeCameraService {
     _setCanvasEnhanceThreshold = _nativeLib
         .lookup<NativeFunction<SetCanvasEnhanceThresholdFunc>>(
           'SetCanvasEnhanceThreshold',
-        )
-        .asFunction();
-    _setCanvasPipelineMode = _nativeLib
-        .lookup<NativeFunction<SetCanvasPipelineModeFunc>>(
-          'SetCanvasPipelineMode',
-        )
-        .asFunction();
-    _getCanvasPipelineMode = _nativeLib
-        .lookup<NativeFunction<GetCanvasPipelineModeFunc>>(
-          'GetCanvasPipelineMode',
         )
         .asFunction();
 
@@ -594,19 +574,6 @@ class NativeCameraService {
   void setCanvasEnhanceThreshold(double threshold) {
     initialize();
     _setCanvasEnhanceThreshold(threshold);
-  }
-
-  /// Set the canvas pipeline mode (0 = Graph, 1 = Chunk).
-  /// Switching mode resets the canvas.
-  void setCanvasPipelineMode(int mode) {
-    initialize();
-    _setCanvasPipelineMode(mode);
-  }
-
-  /// Get the current canvas pipeline mode (0 = Graph, 1 = Chunk).
-  int getCanvasPipelineMode() {
-    initialize();
-    return _getCanvasPipelineMode();
   }
 
   // --- Sub-canvas Navigation Methods ---

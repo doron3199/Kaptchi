@@ -37,43 +37,9 @@ enum class CanvasRenderMode : int {
     kRaw = 1,
 };
 
-enum class CanvasPipelineMode : int {
-    kGraph = 0,   // Graph-based entity pipeline (default)
-    kChunk = 1,   // Chunk-based tile pipeline ("picture")
-};
 
 // ---------------------------------------------------------------------------
-// Chunk -- one fixed-size tile of the virtual infinite whiteboard (chunk pipeline)
-// ---------------------------------------------------------------------------
-struct Chunk {
-    cv::Mat stroke_canvas;   // CV_8UC3, white-initialized, kChunkWidth x chunk_height_
-    cv::Mat absence_counter; // CV_8UC1, zero-initialized, tracking erase frames
-    cv::Mat raw_canvas;      // CV_8UC3, white-initialized raw mosaic tile
-    int grid_x;
-    int grid_y;
-};
-
-// ---------------------------------------------------------------------------
-// CandidateNode -- Tentative drawing; must be confirmed k frames before promotion
-// ---------------------------------------------------------------------------
-struct CandidateNode {
-    int id = -1;                        // Unique candidate ID
-    cv::Mat binary_mask;                // CV_8UC1, tight to bbox
-    cv::Mat color_pixels;               // CV_8UC3, tight to bbox (for raw mode)
-    cv::Rect bbox_canvas;               // Bounding box in canvas coordinates
-    cv::Point2f centroid_canvas;        // Centroid in canvas coordinates
-    std::vector<cv::Point> contour;     // Contour points (relative to bbox origin)
-    double hu[7] = {};                  // Hu Moments for matching
-    double area = 0.0;                  // Pixel area
-    int seen_count = 1;                 // Frames this candidate was confirmed
-    int absence_count = 0;              // Consecutive processed frames where the candidate was not re-seen
-    int last_seen_frame = 0;            // Last frame where this candidate was seen
-    int created_frame = 0;              // Frame this candidate was first seen
-    std::vector<int> anchor_node_ids;   // Neighbor graph nodes used for placement
-};
-
-// ---------------------------------------------------------------------------
-// DrawingNode -- A single drawing entity on the canvas (replaces Chunk pixels)
+// DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
 static constexpr float kAbsenceScoreInitial = 3.5f;
 
@@ -211,13 +177,6 @@ struct WhiteboardGroup {
     int next_node_id = 0;
     SpatialIndex spatial_index{200};
 
-    // Candidate pool — blobs awaiting confirmation across multiple frames
-    std::unordered_map<int, std::unique_ptr<CandidateNode>> candidates;
-    int next_candidate_id = 0;
-
-    // --- Chunk pipeline data ---
-    std::unordered_map<uint64_t, std::unique_ptr<Chunk>> chunks;
-
     // Stroke view bounds (in pixels)
     int stroke_min_px_x = 0;
     int stroke_min_px_y = 0;
@@ -255,6 +214,7 @@ struct CanvasWorkItem {
 // WhiteboardCanvas
 // ---------------------------------------------------------------------------
 class WhiteboardCanvas {
+
 public:
     WhiteboardCanvas();
     ~WhiteboardCanvas();
@@ -275,8 +235,6 @@ public:
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
     CanvasRenderMode GetRenderMode() const;
-    void SetPipelineMode(CanvasPipelineMode mode);
-    CanvasPipelineMode GetPipelineMode() const;
     bool IsRemoteProcess() const;
     cv::Size GetCanvasSize() const;
     uint64_t GetCanvasVersion() const { return canvas_version_.load(std::memory_order_relaxed); }
@@ -317,24 +275,18 @@ public:
                                     int anchor_id_b);
     bool CopyGraphDebugSnapshot(int source_slot, int target_slot);
 
+    // --- Exposed merge function for .cpp usage ---
+    void MergeOverlappingNodes(WhiteboardGroup& group, int current_frame, bool& graph_changed);
+
 private:
     // -----------------------------------------------------------------------
     // Tuning constants
     // -----------------------------------------------------------------------
 
-    static constexpr bool kShowGraphOverlay = false;  // Compile-time toggle for graph debug overlay on canvas
+    static constexpr bool kShowGraphOverlay = true;  // Compile-time toggle for graph debug overlay on canvas
 
     static constexpr bool kEnableMotionGate = true; // Skip frames when motion exceeds kMaxMotionFraction.
     static constexpr float kMaxMotionFraction = 0.08f;
-
-    // Alignment improvements
-    // Merge duplicate threshold: max centroid distance to consider nodes as potentially same
-    static constexpr bool  kEnableJumpRejection      = false; // Reject matches with implausibly large jumps (pre-RANSAC)
-    static constexpr bool  kEnableNeighborBinMerge    = false; // Reject matches with implausibly large jumps (pre-RANSAC)
-    static constexpr bool  kEnablePhaseCorrelation    = false; // Reject matches with implausibly large jumps (pre-RANSAC)
-
-    static constexpr float kMaxJumpPx              = 200.0f;
-    static const int       kVoteBinSize            = 5;
 
     // Sub-canvas creation
     static const int       kMinStrokePixelsForNewSC = 500;
@@ -357,16 +309,18 @@ private:
     static const int        kGraphSeedCandidateLimit = 24;
 
     // Graph matching
-    static constexpr float  kMaxAllowedRectangle = 1500.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
+    static constexpr float  kMaxAllowedRectangle = 15.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
     static constexpr float  kStrokeClusterRadius = 70.0f; // Max centroid distance to cluster strokes together.
-    static const int        kDilationClusterKernel = 15;    // Dilation kernel size for proximity-based clustering (0 = disabled).
+    static const int        kDilationClusterKernel = 0;    // Dilation kernel size for proximity-based clustering (0 = disabled).
     static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
-    static const int        kKNeighbors = 5; // Number of nearest graph nodes to consider when matching a blob, and number of neighbors to store for each node.
+    static const int        kKNeighbors = 10; // Number of nearest graph nodes to consider when matching a blob, and number of neighbors to store for each node.
     static constexpr double kFrameGraphAnchorShapeDist = 0.20;       // Maximum shape distance for a blob to be trusted as a frame-graph anchor.
     static const int        kFrameGraphAnchorNeighbors = 4;          // Number of nearby matched blobs used to estimate a new blob's canvas position.
 
     // Duplicate-avoidance toggles
+    static constexpr bool   kEnableMergeProximityDuplicate = true;           // Merge nodes when centroids are close and bbox dimensions are similar.
+    static constexpr bool   kEnableMergeSmallerMaskOverlap = true;          // Merge nodes when smaller mask overlap ratio exceeds threshold.
     static constexpr bool   kEnableMergeNearIdenticalBbox = false;           // Merge existing nodes when their bbox size and IoU are almost identical.
     static constexpr bool   kEnableMergeOverlapShapeContainment = false;     // Merge existing nodes when overlap, shape distance, and containment all indicate a duplicate.
     static constexpr bool   kEnableMergeShiftedDuplicate = false;            // Merge translated duplicates using centroid-aligned mask overlap.
@@ -378,8 +332,8 @@ private:
 
     // Brute-force containment filter (deletes smaller duplicate strokes contained within larger ones)
     static constexpr bool  kEnableContainmentFilter  = false; // Enable brute-force containment check for duplicate removal (expensive, use with caution)
-    static constexpr float kContainCentroidDist      = 10.0f;  // Max centroid distance to consider pair
-    static constexpr float kContainThreshold         = 0.30f;  // Fraction of smaller mask pixels that must overlap
+    static constexpr float kContainCentroidDist      = 25.0f;  // Max centroid distance to consider pair
+    static constexpr float kContainThreshold         = 0.50f;  // Fraction of smaller mask pixels that must overlap
     static constexpr int   kContainStepPx            = 2;      // Brute-force slide step size in pixels
 
     // Battle thresholds
@@ -390,7 +344,7 @@ private:
     // KD-Tree + RANSAC matching
     static constexpr double kKdTreeHuDistanceThreshold = 0.9; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kKdTreeMinBboxSimilarity   = 0.70f; // Minimum bounding box similarity for a blob-node pair to be considered a potential match (pre-RANSAC).
-    static constexpr float  kRansacInlierTolerancePx   = 15.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
+    static constexpr float  kRansacInlierTolerancePx   = 5.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
     static constexpr int    kRansacMaxIterations        = 500; // Maximum RANSAC iterations per blob-node pair
     static constexpr int    kMinRansacInliers           = 3; // Minimum inliers required for a blob-node match to be accepted
     static constexpr int    kKdTreeKnnNeighbors         = 5; // Number of nearest neighbors to retrieve from KD-Tree for each blob during matching
@@ -403,14 +357,6 @@ private:
 
     // Camera tracking — velocity smoothing
     static constexpr float kVelocitySmoothingAlpha  = 0.3f;  // EMA alpha for velocity
-    static constexpr float kMaxPredictedJumpPx      = 400.0f; // Absolute cap on velocity-predicted jump
-
-    // Candidate confirmation (new-stroke patience)
-    static constexpr bool   kEnableCandidateStaging = false;      // Temporary bypass: add anchored new blobs directly to the graph.
-    static const int       kCandidateConfirmFrames = 3;   // Frames a blob must appear before becoming a node
-    static const int       kCandidateExpireFrames  = 1;   // Consecutive processed frames without confirmation before a candidate is discarded
-    static constexpr float kCandidateMatchRadiusPx = 30.0f; // Max centroid distance to match blob to candidate
-    static constexpr double kCandidateMatchShapeDist = 0.35; // Max shape distance to match blob to candidate
 
     static const int       kGraphDebugCompareSnapshotCount = 2;
     static const int       kGraphDebugResultSnapshotSlot = 2;
@@ -419,50 +365,6 @@ private:
     // Canvas defaults
     static const int kDefaultCanvasWidth = 1920;
     static const int kDefaultCanvasHeight = 1080;
-
-    // -----------------------------------------------------------------------
-    // Chunk pipeline constants
-    // -----------------------------------------------------------------------
-    static constexpr bool  kChunkEnableTemplateRefinement = true;
-    static const int       kChunkTemplateMatchPatchSize   = 64;
-    static const int       kChunkTemplateMatchSearchRadius = 15;
-    static constexpr float kChunkTemplateMaxCorrection    = 10.0f;
-    static constexpr bool  kChunkEnableJumpRejection      = false;
-    static constexpr bool  kChunkEnableNeighborBinMerge   = false;
-    static constexpr float kChunkMaxJumpPx              = 40.0f;
-    static const int       kChunkMinShapeVotes           = 5;
-    static constexpr double kChunkMaxShapeDist           = 0.9;
-    static constexpr float kChunkRectangleThreshold      = 3.0f;
-    static const int       kChunkFailedMatchPatience     = 10;
-    static const int       kChunkStillFramePatience      = 8;
-
-    // Anti-ghosting layers (chunk pipeline)
-    static constexpr bool  kEnableProximitySuppression = true;
-    static constexpr bool  kEnableGridReplace          = true;
-    static constexpr bool  kEnableGhostBlock           = true;
-    static constexpr bool  kEnableAbsenceErasure       = true;
-    static const int       kProximityRadius     = 30;
-    static const int       kGridCellSize        = 100;
-    static const int       kMinCellStrokePixels = 50;
-    static constexpr float kCellReplaceIoU      = 0.40f;
-    static constexpr float kCellGhostOverlap    = 0.35f;
-    static const int       kAbsenceEraseFrames  = 5;
-    static const int       kAbsenceEraseThr     = 10;
-
-    // Raw canvas quality (chunk pipeline)
-    static constexpr bool  kEnableBlurRejection   = true;
-    static constexpr bool  kEnableRawEdgeFeather   = false;
-    static constexpr float kBlurThreshold          = 30.0f;
-    static const int       kRawEdgeMargin          = 30;
-    static const int       kRawFeatherWidth        = 40;
-
-    // Chunk Grid constants
-    static const int kChunkWidth = 512;
-    int chunk_height_ = 0;  // Set on first frame to frame_h_
-
-    static const int kReferenceHeight = 1080;
-    int ScalePx(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight)); }
-    int ScaleArea(int ref_val) const { return std::max(1, (int)std::round((float)ref_val * frame_h_ / kReferenceHeight * frame_h_ / kReferenceHeight)); }
 
     // -----------------------------------------------------------------------
     // Sub-canvas collection (protected by state_mutex_)
@@ -508,25 +410,13 @@ private:
     std::atomic<bool> has_content_{false};
     std::atomic<bool> canvas_view_mode_{false};
     std::atomic<int>  render_mode_{static_cast<int>(CanvasRenderMode::kRaw)};
-    std::atomic<int>  pipeline_mode_{static_cast<int>(CanvasPipelineMode::kGraph)};
     std::atomic<uint64_t> canvas_version_{0};
 
     void BumpCanvasVersion() { canvas_version_.fetch_add(1, std::memory_order_relaxed); }
 
     // -----------------------------------------------------------------------
-    // Chunk pipeline state
+    // Graph debug snapshot state
     // -----------------------------------------------------------------------
-    struct ContourShape {
-        std::vector<cv::Point> contour;
-        cv::Point2f            centroid;
-        double                 hu[7];
-        double                 area = 0.0;
-    };
-    std::vector<ContourShape> canvas_contours_;
-    bool canvas_contours_dirty_ = true;
-    int  consecutive_failed_matches_ = 0;
-    float last_match_accuracy_ = 0.0f;
-    cv::Mat prev_frame_gray_;  // for LK flow (chunk pipeline)
     std::array<std::unique_ptr<WhiteboardGroup>, kGraphDebugSnapshotCount>
         graph_debug_snapshots_;
     int graph_debug_snapshot_frame_id_ = 0;
@@ -546,8 +436,7 @@ private:
         kGraphMatch,
         kCameraUpdate,
         kGraphUpdate,
-        kMatchedRefresh,
-        kCandidateProcess,
+        kMatchedRefresh,        
         kMergeNodes,
         kAbsenceTracking,
         kNeighborRebuild,
@@ -635,14 +524,7 @@ private:
                                const cv::Rect& cropped_frame,
                                int current_frame,
                                bool& graph_changed);
-    void MergeOverlappingNodes(WhiteboardGroup& group,
-                               int current_frame,
-                               bool& graph_changed);
     static void RemoveNodeFromGraph(WhiteboardGroup& group, int node_id);
-
-    // Phase correlation using nearby node masks
-    cv::Mat GetCanvasGrayRegion(WhiteboardGroup& group, int global_x, int global_y,
-                                int width, int height);
 
     // Rendering from graph nodes
     void RebuildStrokeRenderCache(WhiteboardGroup& group);
@@ -658,45 +540,6 @@ private:
 
     // Update bounds from all nodes
     void UpdateGroupBounds(WhiteboardGroup& group);
-
-    // -----------------------------------------------------------------------
-    // Chunk pipeline methods
-    // -----------------------------------------------------------------------
-    void ProcessFrameChunk(const cv::Mat& frame, const cv::Mat& gray,
-                           const cv::Mat& person_mask, float motion_fraction);
-
-    // Contour helpers (chunk pipeline)
-    std::vector<ContourShape> ExtractContourShapes(const cv::Mat& binary,
-                                                   cv::Point2f roi_offset) const;
-    void RebuildCanvasContours(WhiteboardGroup& group);
-    bool MatchContours(const std::vector<ContourShape>& frame_contours,
-                       const std::vector<ContourShape>& canvas_contours,
-                       cv::Point2f& out_pos, int& out_votes, int binSize);
-
-    // Sub-pixel refinement (chunk pipeline)
-    bool RefineWithTemplate(WhiteboardGroup& group, const cv::Mat& binary, const cv::Mat& gray,
-                            cv::Point2f& pos);
-
-    // Chunk Grid management
-    uint64_t GetChunkHash(int grid_x, int grid_y) const;
-    void EnsureChunkAllocated(WhiteboardGroup& group, int grid_x, int grid_y);
-
-    // Chunk painting
-    void PaintStrokesToChunks(WhiteboardGroup& group, const cv::Mat& binary,
-                              const cv::Mat& enhanced_bgr, cv::Point2f camera_pos,
-                              const cv::Mat& no_update_mask = cv::Mat());
-    void PaintRawFrameToChunks(WhiteboardGroup& group, const cv::Mat& frame_bgr,
-                               cv::Point2f camera_pos,
-                               const cv::Mat& no_update_mask = cv::Mat());
-
-    // Chunk render caches
-    void RebuildStrokeRenderCacheChunk(WhiteboardGroup& group);
-    void RebuildRawRenderCacheChunk(WhiteboardGroup& group);
-
-    // Create new group (chunk pipeline)
-    void CreateSubCanvasChunk(const cv::Mat& frame_bgr, const cv::Mat& binary,
-                              const cv::Mat& enhanced_bgr,
-                              const std::vector<ContourShape>& seed_contours);
 
     int processed_frame_id_ = 0;
 };
@@ -738,10 +581,6 @@ extern "C" {
 
     __declspec(dllexport) void    SetWhiteboardDebug(bool enabled);
     __declspec(dllexport) void    SetCanvasEnhanceThreshold(float threshold);
-
-    // Pipeline mode FFI
-    __declspec(dllexport) void    SetCanvasPipelineMode(int mode);
-    __declspec(dllexport) int     GetCanvasPipelineMode();
 
     // Graph debug FFI
     __declspec(dllexport) int     GetGraphNodeCount();

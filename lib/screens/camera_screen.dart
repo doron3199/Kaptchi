@@ -100,7 +100,6 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
   double? _canvasAspectRatio; // null = use default 16:9
-  int _pipelineMode = 0; // 0=Graph, 1=Chunk
   Timer? _canvasPollTimer;
   // Notifier for canvas navigation state — updated by the poll timer without
   // a full setState rebuild (prevents live-view flicker).
@@ -1317,27 +1316,6 @@ class _CameraScreenState extends State<CameraScreen>
                 icon: const Icon(Icons.photo_camera, color: Colors.amber),
                 tooltip: 'Capture full canvas',
                 onPressed: _captureFullCanvas,
-              ),
-            // Pipeline mode toggle: Graph vs Chunk (only visible when whiteboard mode is active)
-            if (Platform.isWindows && _isWhiteboardMode)
-              IconButton(
-                icon: Icon(
-                  _pipelineMode == 0
-                      ? Icons.account_tree
-                      : Icons.grid_view,
-                  color: _pipelineMode == 0
-                      ? Colors.teal
-                      : Colors.orange,
-                ),
-                tooltip: _pipelineMode == 0
-                    ? 'Switch to Picture mode'
-                    : 'Switch to Graph mode',
-                onPressed: () {
-                  setState(() {
-                    _pipelineMode = (_pipelineMode + 1) % 2;
-                  });
-                  NativeCameraService().setCanvasPipelineMode(_pipelineMode);
-                },
               ),
             // Reset Whiteboard (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)

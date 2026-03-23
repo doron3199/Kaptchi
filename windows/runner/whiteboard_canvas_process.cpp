@@ -51,7 +51,6 @@ struct SharedState {
     LONG whiteboard_enabled = 0;
     LONG canvas_view_mode = 0;
     LONG render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
-    LONG pipeline_mode = static_cast<LONG>(CanvasPipelineMode::kGraph);
     LONG whiteboard_debug = 0;
     LONG reset_requested = 0;
     LONG pending_active_subcanvas = kNoSubCanvasRequest;
@@ -107,7 +106,6 @@ struct HelperStateSnapshot {
     bool enabled = false;
     bool canvas_view_mode = false;
     CanvasRenderMode render_mode = CanvasRenderMode::kStroke;
-    CanvasPipelineMode pipeline_mode = CanvasPipelineMode::kGraph;
     bool debug_enabled = false;
     bool reset_requested = false;
     int requested_active_subcanvas = kNoSubCanvasRequest;
@@ -239,7 +237,6 @@ public:
 
             canvas.SetCanvasViewMode(snapshot.canvas_view_mode);
             canvas.SetRenderMode(snapshot.render_mode);
-            canvas.SetPipelineMode(snapshot.pipeline_mode);
 
             if (snapshot.reset_requested) {
                 canvas.Reset();
@@ -373,13 +370,6 @@ private:
         snapshot.render_mode = shared_->render_mode == static_cast<LONG>(CanvasRenderMode::kRaw)
             ? CanvasRenderMode::kRaw
             : CanvasRenderMode::kStroke;
-        {
-            int pm = static_cast<int>(shared_->pipeline_mode);
-            if (pm == static_cast<int>(CanvasPipelineMode::kChunk))
-                snapshot.pipeline_mode = CanvasPipelineMode::kChunk;
-            else
-                snapshot.pipeline_mode = CanvasPipelineMode::kGraph;
-        }
         snapshot.debug_enabled = shared_->whiteboard_debug != 0;
         snapshot.reset_requested = shared_->reset_requested != 0;
         snapshot.requested_active_subcanvas = shared_->pending_active_subcanvas;
@@ -556,7 +546,6 @@ struct WhiteboardCanvasHelperClient::Impl {
     std::atomic<bool> cached_has_content{false};
     std::atomic<bool> cached_canvas_view_mode{false};
     std::atomic<int> cached_render_mode{static_cast<int>(CanvasRenderMode::kStroke)};
-    std::atomic<int> cached_pipeline_mode{static_cast<int>(CanvasPipelineMode::kGraph)};
     std::atomic<int> cached_canvas_width{kDefaultCanvasWidth};
     std::atomic<int> cached_canvas_height{kDefaultCanvasHeight};
     std::atomic<int> cached_subcanvas_count{0};
@@ -577,8 +566,6 @@ struct WhiteboardCanvasHelperClient::Impl {
                                       std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(shared->render_mode),
                                  std::memory_order_relaxed);
-        cached_pipeline_mode.store(static_cast<int>(shared->pipeline_mode),
-                                   std::memory_order_relaxed);
         cached_canvas_width.store(std::max(1L, shared->canvas_width),
                                   std::memory_order_relaxed);
         cached_canvas_height.store(std::max(1L, shared->canvas_height),
@@ -594,8 +581,6 @@ struct WhiteboardCanvasHelperClient::Impl {
         cached_canvas_view_mode.store(false, std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(CanvasRenderMode::kStroke),
                                  std::memory_order_relaxed);
-        cached_pipeline_mode.store(static_cast<int>(CanvasPipelineMode::kGraph),
-                                   std::memory_order_relaxed);
         cached_canvas_width.store(kDefaultCanvasWidth, std::memory_order_relaxed);
         cached_canvas_height.store(kDefaultCanvasHeight, std::memory_order_relaxed);
         cached_subcanvas_count.store(0, std::memory_order_relaxed);
@@ -664,7 +649,6 @@ bool WhiteboardCanvasHelperClient::Start() {
     std::memset(impl_->shared, 0, sizeof(SharedState));
     impl_->shared->magic = kSharedMagic;
     impl_->shared->render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
-    impl_->shared->pipeline_mode = static_cast<LONG>(CanvasPipelineMode::kGraph);
     impl_->shared->pending_active_subcanvas = kNoSubCanvasRequest;
     impl_->shared->pan_x = 0.5f;
     impl_->shared->pan_y = 0.5f;
@@ -940,21 +924,6 @@ CanvasRenderMode WhiteboardCanvasHelperClient::GetRenderMode() const {
             static_cast<int>(CanvasRenderMode::kRaw)
         ? CanvasRenderMode::kRaw
         : CanvasRenderMode::kStroke;
-}
-
-void WhiteboardCanvasHelperClient::SetPipelineMode(int mode) {
-    if (!IsReady()) return;
-    impl_->cached_pipeline_mode.store(mode, std::memory_order_relaxed);
-    impl_->WithLock(20, [&]() {
-        impl_->shared->pipeline_mode = static_cast<LONG>(mode);
-        impl_->RefreshCachedStateUnsafe();
-    });
-    impl_->SignalHelper();
-}
-
-int WhiteboardCanvasHelperClient::GetPipelineMode() const {
-    if (!IsReady()) return static_cast<int>(CanvasPipelineMode::kGraph);
-    return impl_->cached_pipeline_mode.load(std::memory_order_relaxed);
 }
 
 cv::Size WhiteboardCanvasHelperClient::GetCanvasSize() const {
