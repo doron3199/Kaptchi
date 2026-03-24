@@ -1066,11 +1066,13 @@ static void BuildFrameBlobNeighborGraph(std::vector<FrameBlob>& blobs, int k) {
 
 static void FilterFrameBlobsForCanvas(std::vector<FrameBlob>& blobs,
                                       const cv::Mat& reject_mask,
-                                      int neighbor_count) {
+                                      int neighbor_count,
+                                      float cluster_radius) {
     if (blobs.empty()) {
         return;
     }
 
+    // Step 1: Remove blobs touching the reject mask (side margins / lecturer)
     blobs.erase(
         std::remove_if(
             blobs.begin(),
@@ -1079,6 +1081,38 @@ static void FilterFrameBlobsForCanvas(std::vector<FrameBlob>& blobs,
                 return BlobTouchesRejectMask(blob, reject_mask);
             }),
         blobs.end());
+
+    // Step 2: Remove unmatched blobs whose centroid is within
+    //         cluster_radius of an already-matched blob.
+    //         This prevents ghost duplicates near established strokes.
+    if (cluster_radius > 0.0f) {
+        const float r2 = cluster_radius * cluster_radius;
+
+        // Collect centroids of matched blobs
+        std::vector<cv::Point2f> matched_centroids;
+        matched_centroids.reserve(blobs.size());
+        for (const auto& b : blobs) {
+            if (b.matched_node_id >= 0) {
+                matched_centroids.push_back(b.centroid);
+            }
+        }
+
+        if (!matched_centroids.empty()) {
+            blobs.erase(
+                std::remove_if(
+                    blobs.begin(),
+                    blobs.end(),
+                    [&](const FrameBlob& blob) {
+                        if (blob.matched_node_id >= 0) return false; // keep matched
+                        for (const auto& mc : matched_centroids) {
+                            cv::Point2f d = blob.centroid - mc;
+                            if (d.x * d.x + d.y * d.y <= r2) return true;
+                        }
+                        return false;
+                    }),
+                blobs.end());
+        }
+    }
 
     BuildFrameBlobNeighborGraph(blobs, neighbor_count);
 }
@@ -1981,7 +2015,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
     }
 
     if (kEnableFrameStrokeRejectFilter) {
-        FilterFrameBlobsForCanvas(blobs, stroke_reject_mask, kKNeighbors);
+        FilterFrameBlobsForCanvas(blobs, stroke_reject_mask, kKNeighbors, kStrokeClusterRadius);
     }
 
     // -------------------------------------------------------------------
@@ -2763,7 +2797,7 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
             // Query nearby existing nodes and check Hu shape distance + bbox similarity.
             // If a similar node exists, refresh it instead of creating a duplicate.
             // Skip nodes created this same frame (e.g. "22").
-            static constexpr double kPreAdmitMaxShapeDist = 0.35;
+            static constexpr double kPreAdmitMaxShapeDist = 1.5;
             static constexpr float  kPreAdmitMinBboxSim   = 0.70f;
 
             const cv::Point2f canvas_centroid = blob.centroid + final_offset;
@@ -2827,7 +2861,7 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
                         node.seen_count++;
                         node.max_area_seen = std::max(node.max_area_seen, blob.area);
                         node.absence_score = std::min(
-                            node.absence_score + 1.0f, kAbsenceScoreInitial);
+                            node.absence_score + 1.0f, kAbsenceScoreMax);
 
                         if (overlap_iou >= kBattleRefreshOverlap &&
                             blob.area > node.area) {
@@ -3780,7 +3814,7 @@ bool WhiteboardCanvas::CaptureGraphDebugSnapshot(int slot,
     std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame_roi);
     EnhanceFrameBlobs(blobs, frame_roi, g_canvas_enhance_threshold.load());
     if (kEnableFrameStrokeRejectFilter) {
-        FilterFrameBlobsForCanvas(blobs, stroke_reject_mask, kKNeighbors);
+        FilterFrameBlobsForCanvas(blobs, stroke_reject_mask, kKNeighbors, kStrokeClusterRadius);
     }
 
     auto snapshot = std::make_unique<WhiteboardGroup>();

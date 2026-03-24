@@ -42,6 +42,7 @@ enum class CanvasRenderMode : int {
 // DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
 static constexpr float kAbsenceScoreInitial = 3.5f;
+static constexpr float kAbsenceScoreMax = 10.0f;
 
 struct DrawingNode {
     int id = -1;                        // Unique ID within group
@@ -283,10 +284,10 @@ private:
     // Tuning constants
     // -----------------------------------------------------------------------
 
-    static constexpr bool kShowGraphOverlay = true;  // Compile-time toggle for graph debug overlay on canvas
+    static constexpr bool kShowGraphOverlay = false;  // Compile-time toggle for graph debug overlay on canvas
 
     static constexpr bool kEnableMotionGate = true; // Skip frames when motion exceeds kMaxMotionFraction.
-    static constexpr float kMaxMotionFraction = 0.08f;
+    static constexpr float kMaxMotionFraction = 0.05f;
 
     // Sub-canvas creation
     static const int       kMinStrokePixelsForNewSC = 500;
@@ -310,7 +311,7 @@ private:
 
     // Graph matching
     static constexpr float  kMaxAllowedRectangle = 15.0f;  // Max bbox aspect ratio (long/short); blobs above this are skipped (filters whiteboard edge lines).
-    static constexpr float  kStrokeClusterRadius = 1.0f; // Max centroid distance to cluster strokes together.
+    static constexpr float  kStrokeClusterRadius = 70.0f; // Max centroid distance to cluster strokes together.
     static const int        kDilationClusterKernel = 0;    // Dilation kernel size for proximity-based clustering (0 = disabled).
     static constexpr float  kSquareSelectionRadiusThreshold = 15.0f; // Min radius to prefer squarest stroke
     static const int        kMatchSearchRadius = 120; // Maximum centroid distance (in pixels) for a blob to be considered a potential match to a graph node.
@@ -320,7 +321,7 @@ private:
 
     // Duplicate merge (unified: canvas-aligned overlap + sliding window)
     static constexpr bool   kEnableFrameStrokeRejectFilter = true;          // Reject whole frame blobs that touch the side margins or padded lecturer area before graph admission.
-    static constexpr float  kMergeOverlapThreshold    = 0.50f;  // overlap_px / min_pixels to trigger merge
+    static constexpr float  kMergeOverlapThreshold    = 0.60f;  // overlap_px / min_pixels to trigger merge
     static constexpr float  kMergeSearchRadiusPx      = 40.0f;  // Max centroid distance to consider a pair
     static constexpr int    kMergeSlideMaxX             = 30;    // Horizontal half-range of sliding window (±pixels)
     static constexpr int    kMergeSlideMaxY             = 15;     // Vertical half-range of sliding window (±pixels)
@@ -334,13 +335,13 @@ private:
     // KD-Tree + RANSAC matching
     static constexpr double kKdTreeHuDistanceThreshold = 0.9; // Maximum Hu Moments distance for a blob-node pair to be considered a potential match (pre-RANSAC).
     static constexpr float  kKdTreeMinBboxSimilarity   = 0.70f; // Minimum bounding box similarity for a blob-node pair to be considered a potential match (pre-RANSAC).
-    static constexpr float  kRansacInlierTolerancePx   = 5.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
+    static constexpr float  kRansacInlierTolerancePx   = 10.0f; // Maximum allowed pixel error for a blob-node pair to be considered an inlier in RANSAC.
     static constexpr int    kRansacMaxIterations        = 300; // Maximum RANSAC iterations per blob-node pair
     static constexpr int    kMinRansacInliers           = 3; // Minimum inliers required for a blob-node match to be accepted
     static constexpr int    kKdTreeKnnNeighbors         = 5; // Number of nearest neighbors to retrieve from KD-Tree for each blob during matching
 
     // Frame-to-canvas merge depth
-    static constexpr int    kMaxNewBlobHopDepth         = 3; // Max BFS hops from a matched blob to admit unmatched blobs as new nodes
+    static constexpr int    kMaxNewBlobHopDepth         = 2; // Max BFS hops from a matched blob to admit unmatched blobs as new nodes
 
     // Camera tracking — vote confidence
     static const int       kMinVotesForCameraUpdate = 3;  // Minimum matched pairs to trust position
