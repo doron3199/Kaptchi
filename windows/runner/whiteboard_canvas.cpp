@@ -460,7 +460,7 @@ static int CopyGraphNodesToBuffer(const WhiteboardGroup& group,
         if (count >= max_nodes) break;
 
         const DrawingNode& node = *pair.second;
-        float* cursor = buffer + count * 15;
+        float* cursor = buffer + count * 16;
         cursor[0] = static_cast<float>(node.id);
         cursor[1] = static_cast<float>(node.bbox_canvas.x);
         cursor[2] = static_cast<float>(node.bbox_canvas.y);
@@ -476,6 +476,7 @@ static int CopyGraphNodesToBuffer(const WhiteboardGroup& group,
         cursor[12] = static_cast<float>(group.stroke_min_px_x);
         cursor[13] = static_cast<float>(group.stroke_min_px_y);
         cursor[14] = static_cast<float>(node.match_distance);
+        cursor[15] = node.user_locked ? 1.0f : 0.0f;
         count++;
     }
 
@@ -2669,6 +2670,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
             node.absence_score = node.absence_score * (1.0f - kAbsenceAlphaAbsent)
                                + (-1.0f) * kAbsenceAlphaAbsent;
             if (node.absence_score < 0.0f) {
+                if (node.user_locked) continue;  // User edits win — skip removal
                 nodes_to_remove.push_back(nid);
             }
         }
@@ -2842,6 +2844,12 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
             }
 
             if (existing_match_id >= 0) {
+                // Skip blobs matching a user-deleted node
+                if (group.user_deleted_ids.count(existing_match_id) > 0) {
+                    placed.push_back(blob_index);
+                    placed_any = true;
+                    continue;
+                }
                 auto nit = group.nodes.find(existing_match_id);
                 if (nit != group.nodes.end()) {
                     auto& node = *nit->second;
@@ -2863,7 +2871,8 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
                         node.absence_score = std::min(
                             node.absence_score + 1.0f, kAbsenceScoreMax);
 
-                        if (overlap_iou >= kBattleRefreshOverlap &&
+                        if (!node.user_locked &&
+                            overlap_iou >= kBattleRefreshOverlap &&
                             blob.area > node.area) {
                             // Strong overlap + bigger blob: refresh visuals
                             RefreshNodeFromBlob(group, node, blob,
@@ -3092,6 +3101,9 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
             }
 
             if (best_overlap < kMergeOverlapThreshold) continue;
+
+            // Never merge user-edited nodes
+            if (a.user_locked || b.user_locked) continue;
 
             // Decide which node to keep: prefer larger mask, break ties by area
             int keep_id = id_a;
@@ -3748,12 +3760,137 @@ bool WhiteboardCanvas::MoveGraphNode(int node_id, float new_cx, float new_cy) {
     // Re-insert into spatial index
     group.spatial_index.Insert(node.id, node.centroid_canvas);
 
+    // Mark as user-edited — immune to pipeline changes
+    node.user_locked = true;
+
     // Mark caches dirty
     group.stroke_cache_dirty = true;
     group.raw_cache_dirty = true;
     BumpCanvasVersion();
 
     return true;
+}
+
+bool WhiteboardCanvas::DeleteGraphNode(int node_id) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return false;
+
+    auto& group = *groups_[gi];
+    auto it = group.nodes.find(node_id);
+    if (it == group.nodes.end()) return false;
+
+    group.user_deleted_ids.insert(node_id);
+    RemoveNodeFromGraph(group, node_id);
+    group.stroke_cache_dirty = true;
+    group.raw_cache_dirty = true;
+    BumpCanvasVersion();
+    return true;
+}
+
+bool WhiteboardCanvas::ApplyUserEdits(const int* delete_ids, int delete_count,
+                                      const float* moves, int move_count) {
+    if (remote_process_ && helper_client_) {
+        return helper_client_->ApplyUserEdits(delete_ids, delete_count, moves, move_count);
+    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) {
+        OutputDebugStringA(("[ApplyUserEdits] FAIL: no valid group. gi=" +
+            std::to_string(gi) + " active=" + std::to_string(active_group_idx_) +
+            " view=" + std::to_string(view_group_idx_) +
+            " canvas_view=" + std::to_string(canvas_view_mode_.load()) +
+            " groups=" + std::to_string(groups_.size()) + "\n").c_str());
+        return false;
+    }
+
+    auto& group = *groups_[gi];
+    bool changed = false;
+
+    OutputDebugStringA(("[ApplyUserEdits] gi=" + std::to_string(gi) +
+        " deletes=" + std::to_string(delete_count) +
+        " moves=" + std::to_string(move_count) +
+        " nodes_before=" + std::to_string(group.nodes.size()) + "\n").c_str());
+
+    // 1. Apply deletes
+    for (int i = 0; i < delete_count; i++) {
+        int node_id = delete_ids[i];
+        group.user_deleted_ids.insert(node_id);
+        auto it = group.nodes.find(node_id);
+        if (it != group.nodes.end()) {
+            RemoveNodeFromGraph(group, node_id);
+            changed = true;
+            OutputDebugStringA(("[ApplyUserEdits] deleted node " +
+                std::to_string(node_id) + "\n").c_str());
+        } else {
+            OutputDebugStringA(("[ApplyUserEdits] delete MISS node " +
+                std::to_string(node_id) + " (not found)\n").c_str());
+        }
+    }
+
+    // 2. Apply moves (each move = 3 floats: node_id, new_cx, new_cy)
+    for (int i = 0; i < move_count; i++) {
+        int node_id = static_cast<int>(moves[i * 3 + 0]);
+        float new_cx = moves[i * 3 + 1];
+        float new_cy = moves[i * 3 + 2];
+
+        auto it = group.nodes.find(node_id);
+        if (it == group.nodes.end()) {
+            OutputDebugStringA(("[ApplyUserEdits] move MISS node " +
+                std::to_string(node_id) + " (not found)\n").c_str());
+            continue;
+        }
+
+        DrawingNode& node = *it->second;
+        float dx = new_cx - node.centroid_canvas.x;
+        float dy = new_cy - node.centroid_canvas.y;
+
+        OutputDebugStringA(("[ApplyUserEdits] move node " +
+            std::to_string(node_id) + " dx=" + std::to_string(dx) +
+            " dy=" + std::to_string(dy) + "\n").c_str());
+
+        group.spatial_index.Remove(node.id, node.centroid_canvas);
+        node.centroid_canvas.x = new_cx;
+        node.centroid_canvas.y = new_cy;
+        node.bbox_canvas.x += static_cast<int>(std::round(dx));
+        node.bbox_canvas.y += static_cast<int>(std::round(dy));
+        group.spatial_index.Insert(node.id, node.centroid_canvas);
+        node.user_locked = true;
+        changed = true;
+    }
+
+    // 3. Recalculate bounds so render cache encompasses moved nodes
+    if (changed) {
+        UpdateGroupBounds(group);
+        group.stroke_cache_dirty = true;
+        group.raw_cache_dirty = true;
+        BumpCanvasVersion();
+        OutputDebugStringA(("[ApplyUserEdits] SUCCESS: applied changes, " +
+            std::to_string(group.nodes.size()) + " nodes remain\n").c_str());
+    } else {
+        OutputDebugStringA("[ApplyUserEdits] NO CHANGES applied\n");
+    }
+    return changed;
+}
+
+int WhiteboardCanvas::LockAllGraphNodes() {
+    if (remote_process_ && helper_client_) {
+        return helper_client_->LockAllGraphNodes();
+    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+
+    auto& group = *groups_[gi];
+    int count = 0;
+    for (auto& pair : group.nodes) {
+        pair.second->user_locked = true;
+        count++;
+    }
+    return count;
 }
 
 bool WhiteboardCanvas::GetGraphCanvasBounds(int* bounds) const {
@@ -4055,6 +4192,23 @@ bool CompareGraphNodes(int id_a, int id_b, float* result) {
 bool MoveGraphNode(int node_id, float new_cx, float new_cy) {
     if (!g_whiteboard_canvas) return false;
     return g_whiteboard_canvas->MoveGraphNode(node_id, new_cx, new_cy);
+}
+
+bool DeleteGraphNode(int node_id) {
+    if (!g_whiteboard_canvas) return false;
+    return g_whiteboard_canvas->DeleteGraphNode(node_id);
+}
+
+bool ApplyUserEdits(const int* delete_ids, int delete_count,
+                    const float* moves, int move_count) {
+    if (!g_whiteboard_canvas) return false;
+    return g_whiteboard_canvas->ApplyUserEdits(delete_ids, delete_count,
+                                               moves, move_count);
+}
+
+int LockAllGraphNodes() {
+    if (!g_whiteboard_canvas) return 0;
+    return g_whiteboard_canvas->LockAllGraphNodes();
 }
 
 bool GetGraphCanvasBounds(int* bounds) {

@@ -14,6 +14,7 @@ import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'image_editor_screen.dart';
+import 'edit_canvas_screen.dart';
 import 'crop_screen.dart';
 import '../services/media_server_service.dart';
 import '../services/image_processing_service.dart';
@@ -1308,6 +1309,20 @@ class _CameraScreenState extends State<CameraScreen>
                 tooltip: AppLocalizations.of(context)!.toggleCanvasView,
                 onPressed: () {
                   _setCanvasViewMode(!_isCanvasViewMode);
+                },
+              ),
+            // Edit Canvas (only visible when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: const Icon(Icons.edit_note),
+                tooltip: 'Edit Canvas',
+                onPressed: () {
+                  Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const EditCanvasScreen(),
+                    ),
+                  );
                 },
               ),
             // Capture full canvas (only visible in canvas view mode)

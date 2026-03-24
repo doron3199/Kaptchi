@@ -41,6 +41,11 @@ public:
     bool GetGraphCanvasBounds(int* bounds) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;
 
+    // User edit commands (routed through shared memory to helper process)
+    int LockAllGraphNodes();
+    bool ApplyUserEdits(const int* delete_ids, int delete_count,
+                        const float* moves, int move_count);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

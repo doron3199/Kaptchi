@@ -134,6 +134,19 @@ typedef MoveGraphNodeFunc = Bool Function(
 typedef MoveGraphNodeFFI = bool Function(
   int nodeId, double newCx, double newCy);
 
+typedef DeleteGraphNodeFunc = Bool Function(Int32 nodeId);
+typedef DeleteGraphNodeFFI = bool Function(int nodeId);
+
+typedef ApplyUserEditsFunc = Bool Function(
+  Pointer<Int32> deleteIds, Int32 deleteCount,
+  Pointer<Float> moves, Int32 moveCount);
+typedef ApplyUserEditsFFI = bool Function(
+  Pointer<Int32> deleteIds, int deleteCount,
+  Pointer<Float> moves, int moveCount);
+
+typedef LockAllGraphNodesFunc = Int32 Function();
+typedef LockAllGraphNodesFFI = int Function();
+
 typedef GetGraphCanvasBoundsFunc = Bool Function(Pointer<Int32> bounds);
 typedef GetGraphCanvasBoundsFFI = bool Function(Pointer<Int32> bounds);
 
@@ -813,6 +826,9 @@ class NativeCameraService {
   late GetGraphNodeNeighborsFFI _getGraphNodeNeighbors;
   late CompareGraphNodesFFI _compareGraphNodes;
   late MoveGraphNodeFFI _moveGraphNode;
+  late DeleteGraphNodeFFI _deleteGraphNode;
+  late ApplyUserEditsFFI _applyUserEdits;
+  late LockAllGraphNodesFFI _lockAllGraphNodes;
   late GetGraphCanvasBoundsFFI _getGraphCanvasBounds;
   GetGraphNodeContoursFFI? _getGraphNodeContours;
   late CaptureGraphDebugSnapshotFFI _captureGraphDebugSnapshot;
@@ -880,6 +896,33 @@ class NativeCameraService {
       AppLogger.ffi('  lookup MoveGraphNode: OK');
     } catch (e) {
       AppLogger.ffi('  lookup MoveGraphNode FAILED: $e');
+      rethrow;
+    }
+    try {
+      _deleteGraphNode = _nativeLib
+          .lookup<NativeFunction<DeleteGraphNodeFunc>>('DeleteGraphNode')
+          .asFunction();
+      AppLogger.ffi('  lookup DeleteGraphNode: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup DeleteGraphNode FAILED: $e');
+      rethrow;
+    }
+    try {
+      _applyUserEdits = _nativeLib
+          .lookup<NativeFunction<ApplyUserEditsFunc>>('ApplyUserEdits')
+          .asFunction();
+      AppLogger.ffi('  lookup ApplyUserEdits: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup ApplyUserEdits FAILED: $e');
+      rethrow;
+    }
+    try {
+      _lockAllGraphNodes = _nativeLib
+          .lookup<NativeFunction<LockAllGraphNodesFunc>>('LockAllGraphNodes')
+          .asFunction();
+      AppLogger.ffi('  lookup LockAllGraphNodes: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup LockAllGraphNodes FAILED: $e');
       rethrow;
     }
     try {
@@ -1001,7 +1044,7 @@ class NativeCameraService {
   List<GraphNodeInfo> _decodeGraphNodes(Pointer<Float> buffer, int actual) {
     final nodes = <GraphNodeInfo>[];
     for (int i = 0; i < actual; i++) {
-      final p = buffer + i * 15;
+      final p = buffer + i * 16;
       nodes.add(GraphNodeInfo(
         id: p[0].toInt(),
         bboxCanvas: Rect.fromLTWH(p[1], p[2], p[3], p[4]),
@@ -1013,6 +1056,7 @@ class NativeCameraService {
         neighborCount: p[11].toInt(),
         canvasOrigin: Offset(p[12], p[13]),
         matchDistance: p[14].toInt(),
+        isUserLocked: p[15] > 0.5,
       ));
     }
     return nodes;
@@ -1025,7 +1069,7 @@ class NativeCameraService {
   }) {
     if (count <= 0) return [];
 
-    final buffer = malloc.allocate<Float>(count * 15 * 4);
+    final buffer = malloc.allocate<Float>(count * 16 * 4);
     try {
       final actual = reader(buffer, count);
       AppLogger.graphDebug(
@@ -1140,6 +1184,46 @@ class NativeCameraService {
   bool moveNode(int id, double cx, double cy) {
     _initializeGraphDebug();
     return _moveGraphNode(id, cx, cy);
+  }
+
+  bool deleteNode(int id) {
+    _initializeGraphDebug();
+    return _deleteGraphNode(id);
+  }
+
+  int lockAllGraphNodes() {
+    _initializeGraphDebug();
+    return _lockAllGraphNodes();
+  }
+
+  /// Atomically apply a batch of user edits (deletes + moves) to the C++ graph.
+  /// [deleteIds] — node IDs to delete.
+  /// [moves] — list of (nodeId, newCx, newCy) triples for moved nodes.
+  bool applyUserEdits({
+    required List<int> deleteIds,
+    required List<({int id, double cx, double cy})> moves,
+  }) {
+    _initializeGraphDebug();
+
+    final deleteBuffer = malloc.allocate<Int32>(
+        deleteIds.isEmpty ? 4 : deleteIds.length * 4);
+    final moveBuffer = malloc.allocate<Float>(
+        moves.isEmpty ? 4 : moves.length * 3 * 4);
+    try {
+      for (int i = 0; i < deleteIds.length; i++) {
+        deleteBuffer[i] = deleteIds[i];
+      }
+      for (int i = 0; i < moves.length; i++) {
+        moveBuffer[i * 3 + 0] = moves[i].id.toDouble();
+        moveBuffer[i * 3 + 1] = moves[i].cx;
+        moveBuffer[i * 3 + 2] = moves[i].cy;
+      }
+      return _applyUserEdits(
+          deleteBuffer, deleteIds.length, moveBuffer, moves.length);
+    } finally {
+      malloc.free(deleteBuffer);
+      malloc.free(moveBuffer);
+    }
   }
 
   Rect? getCanvasBounds() {

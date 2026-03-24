@@ -12,6 +12,7 @@ class GraphNodeInfo {
   final Offset canvasOrigin;
   final int matchDistance; // BFS hop distance from matched blob (0=matched, 1=neighbor, -1=not seen)
   final List<Offset> contour; // Contour points in canvas coordinates
+  final bool isUserLocked; // User-edited — immune to pipeline changes
 
   const GraphNodeInfo({
     required this.id,
@@ -25,6 +26,7 @@ class GraphNodeInfo {
     required this.canvasOrigin,
     this.matchDistance = -1,
     this.contour = const [],
+    this.isUserLocked = false,
   });
 
   /// Returns a copy with updated centroid and bbox (for drag in Flutter only).
@@ -43,6 +45,7 @@ class GraphNodeInfo {
       canvasOrigin: canvasOrigin,
       matchDistance: matchDistance,
       contour: contour.map((p) => Offset(p.dx + dx, p.dy + dy)).toList(),
+      isUserLocked: isUserLocked,
     );
   }
 

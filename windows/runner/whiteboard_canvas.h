@@ -61,6 +61,7 @@ struct DrawingNode {
     int in_view_count = 0;              // Frames this node was observable (in cropped view, not occluded)
     int match_distance = -1;            // BFS hop distance from a directly-matched blob (0=matched, 1=neighbor, etc.; -1=not seen this frame)
     std::vector<int> neighbor_ids;      // K nearest neighbor edges
+    bool user_locked = false;            // User-edited — immune to pipeline changes
 };
 
 // ---------------------------------------------------------------------------
@@ -201,6 +202,9 @@ struct WhiteboardGroup {
     bool stroke_cache_dirty = true;
     cv::Mat raw_render_cache;
     bool raw_cache_dirty = true;
+
+    // User edit protection
+    std::unordered_set<int> user_deleted_ids;  // Prevent re-creation of user-deleted nodes
 };
 
 // ---------------------------------------------------------------------------
@@ -256,6 +260,10 @@ public:
     int  GetGraphNodeNeighbors(int node_id, int* neighbors, int max_neighbors) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;
     bool MoveGraphNode(int node_id, float new_cx, float new_cy);
+    bool DeleteGraphNode(int node_id);
+    bool ApplyUserEdits(const int* delete_ids, int delete_count,
+                        const float* moves, int move_count);
+    int  LockAllGraphNodes();
     bool GetGraphCanvasBounds(int* bounds) const;
     int  GetGraphNodeContours(float* buffer, int max_floats) const;
     bool CaptureGraphDebugSnapshot(int slot,
@@ -579,6 +587,10 @@ extern "C" {
     __declspec(dllexport) int     GetGraphNodeNeighbors(int node_id, int* neighbors, int max_neighbors);
     __declspec(dllexport) bool    CompareGraphNodes(int id_a, int id_b, float* result);
     __declspec(dllexport) bool    MoveGraphNode(int node_id, float new_cx, float new_cy);
+    __declspec(dllexport) bool    DeleteGraphNode(int node_id);
+    __declspec(dllexport) bool    ApplyUserEdits(const int* delete_ids, int delete_count,
+                                                  const float* moves, int move_count);
+    __declspec(dllexport) int     LockAllGraphNodes();
     __declspec(dllexport) bool    GetGraphCanvasBounds(int* bounds);
     __declspec(dllexport) int     GetGraphNodeContours(float* buffer, int max_floats);
     __declspec(dllexport) bool    CaptureGraphDebugSnapshot(int slot);

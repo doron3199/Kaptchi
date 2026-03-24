@@ -193,6 +193,7 @@ class _GraphDebugScreenState extends State<GraphDebugScreen> {
               neighborCount: node.neighborCount,
               canvasOrigin: node.canvasOrigin,
               contour: contours[node.id] ?? const [],
+              isUserLocked: node.isUserLocked,
             ))
         .toList();
   }

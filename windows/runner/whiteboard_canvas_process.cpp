@@ -37,9 +37,13 @@ constexpr int kNoSubCanvasRequest = -1;
 constexpr int kDefaultCanvasWidth = 1920;
 constexpr int kDefaultCanvasHeight = 1080;
 constexpr int kMaxGraphNodes = 512;
-constexpr int kMaxGraphNodeFloats = kMaxGraphNodes * 14;
+constexpr int kGraphNodeStride = 16;
+constexpr int kMaxGraphNodeFloats = kMaxGraphNodes * kGraphNodeStride;
 constexpr int kMaxGraphContourFloats = 500000;
 constexpr DWORD kGraphCompareTimeoutMs = 2000;
+constexpr int kMaxEditDeletes = 256;
+constexpr int kMaxEditMoves = 256;
+constexpr DWORD kEditCommandTimeoutMs = 2000;
 bool g_is_helper_process = false;
 std::string g_helper_session_id;
 
@@ -98,6 +102,17 @@ struct SharedState {
     float graph_nodes[kMaxGraphNodeFloats];
     float graph_contours[kMaxGraphContourFloats];
     float graph_compare_result[5];
+
+    // User edit commands (client -> helper)
+    LONG edit_request_id = 0;
+    LONG edit_lock_all = 0;          // 1 = lock all nodes
+    LONG edit_delete_count = 0;
+    LONG edit_move_count = 0;
+    int  edit_delete_ids[kMaxEditDeletes];
+    float edit_moves[kMaxEditMoves * 3]; // [id, cx, cy] triples
+    LONG edit_result_ready = 0;
+    LONG edit_result_ok = 0;
+    LONG edit_result_id = 0;
 };
 #pragma pack(pop)
 
@@ -122,6 +137,12 @@ struct HelperStateSnapshot {
     int graph_compare_request_id = 0;
     int graph_compare_node_a = -1;
     int graph_compare_node_b = -1;
+    int edit_request_id = 0;
+    bool edit_lock_all = false;
+    int edit_delete_count = 0;
+    int edit_move_count = 0;
+    int edit_delete_ids[kMaxEditDeletes] = {};
+    float edit_moves[kMaxEditMoves * 3] = {};
 };
 
 std::wstring Utf16FromUtf8(const std::string& utf8) {
@@ -219,6 +240,11 @@ public:
         bool graph_compare_result_ok = false;
         float graph_compare_result[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
 
+        int last_edit_request_id = 0;
+        int edit_result_id = 0;
+        bool edit_result_ready = false;
+        bool edit_result_ok = false;
+
         while (true) {
             WaitForSingleObject(wake_event_.get(), kHelperLoopWaitMs);
 
@@ -307,13 +333,36 @@ public:
                 last_graph_compare_request_id = snapshot.graph_compare_request_id;
             }
 
+            // Process user edit commands
+            if (snapshot.edit_request_id > 0 &&
+                snapshot.edit_request_id != last_edit_request_id) {
+                bool edit_ok = false;
+                if (snapshot.edit_lock_all) {
+                    canvas.LockAllGraphNodes();
+                }
+                if (snapshot.edit_delete_count > 0 || snapshot.edit_move_count > 0) {
+                    edit_ok = canvas.ApplyUserEdits(
+                        snapshot.edit_delete_ids, snapshot.edit_delete_count,
+                        snapshot.edit_moves, snapshot.edit_move_count);
+                } else if (snapshot.edit_lock_all) {
+                    edit_ok = true;  // lock-only request
+                }
+                edit_result_id = snapshot.edit_request_id;
+                edit_result_ok = edit_ok;
+                edit_result_ready = true;
+                last_edit_request_id = snapshot.edit_request_id;
+            }
+
             WriteResults(canvas,
                          last_viewport,
                          last_overview,
                          graph_compare_result_ready,
                          graph_compare_result_id,
                          graph_compare_result_ok,
-                         graph_compare_result);
+                         graph_compare_result,
+                         edit_result_ready,
+                         edit_result_id,
+                         edit_result_ok);
         }
 
         return EXIT_SUCCESS;
@@ -408,6 +457,20 @@ private:
             shared_->mask_height = 0;
         }
 
+        // Read edit commands
+        snapshot.edit_request_id = static_cast<int>(shared_->edit_request_id);
+        snapshot.edit_lock_all = shared_->edit_lock_all != 0;
+        snapshot.edit_delete_count = std::min(static_cast<int>(shared_->edit_delete_count), kMaxEditDeletes);
+        snapshot.edit_move_count = std::min(static_cast<int>(shared_->edit_move_count), kMaxEditMoves);
+        if (snapshot.edit_delete_count > 0) {
+            std::memcpy(snapshot.edit_delete_ids, shared_->edit_delete_ids,
+                        snapshot.edit_delete_count * sizeof(int));
+        }
+        if (snapshot.edit_move_count > 0) {
+            std::memcpy(snapshot.edit_moves, shared_->edit_moves,
+                        snapshot.edit_move_count * 3 * sizeof(float));
+        }
+
         Unlock(mutex_.get());
         return true;
     }
@@ -418,7 +481,10 @@ private:
                       bool graph_compare_result_ready,
                       int graph_compare_result_id,
                       bool graph_compare_result_ok,
-                      const float* graph_compare_result) {
+                      const float* graph_compare_result,
+                      bool edit_result_ready,
+                      int edit_result_id,
+                      bool edit_result_ok) {
         if (!shared_) return;
 
         // Read canvas state BEFORE acquiring the shared mutex.
@@ -444,7 +510,7 @@ private:
         if (has_content) {
             graph_node_count = canvas.GetGraphNodeCount();
             if (graph_node_count > 0) {
-                graph_node_floats = canvas.GetGraphNodes(local_graph_nodes, kMaxGraphNodes) * 14;
+                graph_node_floats = canvas.GetGraphNodes(local_graph_nodes, kMaxGraphNodes) * kGraphNodeStride;
                 graph_contour_floats = canvas.GetGraphNodeContours(
                     local_graph_contours.data(), kMaxGraphContourFloats);
                 graph_bounds_valid = canvas.GetGraphCanvasBounds(graph_bounds);
@@ -521,6 +587,13 @@ private:
             shared_->graph_bounds_h = graph_bounds[3];
         }
 
+        // Write edit command results
+        if (edit_result_ready) {
+            shared_->edit_result_ready = 1;
+            shared_->edit_result_ok = edit_result_ok ? 1 : 0;
+            shared_->edit_result_id = edit_result_id;
+        }
+
         Unlock(mutex_.get());
     }
 
@@ -551,6 +624,7 @@ struct WhiteboardCanvasHelperClient::Impl {
     std::atomic<int> cached_subcanvas_count{0};
     std::atomic<int> cached_active_subcanvas{-1};
     mutable std::atomic<int> next_graph_compare_request_id{1};
+    mutable std::atomic<int> next_edit_request_id{1};
 
     ~Impl() {
         if (shared) {
@@ -995,11 +1069,11 @@ int WhiteboardCanvasHelperClient::GetGraphNodes(float* buffer, int max_nodes) co
     int count = 0;
     impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
         const int total_floats = static_cast<int>(impl_->shared->graph_node_floats_written);
-        const int available_nodes = total_floats / 14;
+        const int available_nodes = total_floats / kGraphNodeStride;
         count = std::min(available_nodes, max_nodes);
         if (count > 0) {
             std::memcpy(buffer, impl_->shared->graph_nodes,
-                        static_cast<size_t>(count) * 14 * sizeof(float));
+                        static_cast<size_t>(count) * kGraphNodeStride * sizeof(float));
         }
     });
     return count;
@@ -1075,6 +1149,105 @@ bool WhiteboardCanvasHelperClient::CompareGraphNodes(int id_a, int id_b, float* 
             if (ok) {
                 std::memcpy(result, local_result, sizeof(local_result));
             }
+            return ok;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return false;
+}
+
+int WhiteboardCanvasHelperClient::LockAllGraphNodes() {
+    if (!IsReady()) return 0;
+
+    const int request_id =
+        impl_->next_edit_request_id.fetch_add(1, std::memory_order_relaxed);
+    const bool queued = impl_->WithLock(20, [&]() {
+        impl_->shared->edit_lock_all = 1;
+        impl_->shared->edit_delete_count = 0;
+        impl_->shared->edit_move_count = 0;
+        impl_->shared->edit_request_id = request_id;
+        impl_->shared->edit_result_ready = 0;
+        impl_->shared->edit_result_ok = 0;
+        impl_->shared->edit_result_id = 0;
+    });
+    if (!queued) return 0;
+
+    impl_->SignalHelper();
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kEditCommandTimeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool ready = false;
+        bool ok = false;
+
+        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+            ready = impl_->shared->edit_result_ready != 0 &&
+                    impl_->shared->edit_result_id == request_id;
+            if (ready) {
+                ok = impl_->shared->edit_result_ok != 0;
+            }
+        });
+
+        if (ready) {
+            // Return node count from shared state as approximation
+            int count = 0;
+            impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+                count = static_cast<int>(impl_->shared->graph_node_count);
+            });
+            return ok ? count : 0;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+
+    return 0;
+}
+
+bool WhiteboardCanvasHelperClient::ApplyUserEdits(const int* delete_ids, int delete_count,
+                                                   const float* moves, int move_count) {
+    if (!IsReady()) return false;
+    if (delete_count > kMaxEditDeletes || move_count > kMaxEditMoves) return false;
+
+    const int request_id =
+        impl_->next_edit_request_id.fetch_add(1, std::memory_order_relaxed);
+    const bool queued = impl_->WithLock(20, [&]() {
+        impl_->shared->edit_lock_all = 0;
+        impl_->shared->edit_delete_count = delete_count;
+        impl_->shared->edit_move_count = move_count;
+        if (delete_count > 0 && delete_ids) {
+            std::memcpy(impl_->shared->edit_delete_ids, delete_ids,
+                        static_cast<size_t>(delete_count) * sizeof(int));
+        }
+        if (move_count > 0 && moves) {
+            std::memcpy(impl_->shared->edit_moves, moves,
+                        static_cast<size_t>(move_count) * 3 * sizeof(float));
+        }
+        impl_->shared->edit_request_id = request_id;
+        impl_->shared->edit_result_ready = 0;
+        impl_->shared->edit_result_ok = 0;
+        impl_->shared->edit_result_id = 0;
+    });
+    if (!queued) return false;
+
+    impl_->SignalHelper();
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kEditCommandTimeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool ready = false;
+        bool ok = false;
+
+        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+            ready = impl_->shared->edit_result_ready != 0 &&
+                    impl_->shared->edit_result_id == request_id;
+            if (ready) {
+                ok = impl_->shared->edit_result_ok != 0;
+            }
+        });
+
+        if (ready) {
             return ok;
         }
 
