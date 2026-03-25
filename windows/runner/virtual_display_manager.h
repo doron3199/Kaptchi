@@ -38,6 +38,10 @@ public:
     // clickType: 0 = left click, 1 = right click, 2 = left down, 3 = left up
     static bool SendClick(float normalizedX, float normalizedY, int clickType);
 
+    // Send a mouse scroll to the virtual display at normalized coordinates.
+    // deltaY: positive = scroll up, negative = scroll down (in WHEEL_DELTA units, 120 = one notch)
+    static bool SendScroll(float normalizedX, float normalizedY, int deltaY);
+
     // Send a key event to the window on the virtual display.
     // vkCode: virtual key code, isKeyUp: true for key release
     static bool SendKey(int vkCode, bool isKeyUp);

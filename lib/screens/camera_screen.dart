@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:camera/camera.dart' as c;
@@ -101,6 +102,7 @@ class _CameraScreenState extends State<CameraScreen>
 
   // Virtual Display Capture Mode State
   bool _isVddCaptureMode = false;
+  bool _vddScrollForwardsToDisplay = false; // false = zoom (default), true = forward scroll
 
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
@@ -700,6 +702,74 @@ class _CameraScreenState extends State<CameraScreen>
     await _startLocalCamera();
   }
 
+  /// Forward a screen tap to the virtual display, accounting for zoom and pan.
+  /// [tapPos] is the local position within the video widget.
+  /// [viewportSize] is the size of the video widget.
+  /// [clickType] 0=left, 1=right.
+  void _forwardClickToVirtualDisplay(
+    Offset tapPos,
+    Size viewportSize,
+    int clickType,
+  ) {
+    // Compute the visual scale (digital zoom portion beyond the phone/optical limit)
+    final double limit =
+        _isDigitalZoomOverride ? _lockedPhoneZoom : _phoneMaxZoom;
+    final double visualScale =
+        _currentZoom > limit ? _currentZoom / limit : 1.0;
+
+    // Reverse the transform: screen position → content position
+    // The ZoomableStreamView applies: translate(_viewOffset) then scale(visualScale)
+    // So: screenPos = offset + contentPos * visualScale
+    // Inverse: contentPos = (screenPos - offset) / visualScale
+    final double contentX = (tapPos.dx - _viewOffset.dx) / visualScale;
+    final double contentY = (tapPos.dy - _viewOffset.dy) / visualScale;
+
+    // Normalize to 0-1 range relative to viewport
+    final double normalizedX = contentX / viewportSize.width;
+    final double normalizedY = contentY / viewportSize.height;
+
+    debugPrint(
+      '[VDD Click] tap=(${tapPos.dx.toStringAsFixed(1)}, ${tapPos.dy.toStringAsFixed(1)}) '
+      'zoom=$_currentZoom visualScale=${visualScale.toStringAsFixed(2)} '
+      'offset=$_viewOffset → normalized=(${normalizedX.toStringAsFixed(3)}, ${normalizedY.toStringAsFixed(3)})',
+    );
+
+    NativeCameraService().sendClickToVirtualDisplay(
+      normalizedX.clamp(0.0, 1.0),
+      normalizedY.clamp(0.0, 1.0),
+      clickType: clickType,
+    );
+  }
+
+  /// Forward a scroll event to the virtual display, accounting for zoom and pan.
+  void _forwardScrollToVirtualDisplay(
+    Offset scrollPos,
+    Size viewportSize,
+    double scrollDeltaY,
+  ) {
+    final double limit =
+        _isDigitalZoomOverride ? _lockedPhoneZoom : _phoneMaxZoom;
+    final double visualScale =
+        _currentZoom > limit ? _currentZoom / limit : 1.0;
+
+    final double contentX = (scrollPos.dx - _viewOffset.dx) / visualScale;
+    final double contentY = (scrollPos.dy - _viewOffset.dy) / visualScale;
+
+    final double normalizedX = contentX / viewportSize.width;
+    final double normalizedY = contentY / viewportSize.height;
+
+    // Convert Flutter scroll delta to Windows WHEEL_DELTA units
+    // Flutter gives pixels, Windows expects multiples of 120 (WHEEL_DELTA)
+    // Negative delta in Flutter = scroll down, positive in Windows = scroll up
+    final int wheelDelta = -(scrollDeltaY ~/ 2).clamp(-600, 600);
+
+    NativeCameraService().sendScrollToVirtualDisplay(
+      normalizedX.clamp(0.0, 1.0),
+      normalizedY.clamp(0.0, 1.0),
+      wheelDelta,
+    );
+  }
+
   void _sendZoomCommand(double zoom) {
     debugPrint('Sending zoom command: $zoom');
     if (!Platform.isWindows) return;
@@ -1274,6 +1344,27 @@ class _CameraScreenState extends State<CameraScreen>
                 }
               },
             ),
+            // VDD Scroll Mode Toggle (zoom vs forward scroll)
+            if (_isVddCaptureMode)
+              IconButton(
+                icon: Icon(
+                  _vddScrollForwardsToDisplay
+                      ? Icons.mouse
+                      : Icons.zoom_in,
+                  color: _vddScrollForwardsToDisplay
+                      ? Colors.deepPurple
+                      : null,
+                ),
+                tooltip: _vddScrollForwardsToDisplay
+                    ? 'Scroll: forwarding to display (click to switch to zoom)'
+                    : 'Scroll: zooming (click to switch to forward)',
+                onPressed: () {
+                  setState(() {
+                    _vddScrollForwardsToDisplay =
+                        !_vddScrollForwardsToDisplay;
+                  });
+                },
+              ),
             // Whiteboard Capture Toggle
             if (Platform.isWindows)
               IconButton(
@@ -1447,6 +1538,7 @@ class _CameraScreenState extends State<CameraScreen>
                                     else
                                       ZoomableStreamView(
                                         enabled: true,
+                                        disableScrollZoom: _isVddCaptureMode && _vddScrollForwardsToDisplay,
                                         currentZoom: _currentZoom,
                                         viewOffset: _viewOffset,
                                         isDigitalZoomOverride:
@@ -1471,36 +1563,38 @@ class _CameraScreenState extends State<CameraScreen>
                                 if (!_isVddCaptureMode) return videoStack;
                                 return LayoutBuilder(
                                   builder: (context, constraints) {
-                                    return GestureDetector(
-                                      behavior: HitTestBehavior.translucent,
-                                      onTapUp: (details) {
-                                        final normalizedX =
-                                            details.localPosition.dx /
-                                            constraints.maxWidth;
-                                        final normalizedY =
-                                            details.localPosition.dy /
-                                            constraints.maxHeight;
-                                        NativeCameraService()
-                                            .sendClickToVirtualDisplay(
-                                              normalizedX.clamp(0.0, 1.0),
-                                              normalizedY.clamp(0.0, 1.0),
-                                            );
-                                      },
-                                      onSecondaryTapUp: (details) {
-                                        final normalizedX =
-                                            details.localPosition.dx /
-                                            constraints.maxWidth;
-                                        final normalizedY =
-                                            details.localPosition.dy /
-                                            constraints.maxHeight;
-                                        NativeCameraService()
-                                            .sendClickToVirtualDisplay(
-                                              normalizedX.clamp(0.0, 1.0),
-                                              normalizedY.clamp(0.0, 1.0),
-                                              clickType: 1,
-                                            );
-                                      },
-                                      child: videoStack,
+                                    return Listener(
+                                      onPointerSignal:
+                                          _vddScrollForwardsToDisplay
+                                              ? (event) {
+                                                  if (event
+                                                      is PointerScrollEvent) {
+                                                    _forwardScrollToVirtualDisplay(
+                                                      event.localPosition,
+                                                      constraints.biggest,
+                                                      event.scrollDelta.dy,
+                                                    );
+                                                  }
+                                                }
+                                              : null,
+                                      child: GestureDetector(
+                                        behavior: HitTestBehavior.translucent,
+                                        onTapUp: (details) {
+                                          _forwardClickToVirtualDisplay(
+                                            details.localPosition,
+                                            constraints.biggest,
+                                            0,
+                                          );
+                                        },
+                                        onSecondaryTapUp: (details) {
+                                          _forwardClickToVirtualDisplay(
+                                            details.localPosition,
+                                            constraints.biggest,
+                                            1,
+                                          );
+                                        },
+                                        child: videoStack,
+                                      ),
                                     );
                                   },
                                 );

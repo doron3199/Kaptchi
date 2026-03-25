@@ -17,11 +17,13 @@ class ZoomableStreamView extends StatefulWidget {
   final Function(double zoom, Offset offset, Size viewportSize)
   onTransformChanged;
   final Function(double) onSendZoomCommand;
+  final bool disableScrollZoom;
 
   const ZoomableStreamView({
     super.key,
     required this.child,
     this.enabled = true,
+    this.disableScrollZoom = false,
     required this.currentZoom,
     required this.viewOffset,
     required this.isDigitalZoomOverride,
@@ -254,7 +256,7 @@ class _ZoomableStreamViewState extends State<ZoomableStreamView> {
         }
 
         return Listener(
-          onPointerSignal: widget.enabled ? _handlePointerSignal : null,
+          onPointerSignal: (widget.enabled && !widget.disableScrollZoom) ? _handlePointerSignal : null,
           child: GestureDetector(
             behavior: HitTestBehavior.opaque,
             onScaleStart: widget.enabled ? _onScaleStart : null,

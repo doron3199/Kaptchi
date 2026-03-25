@@ -247,6 +247,10 @@ bool VirtualDisplayManager::SendClick(float normalizedX, float normalizedY, int 
     int monH = bounds.bottom - bounds.top;
     if (monW <= 0 || monH <= 0) return false;
 
+    // Save current cursor position so we can restore it after
+    POINT savedCursor;
+    GetCursorPos(&savedCursor);
+
     // Convert normalized (0-1) to screen coordinates
     int screenX = bounds.left + static_cast<int>(normalizedX * monW);
     int screenY = bounds.top + static_cast<int>(normalizedY * monH);
@@ -296,7 +300,55 @@ bool VirtualDisplayManager::SendClick(float normalizedX, float normalizedY, int 
     }
 
     UINT sent = SendInput(inputCount, inputs, sizeof(INPUT));
+
+    // Restore cursor to original position
+    SetCursorPos(savedCursor.x, savedCursor.y);
+
     return sent == static_cast<UINT>(inputCount);
+}
+
+bool VirtualDisplayManager::SendScroll(float normalizedX, float normalizedY, int deltaY) {
+    int vdIdx = GetVirtualMonitorIndex();
+    if (vdIdx < 0) return false;
+
+    RECT bounds = GetMonitorBounds(vdIdx);
+    int monW = bounds.right - bounds.left;
+    int monH = bounds.bottom - bounds.top;
+    if (monW <= 0 || monH <= 0) return false;
+
+    // Save current cursor position
+    POINT savedCursor;
+    GetCursorPos(&savedCursor);
+
+    int screenX = bounds.left + static_cast<int>(normalizedX * monW);
+    int screenY = bounds.top + static_cast<int>(normalizedY * monH);
+
+    int virtualW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int virtualH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    int virtualLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int virtualTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+
+    DWORD absX = static_cast<DWORD>(((screenX - virtualLeft) * 65535) / virtualW);
+    DWORD absY = static_cast<DWORD>(((screenY - virtualTop) * 65535) / virtualH);
+
+    // Move mouse to position, then scroll
+    INPUT inputs[2] = {};
+
+    inputs[0].type = INPUT_MOUSE;
+    inputs[0].mi.dx = absX;
+    inputs[0].mi.dy = absY;
+    inputs[0].mi.dwFlags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
+
+    inputs[1].type = INPUT_MOUSE;
+    inputs[1].mi.dwFlags = MOUSEEVENTF_WHEEL;
+    inputs[1].mi.mouseData = static_cast<DWORD>(deltaY);
+
+    UINT sent = SendInput(2, inputs, sizeof(INPUT));
+
+    // Restore cursor to original position
+    SetCursorPos(savedCursor.x, savedCursor.y);
+
+    return sent == 2;
 }
 
 bool VirtualDisplayManager::SendKey(int vkCode, bool isKeyUp) {

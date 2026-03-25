@@ -780,6 +780,7 @@ class NativeCameraService {
   late LaunchVddInstaller _launchVddInstaller;
   late UninstallVddDriver _uninstallVddDriver;
   late SendClickToVirtualDisplay _sendClickToVirtualDisplay;
+  late SendScrollToVirtualDisplay _sendScrollToVirtualDisplay;
 
   bool _vddInitialized = false;
 
@@ -819,6 +820,11 @@ class NativeCameraService {
     _sendClickToVirtualDisplay = _nativeLib
         .lookup<NativeFunction<SendClickToVirtualDisplayFunc>>(
           'SendClickToVirtualDisplay',
+        )
+        .asFunction();
+    _sendScrollToVirtualDisplay = _nativeLib
+        .lookup<NativeFunction<SendScrollToVirtualDisplayFunc>>(
+          'SendScrollToVirtualDisplay',
         )
         .asFunction();
 
@@ -878,6 +884,17 @@ class NativeCameraService {
   }) {
     _initializeVdd();
     return _sendClickToVirtualDisplay(normalizedX, normalizedY, clickType) == 1;
+  }
+
+  /// Send a mouse scroll to the virtual display at normalized coordinates.
+  /// deltaY: positive = scroll up, negative = scroll down (120 = one notch)
+  bool sendScrollToVirtualDisplay(
+    double normalizedX,
+    double normalizedY,
+    int deltaY,
+  ) {
+    _initializeVdd();
+    return _sendScrollToVirtualDisplay(normalizedX, normalizedY, deltaY) == 1;
   }
 
   /// Uninstall the VDD driver using devcon.exe (triggers UAC prompt)
@@ -1568,3 +1585,8 @@ typedef SendClickToVirtualDisplayFunc =
     Int32 Function(Float normalizedX, Float normalizedY, Int32 clickType);
 typedef SendClickToVirtualDisplay =
     int Function(double normalizedX, double normalizedY, int clickType);
+
+typedef SendScrollToVirtualDisplayFunc =
+    Int32 Function(Float normalizedX, Float normalizedY, Int32 deltaY);
+typedef SendScrollToVirtualDisplay =
+    int Function(double normalizedX, double normalizedY, int deltaY);

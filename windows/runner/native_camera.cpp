@@ -1927,6 +1927,12 @@ extern "C" {
         return VirtualDisplayManager::SendClick(normalizedX, normalizedY, clickType) ? 1 : 0;
     }
 
+    // Send a mouse scroll to the virtual display.
+    // deltaY: positive = scroll up, negative = scroll down (120 = one notch)
+    __declspec(dllexport) int32_t SendScrollToVirtualDisplay(float normalizedX, float normalizedY, int32_t deltaY) {
+        return VirtualDisplayManager::SendScroll(normalizedX, normalizedY, deltaY) ? 1 : 0;
+    }
+
     __declspec(dllexport) void process_frame(uint8_t* bytes, int32_t width, int32_t height, int32_t mode) {
         if (bytes == nullptr || width <= 0 || height <= 0) return;
 
