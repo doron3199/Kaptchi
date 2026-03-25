@@ -409,7 +409,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
           ElevatedButton(
             onPressed: () {
               Navigator.of(context).pop();
-              _launchVddInstaller();
+              _installBundledVdd();
             },
             child: Text(AppLocalizations.of(context)!.installVdd),
           ),
@@ -418,14 +418,37 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
-  void _launchVddInstaller() {
-    final nativeService = NativeCameraService();
-    // Look for VDD.Control in the app's directory
-    final exePath = Platform.resolvedExecutable;
-    final appDir = exePath.substring(0, exePath.lastIndexOf(Platform.pathSeparator));
-    final vddControlPath = '$appDir${Platform.pathSeparator}vdd_control${Platform.pathSeparator}VDD Control.exe';
+  void _installBundledVdd() async {
+    // Show a loading indicator
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const AlertDialog(
+        content: Row(
+          children: [
+            CircularProgressIndicator(),
+            SizedBox(width: 20),
+            Expanded(child: Text('Installing Virtual Display Driver...')),
+          ],
+        ),
+      ),
+    );
 
-    nativeService.launchVddInstaller(vddControlPath);
+    final nativeService = NativeCameraService();
+
+    // Run in future to avoid blocking UI (the C++ call blocks)
+    final success = await Future(() => nativeService.installBundledVdd());
+
+    if (mounted) {
+      Navigator.of(context).pop(); // Close loading dialog
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(success
+              ? 'Virtual Display Driver installed successfully!'
+              : 'Failed to install Virtual Display Driver.'),
+        ),
+      );
+    }
   }
 
   void _showUninstallVddDialog() {
@@ -457,11 +480,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
 
   void _uninstallVdd() {
     final nativeService = NativeCameraService();
-    final exePath = Platform.resolvedExecutable;
-    final appDir = exePath.substring(0, exePath.lastIndexOf(Platform.pathSeparator));
-    final devconPath = '$appDir${Platform.pathSeparator}vdd_control${Platform.pathSeparator}Dependencies${Platform.pathSeparator}devcon.exe';
-
-    final success = nativeService.uninstallVddDriver(devconPath);
+    final success = nativeService.uninstallVddDriver();
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(

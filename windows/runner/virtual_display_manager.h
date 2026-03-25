@@ -26,13 +26,12 @@ public:
     // Get the screen-coordinate bounds of a monitor by DXGI index.
     static RECT GetMonitorBounds(int monitorIndex);
 
-    // Launch VDD.Control.exe for driver installation.
-    // vddControlPath: full path to VDD.Control.exe
-    static bool LaunchInstaller(const wchar_t* vddControlPath);
+    // Install the bundled VDD driver from vdd_driver/ next to the executable.
+    // Uses SetupDi API to create a device node and bind the driver.
+    static bool InstallBundledDriver();
 
-    // Uninstall the VDD driver using devcon.exe (requires admin/UAC).
-    // devconPath: full path to devcon.exe
-    static bool UninstallDriver(const wchar_t* devconPath);
+    // Uninstall the VDD driver using pnputil (requires admin/UAC).
+    static bool UninstallDriver(const wchar_t* unused = nullptr);
 
     // Send a mouse click to the virtual display at normalized coordinates (0.0-1.0).
     // clickType: 0 = left click, 1 = right click, 2 = left down, 3 = left up
@@ -55,6 +54,9 @@ private:
 
     // Write a settings XML with zero monitors (disables virtual display)
     static bool WriteEmptySettingsXml();
+
+    // Send a command to the VDD driver through its named pipe
+    static bool SendPipeCommand(const std::wstring& command);
 
     // Notify the VDD driver to reload its configuration
     static bool NotifyDriverReload();

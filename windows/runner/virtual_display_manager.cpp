@@ -19,6 +19,9 @@ static const wchar_t* VDD_DEVICE_KEYWORD = L"VDD";
 static const wchar_t* VDD_SETTINGS_DIR = L"C:\\VirtualDisplayDriver";
 static const wchar_t* VDD_SETTINGS_FILE = L"C:\\VirtualDisplayDriver\\vdd_settings.xml";
 
+// Named pipe used by VDD driver for IPC
+static const wchar_t* VDD_PIPE_NAME = L"\\\\.\\pipe\\MTTVirtualDisplayPipe";
+
 // --- Public Methods ---
 
 bool VirtualDisplayManager::IsDriverInstalled() {
@@ -53,27 +56,101 @@ int VirtualDisplayManager::CreateVirtualMonitor(int width, int height) {
         return -1;
     }
 
-    // Find the existing active VDD monitor (created during installation via VDD Control)
+    // Check if a VDD monitor is already active
     int idx = GetVirtualMonitorIndex();
     if (idx >= 0) {
-        std::cout << "[VDM] Virtual monitor active at index " << idx << std::endl;
+        std::cout << "[VDM] Virtual monitor already active at index " << idx << std::endl;
         return idx;
     }
 
-    std::cerr << "[VDM] VDD driver installed but no active virtual monitor found" << std::endl;
+    std::cout << "[VDM] Creating virtual monitor " << width << "x" << height << "..." << std::endl;
+
+    // Ensure settings directory exists
+    CreateDirectoryW(VDD_SETTINGS_DIR, nullptr);
+
+    // Step 1: Write UTF-8 XML with the desired monitor config
+    if (!WriteSettingsXml(width, height)) {
+        std::cerr << "[VDM] Failed to write settings XML" << std::endl;
+        return -1;
+    }
+
+    // Step 2: Try pipe command first
+    SendPipeCommand(L"SETDISPLAYCOUNT 1");
+
+    // Poll for 3 seconds
+    std::cout << "[VDM] Waiting for virtual monitor to appear..." << std::endl;
+    for (int attempt = 0; attempt < 15; attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        idx = GetVirtualMonitorIndex();
+        if (idx >= 0) {
+            std::cout << "[VDM] Virtual monitor created via pipe at index " << idx << std::endl;
+            return idx;
+        }
+    }
+
+    // Step 3: Pipe didn't work — restart the driver so it reads the XML on startup.
+    // This requires admin (Disable/Enable-PnpDevice), triggers UAC.
+    std::cout << "[VDM] Pipe didn't work, restarting driver to apply config..." << std::endl;
+    {
+        std::wstring psCmd =
+            L"-NoProfile -ExecutionPolicy Bypass -Command \""
+            L"$dev = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'ROOT\\MttVDD' }; "
+            L"if ($dev) { "
+            L"  Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue; "
+            L"  Start-Sleep -Seconds 1; "
+            L"  Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false "
+            L"}\"";
+
+        SHELLEXECUTEINFOW sei = {};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.lpVerb = L"runas";
+        sei.lpFile = L"powershell.exe";
+        sei.lpParameters = psCmd.c_str();
+        sei.nShow = SW_HIDE;
+
+        if (ShellExecuteExW(&sei) && sei.hProcess) {
+            WaitForSingleObject(sei.hProcess, 30000);
+            CloseHandle(sei.hProcess);
+        }
+    }
+
+    // After driver restart, it should read the XML and create the display.
+    // Also try pipe command again now that driver is freshly started.
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    SendPipeCommand(L"SETDISPLAYCOUNT 1");
+
+    // Poll for up to 5 seconds
+    for (int attempt = 0; attempt < 25; attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        idx = GetVirtualMonitorIndex();
+        if (idx >= 0) {
+            std::cout << "[VDM] Virtual monitor created after driver restart at index " << idx << std::endl;
+            return idx;
+        }
+    }
+
+    std::cerr << "[VDM] Failed to create virtual monitor" << std::endl;
     return -1;
 }
 
 bool VirtualDisplayManager::RemoveVirtualMonitor() {
-    // Write empty settings to remove the virtual monitor
-    if (!WriteEmptySettingsXml()) {
-        return false;
+    std::cout << "[VDM] Removing virtual monitor..." << std::endl;
+
+    // Write empty XML so driver won't recreate monitors on next start
+    WriteEmptySettingsXml();
+
+    // Tell driver to remove all virtual displays — just this one command, nothing aggressive
+    // Don't touch registry or reload driver as that can break the driver (yellow triangle)
+    SendPipeCommand(L"SETDISPLAYCOUNT 0");
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    if (GetVirtualMonitorIndex() < 0) {
+        std::cout << "[VDM] Virtual monitor removed successfully" << std::endl;
+    } else {
+        std::cout << "[VDM] Virtual monitor may still be active" << std::endl;
     }
 
-    NotifyDriverReload();
-
-    // Wait briefly for removal
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
     return true;
 }
 
@@ -187,54 +264,242 @@ RECT VirtualDisplayManager::GetMonitorBounds(int monitorIndex) {
     return data.bounds;
 }
 
-bool VirtualDisplayManager::LaunchInstaller(const wchar_t* vddControlPath) {
-    SHELLEXECUTEINFOW sei = {};
-    sei.cbSize = sizeof(sei);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = L"runas"; // Request admin elevation
-    sei.lpFile = vddControlPath;
-    sei.nShow = SW_SHOWNORMAL;
+bool VirtualDisplayManager::InstallBundledDriver() {
+    std::cout << "[VDM] Installing bundled VDD driver..." << std::endl;
 
-    if (!ShellExecuteExW(&sei)) {
-        std::cerr << "[VDM] Failed to launch VDD.Control: " << GetLastError() << std::endl;
+    // Find the bundled driver files next to the executable
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    std::wstring exeDir(exePath);
+    exeDir = exeDir.substr(0, exeDir.find_last_of(L"\\/") + 1);
+    std::wstring infPath = exeDir + L"vdd_driver\\MttVDD.inf";
+
+    if (GetFileAttributesW(infPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        std::cerr << "[VDM] Bundled driver not found at: ";
+        std::wcerr << infPath << std::endl;
         return false;
     }
+    std::wcout << L"[VDM] Using bundled .inf: " << infPath << std::endl;
 
-    // Wait for the installer to finish (up to 5 minutes)
-    if (sei.hProcess) {
-        WaitForSingleObject(sei.hProcess, 300000);
-        CloseHandle(sei.hProcess);
+    // All driver installation requires admin privileges (SetupDi, pnputil, etc.)
+    // So we run an elevated PowerShell script that does everything:
+    // 1. pnputil /add-driver to add to driver store
+    // 2. Create device node via .NET SetupAPI P/Invoke if needed
+    // 3. Enable device if it already exists
+
+    // Write a temporary PS1 script that handles all cases
+    wchar_t tempDir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempDir);
+    std::wstring scriptPath = std::wstring(tempDir) + L"kaptchi_install_vdd.ps1";
+
+    {
+        std::ofstream script(scriptPath);
+        if (!script.is_open()) {
+            std::cerr << "[VDM] Failed to create install script" << std::endl;
+            return false;
+        }
+
+        // Convert infPath to narrow (ASCII) string for the script
+        int len = WideCharToMultiByte(CP_ACP, 0, infPath.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string infPathNarrow(len - 1, '\0');
+        WideCharToMultiByte(CP_ACP, 0, infPath.c_str(), -1, &infPathNarrow[0], len, nullptr, nullptr);
+
+        script << "$ErrorActionPreference = 'Stop'\n";
+        script << "$infPath = '" << infPathNarrow << "'\n";
+        script << "\n";
+        script << "# Step 1: Add driver to store\n";
+        script << "Write-Host 'Adding driver to store...'\n";
+        script << "pnputil /add-driver $infPath /install\n";
+        script << "\n";
+        script << "# Step 2: Check if device already exists\n";
+        script << "$dev = Get-PnpDevice -ErrorAction SilentlyContinue | Where-Object { $_.HardwareID -contains 'ROOT\\MttVDD' }\n";
+        script << "if ($dev) {\n";
+        script << "    Write-Host 'Device exists, enabling...'\n";
+        script << "    Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue\n";
+        script << "    # Restart the device to pick up updated driver\n";
+        script << "    Disable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false -ErrorAction SilentlyContinue\n";
+        script << "    Start-Sleep -Seconds 1\n";
+        script << "    Enable-PnpDevice -InstanceId $dev.InstanceId -Confirm:$false\n";
+        script << "} else {\n";
+        script << "    Write-Host 'Creating device node...'\n";
+        script << "    # Use SetupAPI via P/Invoke to create root-enumerated device\n";
+        script << "    Add-Type @'\n";
+        script << "using System;\n";
+        script << "using System.Runtime.InteropServices;\n";
+        script << "public class DeviceInstaller {\n";
+        script << "    [DllImport(\"setupapi.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\n";
+        script << "    static extern IntPtr SetupDiCreateDeviceInfoList(ref Guid ClassGuid, IntPtr hwndParent);\n";
+        script << "    [DllImport(\"setupapi.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\n";
+        script << "    static extern bool SetupDiCreateDeviceInfoW(IntPtr DeviceInfoSet, string DeviceName, ref Guid ClassGuid, string DeviceDescription, IntPtr hwndParent, uint CreationFlags, ref SP_DEVINFO_DATA DeviceInfoData);\n";
+        script << "    [DllImport(\"setupapi.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\n";
+        script << "    static extern bool SetupDiSetDeviceRegistryPropertyW(IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData, uint Property, byte[] PropertyBuffer, uint PropertyBufferSize);\n";
+        script << "    [DllImport(\"setupapi.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\n";
+        script << "    static extern bool SetupDiCallClassInstaller(uint InstallFunction, IntPtr DeviceInfoSet, ref SP_DEVINFO_DATA DeviceInfoData);\n";
+        script << "    [DllImport(\"setupapi.dll\", SetLastError=true)]\n";
+        script << "    static extern bool SetupDiDestroyDeviceInfoList(IntPtr DeviceInfoSet);\n";
+        script << "    [DllImport(\"newdev.dll\", CharSet=CharSet.Unicode, SetLastError=true)]\n";
+        script << "    static extern bool UpdateDriverForPlugAndPlayDevicesW(IntPtr hwndParent, string HardwareId, string FullInfPath, uint InstallFlags, out bool RebootRequired);\n";
+        script << "    [StructLayout(LayoutKind.Sequential)]\n";
+        script << "    public struct SP_DEVINFO_DATA {\n";
+        script << "        public uint cbSize;\n";
+        script << "        public Guid ClassGuid;\n";
+        script << "        public uint DevInst;\n";
+        script << "        public IntPtr Reserved;\n";
+        script << "    }\n";
+        script << "    const uint DICD_GENERATE_ID = 1;\n";
+        script << "    const uint DIF_REGISTERDEVICE = 0x19;\n";
+        script << "    const uint SPDRP_HARDWAREID = 1;\n";
+        script << "    const uint INSTALLFLAG_FORCE = 1;\n";
+        script << "    static readonly Guid GUID_DISPLAY = new Guid(\"{4d36e968-e325-11ce-bfc1-08002be10318}\");\n";
+        script << "    public static bool Install(string infPath) {\n";
+        script << "        Guid classGuid = GUID_DISPLAY;\n";
+        script << "        IntPtr devs = SetupDiCreateDeviceInfoList(ref classGuid, IntPtr.Zero);\n";
+        script << "        if (devs == (IntPtr)(-1)) return false;\n";
+        script << "        SP_DEVINFO_DATA devInfo = new SP_DEVINFO_DATA();\n";
+        script << "        devInfo.cbSize = (uint)Marshal.SizeOf(devInfo);\n";
+        script << "        if (!SetupDiCreateDeviceInfoW(devs, \"MttVDD\", ref classGuid, null, IntPtr.Zero, DICD_GENERATE_ID, ref devInfo)) {\n";
+        script << "            SetupDiDestroyDeviceInfoList(devs); return false;\n";
+        script << "        }\n";
+        script << "        string hwid = \"ROOT\\\\MttVDD\\0\";\n";
+        script << "        byte[] hwidBytes = System.Text.Encoding.Unicode.GetBytes(hwid + \"\\0\");\n";
+        script << "        if (!SetupDiSetDeviceRegistryPropertyW(devs, ref devInfo, SPDRP_HARDWAREID, hwidBytes, (uint)hwidBytes.Length)) {\n";
+        script << "            SetupDiDestroyDeviceInfoList(devs); return false;\n";
+        script << "        }\n";
+        script << "        if (!SetupDiCallClassInstaller(DIF_REGISTERDEVICE, devs, ref devInfo)) {\n";
+        script << "            SetupDiDestroyDeviceInfoList(devs); return false;\n";
+        script << "        }\n";
+        script << "        SetupDiDestroyDeviceInfoList(devs);\n";
+        script << "        bool reboot;\n";
+        script << "        UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, \"ROOT\\\\MttVDD\", infPath, INSTALLFLAG_FORCE, out reboot);\n";
+        script << "        return true;\n";
+        script << "    }\n";
+        script << "}\n";
+        script << "'@\n";
+        script << "    $result = [DeviceInstaller]::Install($infPath)\n";
+        script << "    Write-Host \"Device creation result: $result\"\n";
+        script << "}\n";
+        script << "Write-Host 'Done'\n";
+
+        script.close();
     }
 
-    return true;
-}
+    std::cout << "[VDM] Running elevated install script..." << std::endl;
 
-bool VirtualDisplayManager::UninstallDriver(const wchar_t* devconPath) {
+    // Run the script elevated (triggers UAC)
+    std::wstring psArgs = L"-NoProfile -ExecutionPolicy Bypass -File \"" + scriptPath + L"\"";
+
     SHELLEXECUTEINFOW sei = {};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.lpVerb = L"runas"; // Request admin elevation
-    sei.lpFile = devconPath;
-    sei.lpParameters = L"remove root\\MttVDD";
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"powershell.exe";
+    sei.lpParameters = psArgs.c_str();
     sei.nShow = SW_HIDE;
 
     if (!ShellExecuteExW(&sei)) {
-        std::cerr << "[VDM] Failed to launch devcon for uninstall: " << GetLastError() << std::endl;
+        DWORD err = GetLastError();
+        std::cerr << "[VDM] Failed to launch elevated installer: " << err << std::endl;
+        DeleteFileW(scriptPath.c_str());
         return false;
     }
 
+    if (sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 120000); // 2 min timeout
+        DWORD exitCode = 0;
+        GetExitCodeProcess(sei.hProcess, &exitCode);
+        CloseHandle(sei.hProcess);
+        std::cout << "[VDM] Install script exit code: " << exitCode << std::endl;
+    }
+
+    DeleteFileW(scriptPath.c_str());
+
+    // Wait for the driver to initialize
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+
+    bool installed = IsDriverInstalled();
+    std::cout << "[VDM] Driver installed: " << (installed ? "YES" : "NO") << std::endl;
+    return installed;
+}
+
+bool VirtualDisplayManager::UninstallDriver(const wchar_t* /* unused */) {
+    // Use pnputil to delete the driver (no need for devcon)
+    // First, find the OEM inf name for the VDD driver
+    std::wstring psFindOem =
+        L"-NoProfile -ExecutionPolicy Bypass -Command \""
+        L"$d = pnputil /enum-drivers | Select-String -Pattern 'MttVDD' -Context 5; "
+        L"if ($d) { ($d.Context.PreContext | Select-String 'oem\\d+\\.inf').Matches.Value }\"";
+
+    std::wstring oemOutputFile;
+    {
+        wchar_t tempDir[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tempDir);
+        oemOutputFile = std::wstring(tempDir) + L"kaptchi_vdd_oem.txt";
+    }
+
+    std::wstring psFindOemRedirect =
+        L"-NoProfile -ExecutionPolicy Bypass -Command \""
+        L"$lines = pnputil /enum-drivers; "
+        L"for ($i = 0; $i -lt $lines.Count; $i++) { "
+        L"  if ($lines[$i] -match 'MttVDD') { "
+        L"    for ($j = [Math]::Max(0,$i-10); $j -le $i; $j++) { "
+        L"      if ($lines[$j] -match '(oem\\d+\\.inf)') { "
+        L"        $matches[1] | Out-File -FilePath '" + oemOutputFile + L"' -Encoding ASCII -NoNewline; break "
+        L"      } } break } }\"";
+
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpFile = L"powershell.exe";
+    sei.lpParameters = psFindOemRedirect.c_str();
+    sei.nShow = SW_HIDE;
+
+    if (ShellExecuteExW(&sei) && sei.hProcess) {
+        WaitForSingleObject(sei.hProcess, 30000);
+        CloseHandle(sei.hProcess);
+    }
+
+    std::string oemInf;
+    std::ifstream oemFile(oemOutputFile);
+    if (oemFile.is_open()) {
+        std::getline(oemFile, oemInf);
+        oemFile.close();
+        while (!oemInf.empty() && (oemInf.back() == '\r' || oemInf.back() == '\n' || oemInf.back() == ' '))
+            oemInf.pop_back();
+    }
+    DeleteFileW(oemOutputFile.c_str());
+
+    if (oemInf.empty()) {
+        std::cerr << "[VDM] Could not find VDD OEM driver package" << std::endl;
+        return false;
+    }
+
+    std::wstring oemInfW(oemInf.begin(), oemInf.end());
+    std::wcout << L"[VDM] Found VDD driver: " << oemInfW << std::endl;
+
+    // Delete the driver with pnputil (requires admin)
+    std::wstring pnpArgs = L"/delete-driver " + oemInfW + L" /uninstall /force";
+
+    memset(&sei, 0, sizeof(sei));
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.lpVerb = L"runas";
+    sei.lpFile = L"pnputil.exe";
+    sei.lpParameters = pnpArgs.c_str();
+    sei.nShow = SW_HIDE;
+
+    if (!ShellExecuteExW(&sei)) {
+        std::cerr << "[VDM] Failed to launch pnputil for uninstall: " << GetLastError() << std::endl;
+        return false;
+    }
     if (sei.hProcess) {
         WaitForSingleObject(sei.hProcess, 60000);
         DWORD exitCode = 0;
         GetExitCodeProcess(sei.hProcess, &exitCode);
         CloseHandle(sei.hProcess);
-        if (exitCode != 0) {
-            std::cerr << "[VDM] devcon remove failed with exit code: " << exitCode << std::endl;
-            return false;
-        }
+        std::cout << "[VDM] pnputil uninstall exit code: " << exitCode << std::endl;
     }
 
-    std::cout << "[VDM] VDD driver uninstalled successfully" << std::endl;
+    std::cout << "[VDM] VDD driver uninstalled" << std::endl;
     return true;
 }
 
@@ -368,62 +633,109 @@ std::wstring VirtualDisplayManager::GetSettingsXmlPath() {
 }
 
 bool VirtualDisplayManager::WriteSettingsXml(int width, int height) {
-    std::wofstream file(VDD_SETTINGS_FILE);
+    // VDD expects UTF-8 encoded XML with its specific schema
+    std::ofstream file(VDD_SETTINGS_FILE);
     if (!file.is_open()) {
         std::cerr << "[VDM] Cannot open settings XML for writing" << std::endl;
         return false;
     }
 
-    // Write VDD settings XML with one monitor
-    file << L"<?xml version=\"1.0\" encoding=\"utf-8\"?>" << std::endl;
-    file << L"<VddSettings>" << std::endl;
-    file << L"  <Monitors>" << std::endl;
-    file << L"    <Monitor>" << std::endl;
-    file << L"      <Width>" << width << L"</Width>" << std::endl;
-    file << L"      <Height>" << height << L"</Height>" << std::endl;
-    file << L"      <RefreshRates>" << std::endl;
-    file << L"        <Rate>60</Rate>" << std::endl;
-    file << L"      </RefreshRates>" << std::endl;
-    file << L"    </Monitor>" << std::endl;
-    file << L"  </Monitors>" << std::endl;
-    file << L"</VddSettings>" << std::endl;
+    file << "<?xml version='1.0' encoding='utf-8'?>\n";
+    file << "<vdd_settings>\n";
+    file << "    <monitors>\n";
+    file << "        <count>1</count>\n";
+    file << "    </monitors>\n";
+    file << "    <gpu>\n";
+    file << "        <friendlyname>default</friendlyname>\n";
+    file << "    </gpu>\n";
+    file << "    <global>\n";
+    file << "        <g_refresh_rate>60</g_refresh_rate>\n";
+    file << "    </global>\n";
+    file << "    <resolutions>\n";
+    file << "        <resolution>\n";
+    file << "            <width>" << width << "</width>\n";
+    file << "            <height>" << height << "</height>\n";
+    file << "            <refresh_rate>60</refresh_rate>\n";
+    file << "        </resolution>\n";
+    file << "    </resolutions>\n";
+    file << "    <options>\n";
+    file << "        <HardwareCursor>true</HardwareCursor>\n";
+    file << "    </options>\n";
+    file << "</vdd_settings>\n";
 
     file.close();
+    std::cout << "[VDM] Wrote settings XML: " << width << "x" << height << std::endl;
     return true;
 }
 
 bool VirtualDisplayManager::WriteEmptySettingsXml() {
-    std::wofstream file(VDD_SETTINGS_FILE);
+    std::ofstream file(VDD_SETTINGS_FILE);
     if (!file.is_open()) return false;
 
-    file << L"<?xml version=\"1.0\" encoding=\"utf-8\"?>" << std::endl;
-    file << L"<VddSettings>" << std::endl;
-    file << L"  <Monitors>" << std::endl;
-    file << L"  </Monitors>" << std::endl;
-    file << L"</VddSettings>" << std::endl;
+    file << "<?xml version='1.0' encoding='utf-8'?>\n";
+    file << "<vdd_settings>\n";
+    file << "    <monitors>\n";
+    file << "        <count>0</count>\n";
+    file << "    </monitors>\n";
+    file << "    <gpu>\n";
+    file << "        <friendlyname>default</friendlyname>\n";
+    file << "    </gpu>\n";
+    file << "    <resolutions>\n";
+    file << "    </resolutions>\n";
+    file << "</vdd_settings>\n";
 
     file.close();
+    std::cout << "[VDM] Wrote empty settings XML" << std::endl;
+    return true;
+}
+
+bool VirtualDisplayManager::SendPipeCommand(const std::wstring& command) {
+    HANDLE hPipe = CreateFileW(
+        VDD_PIPE_NAME,
+        GENERIC_READ | GENERIC_WRITE,
+        0, nullptr,
+        OPEN_EXISTING,
+        0, nullptr);
+
+    if (hPipe == INVALID_HANDLE_VALUE) {
+        std::cerr << "[VDM] Cannot connect to VDD pipe (error " << GetLastError() << ")" << std::endl;
+        return false;
+    }
+
+    DWORD mode = PIPE_READMODE_MESSAGE;
+    SetNamedPipeHandleState(hPipe, &mode, nullptr, nullptr);
+
+    DWORD bytesWritten = 0;
+    DWORD dataSize = static_cast<DWORD>(command.size() * sizeof(wchar_t));
+    BOOL ok = WriteFile(hPipe, command.c_str(), dataSize, &bytesWritten, nullptr);
+
+    if (!ok) {
+        std::cerr << "[VDM] Failed to write to VDD pipe (error " << GetLastError() << ")" << std::endl;
+        CloseHandle(hPipe);
+        return false;
+    }
+
+    // Read response
+    wchar_t buffer[512] = {};
+    DWORD bytesRead = 0;
+    ReadFile(hPipe, buffer, sizeof(buffer) - sizeof(wchar_t), &bytesRead, nullptr);
+    if (bytesRead > 0) {
+        std::wcout << L"[VDM] Pipe response: " << buffer << std::endl;
+    }
+
+    CloseHandle(hPipe);
+    std::cout << "[VDM] Sent pipe command: ";
+    std::wcout << command << std::endl;
     return true;
 }
 
 bool VirtualDisplayManager::NotifyDriverReload() {
-    // The VDD driver watches for changes to its settings.
-    // We can also try to trigger a display refresh via ChangeDisplaySettingsEx.
-    // First, try the registry notification approach used by VDD.Control:
-    HKEY hKey;
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\VirtualDisplayDriver",
-                      0, KEY_SET_VALUE, &hKey) == ERROR_SUCCESS) {
-        // Write a "reload" trigger value
-        DWORD val = 1;
-        RegSetValueExW(hKey, L"ReloadSettings", 0, REG_DWORD,
-                       reinterpret_cast<const BYTE*>(&val), sizeof(val));
-        RegCloseKey(hKey);
+    if (SendPipeCommand(L"RELOAD_DRIVER")) {
+        return true;
     }
-
-    // Also trigger a display settings change to force re-enumeration
+    // Fallback
     ChangeDisplaySettingsExW(nullptr, nullptr, nullptr, 0, nullptr);
-
-    return true;
+    return false;
 }
 
 bool VirtualDisplayManager::FindVddAdapter(std::wstring& deviceName) {

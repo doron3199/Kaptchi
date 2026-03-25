@@ -14,8 +14,6 @@
 - **PDF Export**: Snap pictures during class and export them as a single PDF document.
 - **Mobile Connection**: Use your smartphone as a portable camera close to the board via QR code connection.
 
-> **Tip**: If you have a single monitor setup and want to screen capture apps like Zoom or Google Meet without the app window blocking your view, we recommend installing the [Virtual-Display-Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) to create a virtual second monitor.
-
 ## Getting Started
 
 ### Prerequisites
@@ -61,8 +59,3 @@ To build Kaptchi from source, you need Flutter installed.
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Notice
-
-The Majority is build with the help of AI. Mainly Gemini 3 pro and Claude 4.5 Opus
-There can be mistakes in the code, please report them if you find any.

@@ -725,14 +725,18 @@ class _CameraScreenState extends State<CameraScreen>
     final double contentY = (tapPos.dy - _viewOffset.dy) / visualScale;
 
     // Normalize to 0-1 range relative to viewport
-    final double normalizedX = contentX / viewportSize.width;
-    final double normalizedY = contentY / viewportSize.height;
+    double normalizedX = contentX / viewportSize.width;
+    double normalizedY = contentY / viewportSize.height;
 
-    debugPrint(
-      '[VDD Click] tap=(${tapPos.dx.toStringAsFixed(1)}, ${tapPos.dy.toStringAsFixed(1)}) '
-      'zoom=$_currentZoom visualScale=${visualScale.toStringAsFixed(2)} '
-      'offset=$_viewOffset → normalized=(${normalizedX.toStringAsFixed(3)}, ${normalizedY.toStringAsFixed(3)})',
-    );
+    // If live crop is active, map display coords back to original frame coords
+    if (_isLiveCropActive) {
+      final mapped = NativeCameraService().mapDisplayToOriginal(
+        normalizedX.clamp(0.0, 1.0),
+        normalizedY.clamp(0.0, 1.0),
+      );
+      normalizedX = mapped.x;
+      normalizedY = mapped.y;
+    }
 
     NativeCameraService().sendClickToVirtualDisplay(
       normalizedX.clamp(0.0, 1.0),
@@ -755,8 +759,18 @@ class _CameraScreenState extends State<CameraScreen>
     final double contentX = (scrollPos.dx - _viewOffset.dx) / visualScale;
     final double contentY = (scrollPos.dy - _viewOffset.dy) / visualScale;
 
-    final double normalizedX = contentX / viewportSize.width;
-    final double normalizedY = contentY / viewportSize.height;
+    double normalizedX = contentX / viewportSize.width;
+    double normalizedY = contentY / viewportSize.height;
+
+    // If live crop is active, map display coords back to original frame coords
+    if (_isLiveCropActive) {
+      final mapped = NativeCameraService().mapDisplayToOriginal(
+        normalizedX.clamp(0.0, 1.0),
+        normalizedY.clamp(0.0, 1.0),
+      );
+      normalizedX = mapped.x;
+      normalizedY = mapped.y;
+    }
 
     // Convert Flutter scroll delta to Windows WHEEL_DELTA units
     // Flutter gives pixels, Windows expects multiples of 120 (WHEEL_DELTA)

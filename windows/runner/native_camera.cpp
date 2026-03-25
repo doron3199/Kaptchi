@@ -1690,6 +1690,115 @@ extern "C" __declspec(dllexport) void SetLiveCropCorners(double* corners) {
     }
 }
 
+// Map a normalized display coordinate (after crop) back to the original frame coordinate.
+// Input: normalizedX/Y in 0-1 range within the displayed frame.
+// Output: writes the original-frame normalized coordinate to outX/outY.
+// Returns 1 if crop is active and mapping was done, 0 if no crop (pass-through).
+extern "C" __declspec(dllexport) int32_t MapDisplayToOriginal(
+    float normalizedX, float normalizedY, float* outX, float* outY) {
+
+    if (!g_live_crop_enabled || !outX || !outY) {
+        if (outX) *outX = normalizedX;
+        if (outY) *outY = normalizedY;
+        return 0;
+    }
+
+    double corners[8];
+    {
+        std::lock_guard<std::mutex> lock(g_live_crop_mutex);
+        memcpy(corners, g_live_crop_corners, sizeof(corners));
+    }
+
+    // Reconstruct the same geometry as ApplyLivePerspectiveCrop
+    // We need to know the frame dimensions — use a reference size (actual aspect doesn't matter
+    // for normalized coords, but we need consistent pixel math).
+    int origWidth = 1920, origHeight = 1080; // default
+    if (g_native_camera) {
+        int w = g_native_camera->GetFrameWidth();
+        int h = g_native_camera->GetFrameHeight();
+        if (w > 0 && h > 0) {
+            origWidth = w;
+            origHeight = h;
+        }
+    }
+
+    // Source points (crop corners in pixel coords)
+    std::vector<cv::Point2f> srcPoints;
+    for (int i = 0; i < 4; i++) {
+        srcPoints.push_back(cv::Point2f(
+            (float)(corners[i*2] * origWidth),
+            (float)(corners[i*2+1] * origHeight)
+        ));
+    }
+
+    // Destination size (same logic as ApplyLivePerspectiveCrop)
+    auto dist = [](cv::Point2f a, cv::Point2f b) -> float {
+        return (float)std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2));
+    };
+    float w1 = dist(srcPoints[0], srcPoints[1]);
+    float w2 = dist(srcPoints[3], srcPoints[2]);
+    float maxWidth = std::max(w1, w2);
+    float h1 = dist(srcPoints[0], srcPoints[3]);
+    float h2 = dist(srcPoints[1], srcPoints[2]);
+    float maxHeight = std::max(h1, h2);
+
+    if (maxWidth < 10 || maxHeight < 10) {
+        *outX = normalizedX;
+        *outY = normalizedY;
+        return 0;
+    }
+
+    // Compute how the cropped image is placed in the output frame
+    float cropAspect = maxWidth / maxHeight;
+    int finalHeight = origHeight;
+    int finalWidth = (int)(finalHeight * cropAspect);
+    int xOffset, yOffset = 0;
+
+    if (finalWidth > origWidth) {
+        // Scaled to fit width
+        finalWidth = origWidth;
+        finalHeight = (int)(origWidth / cropAspect);
+        xOffset = 0;
+        yOffset = (origHeight - finalHeight) / 2;
+        if (yOffset < 0) yOffset = 0;
+    } else {
+        // Centered horizontally
+        xOffset = (origWidth - finalWidth) / 2;
+    }
+
+    // Convert normalized display coord to pixel in the output frame
+    float pixelX = normalizedX * origWidth;
+    float pixelY = normalizedY * origHeight;
+
+    // Map from output frame to the cropped/resized image
+    float cropPixelX = (pixelX - xOffset) / finalWidth * maxWidth;
+    float cropPixelY = (pixelY - yOffset) / finalHeight * maxHeight;
+
+    // Check if the click is within the cropped area
+    if (cropPixelX < 0 || cropPixelX >= maxWidth || cropPixelY < 0 || cropPixelY >= maxHeight) {
+        *outX = normalizedX;
+        *outY = normalizedY;
+        return 0;
+    }
+
+    // Inverse perspective transform: map from cropped image back to original frame
+    std::vector<cv::Point2f> dstPoints;
+    dstPoints.push_back(cv::Point2f(0, 0));
+    dstPoints.push_back(cv::Point2f(maxWidth - 1, 0));
+    dstPoints.push_back(cv::Point2f(maxWidth - 1, maxHeight - 1));
+    dstPoints.push_back(cv::Point2f(0, maxHeight - 1));
+
+    cv::Mat M = cv::getPerspectiveTransform(dstPoints, srcPoints); // inverse direction
+    std::vector<cv::Point2f> input = { cv::Point2f(cropPixelX, cropPixelY) };
+    std::vector<cv::Point2f> output;
+    cv::perspectiveTransform(input, output, M);
+
+    // Normalize back to 0-1
+    *outX = output[0].x / origWidth;
+    *outY = output[0].y / origHeight;
+    return 1;
+}
+
 extern "C" __declspec(dllexport) void SetFilterParameter(int32_t filterId, float param1) {
     std::lock_guard<std::mutex> lock(g_filter_params_mutex);
     g_filter_params[filterId] = param1;
@@ -1912,12 +2021,12 @@ extern "C" {
         return success ? 1 : 0;
     }
 
-    __declspec(dllexport) int32_t LaunchVddInstaller(const wchar_t* path) {
-        return VirtualDisplayManager::LaunchInstaller(path) ? 1 : 0;
+    __declspec(dllexport) int32_t InstallBundledVdd() {
+        return VirtualDisplayManager::InstallBundledDriver() ? 1 : 0;
     }
 
-    __declspec(dllexport) int32_t UninstallVddDriver(const wchar_t* devconPath) {
-        return VirtualDisplayManager::UninstallDriver(devconPath) ? 1 : 0;
+    __declspec(dllexport) int32_t UninstallVddDriver() {
+        return VirtualDisplayManager::UninstallDriver() ? 1 : 0;
     }
 
     // Send a mouse click to the virtual display.

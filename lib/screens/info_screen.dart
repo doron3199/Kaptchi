@@ -27,30 +27,6 @@ class InfoScreen extends StatelessWidget {
                 ),
                 const SizedBox(height: 16),
                 _buildSection(
-                  title: l10n.singleMonitorTip,
-                  content: l10n.singleMonitorTipDescription,
-                  icon: Icons.monitor_rounded,
-                  child: Semantics(
-                    link: true,
-                    label: l10n.getVirtualDisplayDriver,
-                    child: InkWell(
-                      onTap: () => launchUrl(
-                        Uri.parse(
-                          'https://github.com/VirtualDrivers/Virtual-Display-Driver',
-                        ),
-                      ),
-                      child: Text(
-                        l10n.getVirtualDisplayDriver,
-                        style: const TextStyle(
-                          color: Colors.blueAccent,
-                          decoration: TextDecoration.underline,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                _buildSection(
                   title: l10n.smartFilters,
                   content: '',
                   icon: Icons.star_outline_rounded,

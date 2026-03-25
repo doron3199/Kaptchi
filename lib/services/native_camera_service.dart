@@ -777,10 +777,11 @@ class NativeCameraService {
   late RemoveVirtualDisplayDart _removeVirtualDisplay;
   late GetVirtualDisplayIndex _getVirtualDisplayIndex;
   late StartVirtualDisplayCapture _startVirtualDisplayCapture;
-  late LaunchVddInstaller _launchVddInstaller;
-  late UninstallVddDriver _uninstallVddDriver;
+  late InstallBundledVddDart _installBundledVdd;
+  late UninstallVddDriverDart _uninstallVddDriver;
   late SendClickToVirtualDisplay _sendClickToVirtualDisplay;
   late SendScrollToVirtualDisplay _sendScrollToVirtualDisplay;
+  late MapDisplayToOriginalDart _mapDisplayToOriginal;
 
   bool _vddInitialized = false;
 
@@ -811,11 +812,11 @@ class NativeCameraService {
           'StartVirtualDisplayCapture',
         )
         .asFunction();
-    _launchVddInstaller = _nativeLib
-        .lookup<NativeFunction<LaunchVddInstallerFunc>>('LaunchVddInstaller')
+    _installBundledVdd = _nativeLib
+        .lookup<NativeFunction<InstallBundledVddFunc>>('InstallBundledVdd')
         .asFunction();
     _uninstallVddDriver = _nativeLib
-        .lookup<NativeFunction<UninstallVddDriverFunc>>('UninstallVddDriver')
+        .lookup<NativeFunction<UninstallVddDriverNativeFunc>>('UninstallVddDriver')
         .asFunction();
     _sendClickToVirtualDisplay = _nativeLib
         .lookup<NativeFunction<SendClickToVirtualDisplayFunc>>(
@@ -825,6 +826,11 @@ class NativeCameraService {
     _sendScrollToVirtualDisplay = _nativeLib
         .lookup<NativeFunction<SendScrollToVirtualDisplayFunc>>(
           'SendScrollToVirtualDisplay',
+        )
+        .asFunction();
+    _mapDisplayToOriginal = _nativeLib
+        .lookup<NativeFunction<MapDisplayToOriginalFunc>>(
+          'MapDisplayToOriginal',
         )
         .asFunction();
 
@@ -863,15 +869,10 @@ class NativeCameraService {
     return _startVirtualDisplayCapture(windowHandle) == 1;
   }
 
-  /// Launch the VDD installer (VDD.Control.exe)
-  bool launchVddInstaller(String path) {
+  /// Install the bundled VDD driver from the app's vdd_driver/ directory
+  bool installBundledVdd() {
     _initializeVdd();
-    final pathPtr = path.toNativeUtf16();
-    try {
-      return _launchVddInstaller(pathPtr) == 1;
-    } finally {
-      malloc.free(pathPtr);
-    }
+    return _installBundledVdd() == 1;
   }
 
   /// Send a mouse click to the virtual display at normalized coordinates.
@@ -897,15 +898,25 @@ class NativeCameraService {
     return _sendScrollToVirtualDisplay(normalizedX, normalizedY, deltaY) == 1;
   }
 
-  /// Uninstall the VDD driver using devcon.exe (triggers UAC prompt)
-  bool uninstallVddDriver(String devconPath) {
+  /// Map a normalized display coordinate back to the original frame coordinate,
+  /// accounting for perspective crop. Returns the mapped (x, y) pair.
+  ({double x, double y}) mapDisplayToOriginal(double normalizedX, double normalizedY) {
     _initializeVdd();
-    final pathPtr = devconPath.toNativeUtf16();
+    final outX = malloc<Float>(1);
+    final outY = malloc<Float>(1);
     try {
-      return _uninstallVddDriver(pathPtr) == 1;
+      _mapDisplayToOriginal(normalizedX.toDouble(), normalizedY.toDouble(), outX, outY);
+      return (x: outX.value.toDouble(), y: outY.value.toDouble());
     } finally {
-      malloc.free(pathPtr);
+      malloc.free(outX);
+      malloc.free(outY);
     }
+  }
+
+  /// Uninstall the VDD driver using pnputil (triggers UAC prompt)
+  bool uninstallVddDriver() {
+    _initializeVdd();
+    return _uninstallVddDriver() == 1;
   }
 
   // --- Canvas Full-Res Export Methods ---
@@ -1575,11 +1586,11 @@ typedef GetVirtualDisplayIndex = int Function();
 typedef StartVirtualDisplayCaptureFunc = Int32 Function(Int64 windowHandle);
 typedef StartVirtualDisplayCapture = int Function(int windowHandle);
 
-typedef LaunchVddInstallerFunc = Int32 Function(Pointer<Utf16> path);
-typedef LaunchVddInstaller = int Function(Pointer<Utf16> path);
+typedef InstallBundledVddFunc = Int32 Function();
+typedef InstallBundledVddDart = int Function();
 
-typedef UninstallVddDriverFunc = Int32 Function(Pointer<Utf16> devconPath);
-typedef UninstallVddDriver = int Function(Pointer<Utf16> devconPath);
+typedef UninstallVddDriverNativeFunc = Int32 Function();
+typedef UninstallVddDriverDart = int Function();
 
 typedef SendClickToVirtualDisplayFunc =
     Int32 Function(Float normalizedX, Float normalizedY, Int32 clickType);
@@ -1590,3 +1601,8 @@ typedef SendScrollToVirtualDisplayFunc =
     Int32 Function(Float normalizedX, Float normalizedY, Int32 deltaY);
 typedef SendScrollToVirtualDisplay =
     int Function(double normalizedX, double normalizedY, int deltaY);
+
+typedef MapDisplayToOriginalFunc =
+    Int32 Function(Float normalizedX, Float normalizedY, Pointer<Float> outX, Pointer<Float> outY);
+typedef MapDisplayToOriginalDart =
+    int Function(double normalizedX, double normalizedY, Pointer<Float> outX, Pointer<Float> outY);
