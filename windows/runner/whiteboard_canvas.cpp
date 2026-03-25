@@ -2888,6 +2888,43 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
                 }
             }
 
+            // --- Bbox IoU + dimension-ratio duplicate gate ---
+            // Reject unmatched blobs whose bbox overlaps an existing node
+            // by >50% IoU and whose width & height ratios are both >70%.
+            {
+                bool is_bbox_duplicate = false;
+                for (int nid : nearby_nodes) {
+                    auto nit = group.nodes.find(nid);
+                    if (nit == group.nodes.end()) continue;
+                    const auto& existing = *nit->second;
+                    if (existing.created_frame == current_frame) continue;
+
+                    const cv::Rect isect = canvas_bbox & existing.bbox_canvas;
+                    if (isect.empty()) continue;
+                    const float isect_area = static_cast<float>(isect.area());
+                    const float union_area = static_cast<float>(
+                        canvas_bbox.area() + existing.bbox_canvas.area()) - isect_area;
+                    const float iou = (union_area > 0.0f) ? isect_area / union_area : 0.0f;
+                    if (iou <= kDuplicateBboxIouThreshold) continue;
+
+                    const float w_ratio = static_cast<float>(
+                        std::min(canvas_bbox.width, existing.bbox_canvas.width)) /
+                        std::max(1, std::max(canvas_bbox.width, existing.bbox_canvas.width));
+                    const float h_ratio = static_cast<float>(
+                        std::min(canvas_bbox.height, existing.bbox_canvas.height)) /
+                        std::max(1, std::max(canvas_bbox.height, existing.bbox_canvas.height));
+                    if (w_ratio >= kDuplicateDimensionRatioMin && h_ratio >= kDuplicateDimensionRatioMin) {
+                        is_bbox_duplicate = true;
+                        break;
+                    }
+                }
+                if (is_bbox_duplicate) {
+                    placed.push_back(blob_index);
+                    placed_any = true;
+                    continue;
+                }
+            }
+
             const int node_id = AppendFrameBlobToGroup(
                 group, blob, final_offset, anchor_node_ids, current_frame);
 

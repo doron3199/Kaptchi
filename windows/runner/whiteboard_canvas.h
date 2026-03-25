@@ -348,6 +348,10 @@ private:
     static constexpr int    kMinRansacInliers           = 3; // Minimum inliers required for a blob-node match to be accepted
     static constexpr int    kKdTreeKnnNeighbors         = 5; // Number of nearest neighbors to retrieve from KD-Tree for each blob during matching
 
+    // Bbox duplicate rejection (pre-admission gate for unmatched blobs)
+    static constexpr float  kDuplicateBboxIouThreshold     = 0.50f; // Minimum bbox IoU to consider a blob a duplicate of an existing node
+    static constexpr float  kDuplicateDimensionRatioMin    = 0.70f; // Minimum width & height ratio (min/max) to confirm duplicate
+
     // Frame-to-canvas merge depth
     static constexpr int    kMaxNewBlobHopDepth         = 2; // Max BFS hops from a matched blob to admit unmatched blobs as new nodes
 
