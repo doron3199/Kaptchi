@@ -131,6 +131,8 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
       try {
         MediaServerService.instance.stopServer();
         RawSocketService.instance.stop();
+        // Cleanup any lingering virtual display
+        NativeCameraService().removeVirtualDisplay();
       } catch (e) {
         debugPrint('Error during shutdown cleanup: $e');
       }
@@ -307,6 +309,170 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     );
   }
 
+  void _handleVirtualDisplayCapture() {
+    final nativeService = NativeCameraService();
+
+    // Check if VDD is installed
+    if (!nativeService.isVirtualDisplayInstalled()) {
+      _showVddInstallDialog();
+      return;
+    }
+
+    // Show window picker, but use virtual display capture on selection
+    final windows = nativeService.getCapturableWindows();
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(AppLocalizations.of(context)!.selectWindowToCapture),
+        content: SizedBox(
+          width: 400,
+          height: 400,
+          child: ListView.builder(
+            itemCount: windows.length,
+            itemBuilder: (context, index) {
+              final window = windows[index];
+              return ListTile(
+                leading: const Icon(Icons.window),
+                title: Text(window.title, overflow: TextOverflow.ellipsis),
+                onTap: () {
+                  Navigator.of(context).pop();
+                  _startVirtualDisplayCapture(window.handle);
+                },
+              );
+            },
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _showUninstallVddDialog();
+            },
+            child: Text(
+              AppLocalizations.of(context)!.uninstallVdd,
+              style: const TextStyle(color: Colors.red),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(AppLocalizations.of(context)!.cancel),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _startVirtualDisplayCapture(int windowHandle) {
+    final nativeService = NativeCameraService();
+    final success = nativeService.startVirtualDisplayCapture(windowHandle);
+
+    if (!success) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              AppLocalizations.of(context)!.failedToStartScreenCapture,
+            ),
+          ),
+        );
+      }
+      return;
+    }
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => const CameraScreen(isVddCapture: true),
+      ),
+    ).then((_) {
+      // Cleanup: stop capture and remove virtual display
+      nativeService.stopScreenCapture();
+      nativeService.removeVirtualDisplay();
+      if (mounted) {
+        _startServer();
+      }
+    });
+  }
+
+  void _showVddInstallDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(AppLocalizations.of(context)!.vddNotInstalled),
+        content: Text(AppLocalizations.of(context)!.vddInstallPrompt),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(AppLocalizations.of(context)!.cancel),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(context).pop();
+              _launchVddInstaller();
+            },
+            child: Text(AppLocalizations.of(context)!.installVdd),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _launchVddInstaller() {
+    final nativeService = NativeCameraService();
+    // Look for VDD.Control in the app's directory
+    final exePath = Platform.resolvedExecutable;
+    final appDir = exePath.substring(0, exePath.lastIndexOf(Platform.pathSeparator));
+    final vddControlPath = '$appDir${Platform.pathSeparator}vdd_control${Platform.pathSeparator}VDD Control.exe';
+
+    nativeService.launchVddInstaller(vddControlPath);
+  }
+
+  void _showUninstallVddDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(AppLocalizations.of(context)!.uninstallVdd),
+        content: Text(AppLocalizations.of(context)!.uninstallVddPrompt),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(AppLocalizations.of(context)!.cancel),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () {
+              Navigator.of(context).pop();
+              _uninstallVdd();
+            },
+            child: Text(
+              AppLocalizations.of(context)!.uninstallVdd,
+              style: const TextStyle(color: Colors.white),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _uninstallVdd() {
+    final nativeService = NativeCameraService();
+    final exePath = Platform.resolvedExecutable;
+    final appDir = exePath.substring(0, exePath.lastIndexOf(Platform.pathSeparator));
+    final devconPath = '$appDir${Platform.pathSeparator}vdd_control${Platform.pathSeparator}Dependencies${Platform.pathSeparator}devcon.exe';
+
+    final success = nativeService.uninstallVddDriver(devconPath);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(success
+              ? AppLocalizations.of(context)!.vddUninstallSuccess
+              : AppLocalizations.of(context)!.vddUninstallFailed),
+        ),
+      );
+    }
+  }
+
   void _onDetect(BarcodeCapture capture) {
     if (!_isScanning) return;
 
@@ -424,6 +590,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                     ScreenCaptureWidget(
                       onSelectScreen: _startScreenCapture,
                       onSelectWindow: _showWindowPicker,
+                      onSelectVirtualWindow: _handleVirtualDisplayCapture,
                     ),
                   ],
                 ),

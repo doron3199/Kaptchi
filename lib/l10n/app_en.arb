@@ -196,5 +196,14 @@
   "resetWhiteboard": "Reset Whiteboard",
   "toggleCanvasView": "Toggle Canvas View",
   "showRawView": "Show Raw View",
-  "showStrokeView": "Show Stroke View"
+  "showStrokeView": "Show Stroke View",
+  "captureVirtualDisplay": "Capture in Virtual Display...",
+  "virtualDisplaySubtitle": "Best quality — uses virtual monitor",
+  "vddNotInstalled": "Virtual Display Driver Required",
+  "vddInstallPrompt": "The Virtual Display Driver is needed to capture windows in a virtual monitor. Would you like to install it now?",
+  "installVdd": "Install",
+  "uninstallVdd": "Uninstall Virtual Display Driver",
+  "uninstallVddPrompt": "Are you sure you want to uninstall the Virtual Display Driver? This will require administrator permissions (UAC prompt). The virtual display capture feature will stop working until reinstalled.",
+  "vddUninstallSuccess": "Virtual Display Driver uninstalled successfully",
+  "vddUninstallFailed": "Failed to uninstall Virtual Display Driver. Try uninstalling manually via Device Manager > Display adapters > Virtual Display Driver > Uninstall device."
 }

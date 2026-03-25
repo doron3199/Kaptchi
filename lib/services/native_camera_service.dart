@@ -770,6 +770,127 @@ class NativeCameraService {
     return _isScreenCaptureActive() == 1;
   }
 
+  // --- Virtual Display Manager Methods ---
+
+  late IsVirtualDisplayInstalled _isVirtualDisplayInstalled;
+  late CreateVirtualDisplay _createVirtualDisplay;
+  late RemoveVirtualDisplayDart _removeVirtualDisplay;
+  late GetVirtualDisplayIndex _getVirtualDisplayIndex;
+  late StartVirtualDisplayCapture _startVirtualDisplayCapture;
+  late LaunchVddInstaller _launchVddInstaller;
+  late UninstallVddDriver _uninstallVddDriver;
+  late SendClickToVirtualDisplay _sendClickToVirtualDisplay;
+
+  bool _vddInitialized = false;
+
+  void _initializeVdd() {
+    if (_vddInitialized) return;
+    initialize();
+
+    _isVirtualDisplayInstalled = _nativeLib
+        .lookup<NativeFunction<IsVirtualDisplayInstalledFunc>>(
+          'IsVirtualDisplayInstalled',
+        )
+        .asFunction();
+    _createVirtualDisplay = _nativeLib
+        .lookup<NativeFunction<CreateVirtualDisplayFunc>>('CreateVirtualDisplay')
+        .asFunction();
+    _removeVirtualDisplay = _nativeLib
+        .lookup<NativeFunction<RemoveVirtualDisplayFunc>>(
+          'RemoveVirtualDisplay',
+        )
+        .asFunction();
+    _getVirtualDisplayIndex = _nativeLib
+        .lookup<NativeFunction<GetVirtualDisplayIndexFunc>>(
+          'GetVirtualDisplayIndex',
+        )
+        .asFunction();
+    _startVirtualDisplayCapture = _nativeLib
+        .lookup<NativeFunction<StartVirtualDisplayCaptureFunc>>(
+          'StartVirtualDisplayCapture',
+        )
+        .asFunction();
+    _launchVddInstaller = _nativeLib
+        .lookup<NativeFunction<LaunchVddInstallerFunc>>('LaunchVddInstaller')
+        .asFunction();
+    _uninstallVddDriver = _nativeLib
+        .lookup<NativeFunction<UninstallVddDriverFunc>>('UninstallVddDriver')
+        .asFunction();
+    _sendClickToVirtualDisplay = _nativeLib
+        .lookup<NativeFunction<SendClickToVirtualDisplayFunc>>(
+          'SendClickToVirtualDisplay',
+        )
+        .asFunction();
+
+    _vddInitialized = true;
+  }
+
+  /// Check if the Virtual Display Driver is installed
+  bool isVirtualDisplayInstalled() {
+    _initializeVdd();
+    return _isVirtualDisplayInstalled() == 1;
+  }
+
+  /// Create a virtual display with the given resolution.
+  /// Returns the monitor index, or -1 on failure.
+  int createVirtualDisplay(int width, int height) {
+    _initializeVdd();
+    return _createVirtualDisplay(width, height);
+  }
+
+  /// Remove the virtual display
+  void removeVirtualDisplay() {
+    _initializeVdd();
+    _removeVirtualDisplay();
+  }
+
+  /// Get the monitor index of the virtual display (-1 if none)
+  int getVirtualDisplayIndex() {
+    _initializeVdd();
+    return _getVirtualDisplayIndex();
+  }
+
+  /// Start capturing a window via virtual display (create VD, move window, capture).
+  /// Returns true on success.
+  bool startVirtualDisplayCapture(int windowHandle) {
+    _initializeVdd();
+    return _startVirtualDisplayCapture(windowHandle) == 1;
+  }
+
+  /// Launch the VDD installer (VDD.Control.exe)
+  bool launchVddInstaller(String path) {
+    _initializeVdd();
+    final pathPtr = path.toNativeUtf16();
+    try {
+      return _launchVddInstaller(pathPtr) == 1;
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
+  /// Send a mouse click to the virtual display at normalized coordinates.
+  /// normalizedX/Y: 0.0-1.0 position within the display.
+  /// clickType: 0=left click, 1=right click, 2=left down, 3=left up
+  bool sendClickToVirtualDisplay(
+    double normalizedX,
+    double normalizedY, {
+    int clickType = 0,
+  }) {
+    _initializeVdd();
+    return _sendClickToVirtualDisplay(normalizedX, normalizedY, clickType) == 1;
+  }
+
+  /// Uninstall the VDD driver using devcon.exe (triggers UAC prompt)
+  bool uninstallVddDriver(String devconPath) {
+    _initializeVdd();
+    final pathPtr = devconPath.toNativeUtf16();
+    try {
+      return _uninstallVddDriver(pathPtr) == 1;
+    } finally {
+      malloc.free(pathPtr);
+    }
+  }
+
   // --- Canvas Full-Res Export Methods ---
 
   GetCanvasFullResRgbaDart? _getCanvasFullResRgba;
@@ -1420,3 +1541,30 @@ typedef StopScreenCapture = void Function();
 
 typedef IsScreenCaptureActiveFunc = Int32 Function();
 typedef IsScreenCaptureActive = int Function();
+
+// FFI type definitions for Virtual Display Manager
+typedef IsVirtualDisplayInstalledFunc = Int32 Function();
+typedef IsVirtualDisplayInstalled = int Function();
+
+typedef CreateVirtualDisplayFunc = Int32 Function(Int32 width, Int32 height);
+typedef CreateVirtualDisplay = int Function(int width, int height);
+
+typedef RemoveVirtualDisplayFunc = Void Function();
+typedef RemoveVirtualDisplayDart = void Function();
+
+typedef GetVirtualDisplayIndexFunc = Int32 Function();
+typedef GetVirtualDisplayIndex = int Function();
+
+typedef StartVirtualDisplayCaptureFunc = Int32 Function(Int64 windowHandle);
+typedef StartVirtualDisplayCapture = int Function(int windowHandle);
+
+typedef LaunchVddInstallerFunc = Int32 Function(Pointer<Utf16> path);
+typedef LaunchVddInstaller = int Function(Pointer<Utf16> path);
+
+typedef UninstallVddDriverFunc = Int32 Function(Pointer<Utf16> devconPath);
+typedef UninstallVddDriver = int Function(Pointer<Utf16> devconPath);
+
+typedef SendClickToVirtualDisplayFunc =
+    Int32 Function(Float normalizedX, Float normalizedY, Int32 clickType);
+typedef SendClickToVirtualDisplay =
+    int Function(double normalizedX, double normalizedY, int clickType);

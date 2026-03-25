@@ -433,4 +433,35 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get showStrokeView => 'Show Stroke View';
+
+  @override
+  String get captureVirtualDisplay => 'Capture in Virtual Display...';
+
+  @override
+  String get virtualDisplaySubtitle => 'Best quality — uses virtual monitor';
+
+  @override
+  String get vddNotInstalled => 'Virtual Display Driver Required';
+
+  @override
+  String get vddInstallPrompt =>
+      'The Virtual Display Driver is needed to capture windows in a virtual monitor. Would you like to install it now?';
+
+  @override
+  String get installVdd => 'Install';
+
+  @override
+  String get uninstallVdd => 'Uninstall Virtual Display Driver';
+
+  @override
+  String get uninstallVddPrompt =>
+      'Are you sure you want to uninstall the Virtual Display Driver? This will require administrator permissions (UAC prompt). The virtual display capture feature will stop working until reinstalled.';
+
+  @override
+  String get vddUninstallSuccess =>
+      'Virtual Display Driver uninstalled successfully';
+
+  @override
+  String get vddUninstallFailed =>
+      'Failed to uninstall Virtual Display Driver. Try uninstalling manually via Device Manager > Display adapters > Virtual Display Driver > Uninstall device.';
 }

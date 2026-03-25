@@ -883,6 +883,60 @@ abstract class AppLocalizations {
   /// In en, this message translates to:
   /// **'Show Stroke View'**
   String get showStrokeView;
+
+  /// No description provided for @captureVirtualDisplay.
+  ///
+  /// In en, this message translates to:
+  /// **'Capture in Virtual Display...'**
+  String get captureVirtualDisplay;
+
+  /// No description provided for @virtualDisplaySubtitle.
+  ///
+  /// In en, this message translates to:
+  /// **'Best quality — uses virtual monitor'**
+  String get virtualDisplaySubtitle;
+
+  /// No description provided for @vddNotInstalled.
+  ///
+  /// In en, this message translates to:
+  /// **'Virtual Display Driver Required'**
+  String get vddNotInstalled;
+
+  /// No description provided for @vddInstallPrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'The Virtual Display Driver is needed to capture windows in a virtual monitor. Would you like to install it now?'**
+  String get vddInstallPrompt;
+
+  /// No description provided for @installVdd.
+  ///
+  /// In en, this message translates to:
+  /// **'Install'**
+  String get installVdd;
+
+  /// No description provided for @uninstallVdd.
+  ///
+  /// In en, this message translates to:
+  /// **'Uninstall Virtual Display Driver'**
+  String get uninstallVdd;
+
+  /// No description provided for @uninstallVddPrompt.
+  ///
+  /// In en, this message translates to:
+  /// **'Are you sure you want to uninstall the Virtual Display Driver? This will require administrator permissions (UAC prompt). The virtual display capture feature will stop working until reinstalled.'**
+  String get uninstallVddPrompt;
+
+  /// No description provided for @vddUninstallSuccess.
+  ///
+  /// In en, this message translates to:
+  /// **'Virtual Display Driver uninstalled successfully'**
+  String get vddUninstallSuccess;
+
+  /// No description provided for @vddUninstallFailed.
+  ///
+  /// In en, this message translates to:
+  /// **'Failed to uninstall Virtual Display Driver. Try uninstalling manually via Device Manager > Display adapters > Virtual Display Driver > Uninstall device.'**
+  String get vddUninstallFailed;
 }
 
 class _AppLocalizationsDelegate

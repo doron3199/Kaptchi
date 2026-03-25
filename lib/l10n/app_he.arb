@@ -132,5 +132,14 @@
   "resetWhiteboard": "אפס לוח",
   "toggleCanvasView": "החלף תצוגת לוח",
   "showRawView": "הצג תצוגה גולמית",
-  "showStrokeView": "הצג תצוגת קווים"
+  "showStrokeView": "הצג תצוגת קווים",
+  "captureVirtualDisplay": "לכידה במסך וירטואלי...",
+  "virtualDisplaySubtitle": "איכות מיטבית — משתמש במסך וירטואלי",
+  "vddNotInstalled": "נדרש דרייבר מסך וירטואלי",
+  "vddInstallPrompt": "נדרש דרייבר מסך וירטואלי כדי ללכוד חלונות במסך וירטואלי. להתקין עכשיו?",
+  "installVdd": "התקן",
+  "uninstallVdd": "הסר דרייבר מסך וירטואלי",
+  "uninstallVddPrompt": "האם אתה בטוח שברצונך להסיר את דרייבר המסך הוירטואלי? פעולה זו דורשת הרשאות מנהל. תכונת לכידת המסך הוירטואלי תפסיק לפעול עד להתקנה מחדש.",
+  "vddUninstallSuccess": "דרייבר המסך הוירטואלי הוסר בהצלחה",
+  "vddUninstallFailed": "הסרת דרייבר המסך הוירטואלי נכשלה. נסה להסיר ידנית דרך מנהל ההתקנים > מתאמי תצוגה > Virtual Display Driver > הסר התקנה."
 }

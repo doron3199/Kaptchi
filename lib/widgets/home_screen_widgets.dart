@@ -54,11 +54,13 @@ class CameraListWidget extends StatelessWidget {
 class ScreenCaptureWidget extends StatelessWidget {
   final Function(int) onSelectScreen;
   final VoidCallback onSelectWindow;
+  final VoidCallback onSelectVirtualWindow;
 
   const ScreenCaptureWidget({
     super.key,
     required this.onSelectScreen,
     required this.onSelectWindow,
+    required this.onSelectVirtualWindow,
   });
 
   @override
@@ -90,6 +92,22 @@ class ScreenCaptureWidget extends StatelessWidget {
               style: TextStyle(color: Colors.white),
             ),
             onTap: onSelectWindow,
+          ),
+        ),
+        Card(
+          color: Colors.deepPurple[800],
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: ListTile(
+            leading: const Icon(Icons.desktop_windows_outlined, color: Colors.white),
+            title: Text(
+              AppLocalizations.of(context)!.captureVirtualDisplay,
+              style: const TextStyle(color: Colors.white),
+            ),
+            subtitle: Text(
+              AppLocalizations.of(context)!.virtualDisplaySubtitle,
+              style: const TextStyle(color: Colors.white60, fontSize: 11),
+            ),
+            onTap: onSelectVirtualWindow,
           ),
         ),
       ],

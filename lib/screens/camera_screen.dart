@@ -35,12 +35,14 @@ class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
   final int? initialCameraIndex;
   final String? initialStreamUrl;
+  final bool isVddCapture;
 
   const CameraScreen({
     super.key,
     this.connectionUrl,
     this.initialCameraIndex,
     this.initialStreamUrl,
+    this.isVddCapture = false,
   });
 
   @override
@@ -96,6 +98,9 @@ class _CameraScreenState extends State<CameraScreen>
 
   // Live Perspective Crop State
   bool _isLiveCropActive = false;
+
+  // Virtual Display Capture Mode State
+  bool _isVddCaptureMode = false;
 
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
@@ -192,6 +197,7 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _isVddCaptureMode = widget.isVddCapture;
 
     // Set default max zoom based on platform
     // Windows cameras usually don't support optical zoom commands, so we limit to 1.0
@@ -1433,7 +1439,7 @@ class _CameraScreenState extends State<CameraScreen>
                                                 : null,
                                       );
 
-                                return Stack(
+                                final videoStack = Stack(
                                   fit: StackFit.expand,
                                   children: [
                                     if (_isCanvasViewMode)
@@ -1459,6 +1465,44 @@ class _CameraScreenState extends State<CameraScreen>
                                         child: windowsChild,
                                       ),
                                   ],
+                                );
+
+                                // Wrap with tap forwarding when in VDD capture mode
+                                if (!_isVddCaptureMode) return videoStack;
+                                return LayoutBuilder(
+                                  builder: (context, constraints) {
+                                    return GestureDetector(
+                                      behavior: HitTestBehavior.translucent,
+                                      onTapUp: (details) {
+                                        final normalizedX =
+                                            details.localPosition.dx /
+                                            constraints.maxWidth;
+                                        final normalizedY =
+                                            details.localPosition.dy /
+                                            constraints.maxHeight;
+                                        NativeCameraService()
+                                            .sendClickToVirtualDisplay(
+                                              normalizedX.clamp(0.0, 1.0),
+                                              normalizedY.clamp(0.0, 1.0),
+                                            );
+                                      },
+                                      onSecondaryTapUp: (details) {
+                                        final normalizedX =
+                                            details.localPosition.dx /
+                                            constraints.maxWidth;
+                                        final normalizedY =
+                                            details.localPosition.dy /
+                                            constraints.maxHeight;
+                                        NativeCameraService()
+                                            .sendClickToVirtualDisplay(
+                                              normalizedX.clamp(0.0, 1.0),
+                                              normalizedY.clamp(0.0, 1.0),
+                                              clickType: 1,
+                                            );
+                                      },
+                                      child: videoStack,
+                                    );
+                                  },
                                 );
                               },
                             ),

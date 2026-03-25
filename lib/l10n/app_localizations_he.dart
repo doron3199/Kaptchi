@@ -429,4 +429,34 @@ class AppLocalizationsHe extends AppLocalizations {
 
   @override
   String get showStrokeView => 'הצג תצוגת קווים';
+
+  @override
+  String get captureVirtualDisplay => 'לכידה במסך וירטואלי...';
+
+  @override
+  String get virtualDisplaySubtitle => 'איכות מיטבית — משתמש במסך וירטואלי';
+
+  @override
+  String get vddNotInstalled => 'נדרש דרייבר מסך וירטואלי';
+
+  @override
+  String get vddInstallPrompt =>
+      'נדרש דרייבר מסך וירטואלי כדי ללכוד חלונות במסך וירטואלי. להתקין עכשיו?';
+
+  @override
+  String get installVdd => 'התקן';
+
+  @override
+  String get uninstallVdd => 'הסר דרייבר מסך וירטואלי';
+
+  @override
+  String get uninstallVddPrompt =>
+      'האם אתה בטוח שברצונך להסיר את דרייבר המסך הוירטואלי? פעולה זו דורשת הרשאות מנהל. תכונת לכידת המסך הוירטואלי תפסיק לפעול עד להתקנה מחדש.';
+
+  @override
+  String get vddUninstallSuccess => 'דרייבר המסך הוירטואלי הוסר בהצלחה';
+
+  @override
+  String get vddUninstallFailed =>
+      'הסרת דרייבר המסך הוירטואלי נכשלה. נסה להסיר ידנית דרך מנהל ההתקנים > מתאמי תצוגה > Virtual Display Driver > הסר התקנה.';
 }

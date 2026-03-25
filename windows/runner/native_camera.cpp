@@ -2,6 +2,7 @@
 #include "screen_capture_source.h"
 #include "whiteboard_canvas.h"
 #include "whiteboard_enhance.h"
+#include "virtual_display_manager.h"
 #include <algorithm>
 #include <iostream>
 #include <cmath>
@@ -1842,6 +1843,88 @@ extern "C" {
     __declspec(dllexport) int32_t IsScreenCaptureActive() {
         if (!g_screen_capture) return 0;
         return g_screen_capture->IsCapturing() ? 1 : 0;
+    }
+
+    // --- Virtual Display Manager FFI Exports ---
+
+    __declspec(dllexport) int32_t IsVirtualDisplayInstalled() {
+        return VirtualDisplayManager::IsDriverInstalled() ? 1 : 0;
+    }
+
+    __declspec(dllexport) int32_t CreateVirtualDisplay(int32_t width, int32_t height) {
+        return VirtualDisplayManager::CreateVirtualMonitor(width, height);
+    }
+
+    __declspec(dllexport) void RemoveVirtualDisplay() {
+        VirtualDisplayManager::RemoveVirtualMonitor();
+    }
+
+    __declspec(dllexport) int32_t GetVirtualDisplayIndex() {
+        return VirtualDisplayManager::GetVirtualMonitorIndex();
+    }
+
+    __declspec(dllexport) int32_t MoveWindowToVirtualDisplay(int64_t windowHandle) {
+        int vdIdx = VirtualDisplayManager::GetVirtualMonitorIndex();
+        if (vdIdx < 0) return 0;
+        HWND hwnd = reinterpret_cast<HWND>(windowHandle);
+        return VirtualDisplayManager::MoveWindowToMonitor(hwnd, vdIdx) ? 1 : 0;
+    }
+
+    __declspec(dllexport) int32_t StartVirtualDisplayCapture(int64_t windowHandle) {
+        if (!g_screen_capture || !g_native_camera) return 0;
+
+        // Get window dimensions to create a matching virtual display
+        HWND hwnd = reinterpret_cast<HWND>(windowHandle);
+        RECT windowRect;
+        if (!GetWindowRect(hwnd, &windowRect)) return 0;
+
+        int width = windowRect.right - windowRect.left;
+        int height = windowRect.bottom - windowRect.top;
+
+        // Clamp to reasonable resolution
+        if (width < 640) width = 1920;
+        if (height < 480) height = 1080;
+
+        // Create virtual display
+        int vdIdx = VirtualDisplayManager::CreateVirtualMonitor(width, height);
+        if (vdIdx < 0) return 0;
+
+        // Move window to virtual display
+        if (!VirtualDisplayManager::MoveWindowToMonitor(hwnd, vdIdx)) {
+            VirtualDisplayManager::RemoveVirtualMonitor();
+            return 0;
+        }
+
+        // Brief delay for window to settle on new display
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        // Stop camera if running
+        g_native_camera->Stop();
+
+        // Start screen capture on the virtual display (full monitor, no specific window)
+        bool success = g_screen_capture->StartCapture(vdIdx, nullptr);
+        if (success) {
+            g_native_camera->StartProcessingOnly();
+        } else {
+            VirtualDisplayManager::RemoveVirtualMonitor();
+        }
+
+        return success ? 1 : 0;
+    }
+
+    __declspec(dllexport) int32_t LaunchVddInstaller(const wchar_t* path) {
+        return VirtualDisplayManager::LaunchInstaller(path) ? 1 : 0;
+    }
+
+    __declspec(dllexport) int32_t UninstallVddDriver(const wchar_t* devconPath) {
+        return VirtualDisplayManager::UninstallDriver(devconPath) ? 1 : 0;
+    }
+
+    // Send a mouse click to the virtual display.
+    // normalizedX/Y: 0.0-1.0 position within the virtual display
+    // clickType: 0=left click, 1=right click, 2=left down, 3=left up
+    __declspec(dllexport) int32_t SendClickToVirtualDisplay(float normalizedX, float normalizedY, int32_t clickType) {
+        return VirtualDisplayManager::SendClick(normalizedX, normalizedY, clickType) ? 1 : 0;
     }
 
     __declspec(dllexport) void process_frame(uint8_t* bytes, int32_t width, int32_t height, int32_t mode) {
