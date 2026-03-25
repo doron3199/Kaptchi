@@ -1,6 +1,6 @@
 # Kaptchi: The Ultimate Vision Aid for Students
 
-**Kaptchi** is a powerful, open-source application designed to help **visually impaired students** see the whiteboard better. It transforms your computer into a personal vision tool by allowing you to seamlessly switch between multiple cameras, screen capture, and apply real-time high-contrast enhancements.
+**Kaptchi** is a powerful, open-source application designed to help **visually impaired students** see the whiteboard better. It transforms your computer into a personal vision tool by allowing you to seamlessly switch between multiple cameras, screen capture, and apply real-time high-contrast enhancements. Visit [kaptchi.com](https://www.kaptchi.com) for more information.
 
 ## Key Features
 

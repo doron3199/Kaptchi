@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:kaptchi_flutter/services/raw_socket_service.dart';
 import 'package:camera/camera.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 
 import '../services/media_server_service.dart';
 import 'package:window_manager/window_manager.dart';
@@ -29,6 +31,7 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with WindowListener {
   bool _isScanning = true;
+  bool _isMobileCameraUnlocked = false;
 
   // Windows State
   List<CameraDescription> _cameras = [];
@@ -50,21 +53,7 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
     if (Platform.isWindows &&
         !Platform.environment.containsKey('FLUTTER_TEST')) {
       _loadCameras();
-      _startServer();
-      // Don't auto-start media server, let user choose or try default if they want
-      _startMediaServer();
-
-      // Listen for RTMP stream start
-      _streamSubscription = MediaServerService.instance.onStreamStarted.listen((
-        path,
-      ) {
-        if (!mounted) return;
-        // Always navigate if a stream starts, assuming user wants to see it
-        // Construct the full URL
-        final url = 'rtmp://localhost/$path';
-
-        _navigateToCamera(url);
-      });
+      _loadMobileCameraPreference();
 
       windowManager.addListener(this);
       _setWindowCloseHandler();
@@ -84,6 +73,206 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
         _pdfPathController.text = initialPath;
       });
     }
+  }
+
+  Future<void> _loadMobileCameraPreference() async {
+    final prefs = await SharedPreferences.getInstance();
+    final unlocked = prefs.getBool('mobile_camera_unlocked') ?? false;
+    if (mounted) {
+      setState(() {
+        _isMobileCameraUnlocked = unlocked;
+      });
+      if (unlocked) {
+        _startMobileServices();
+      }
+    }
+  }
+
+  void _startMobileServices() {
+    _startServer();
+    _startMediaServer();
+    _streamSubscription = MediaServerService.instance.onStreamStarted.listen((
+      path,
+    ) {
+      if (!mounted) return;
+      _navigateToCamera('rtmp://localhost/$path');
+    });
+  }
+
+  Future<void> _onMobileCameraUnlocked() async {
+    Navigator.of(context).pop();
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('mobile_camera_unlocked', true);
+
+    if (mounted) {
+      setState(() {
+        _isMobileCameraUnlocked = true;
+      });
+      _startMobileServices();
+    }
+  }
+
+  void _showMobileCameraUnlockDialog() {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Mobile Camera Requires Network Access'),
+        content: SizedBox(
+          width: 450,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'To use your phone as a camera, Kaptchi needs to open network ports on this computer. '
+                  'Windows Firewall will ask for permission.',
+                  style: TextStyle(fontSize: 14),
+                ),
+                const SizedBox(height: 16),
+                const Text(
+                  'What you should know:',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                _buildBullet(
+                  'All video data stays on your local network (LAN) — nothing is sent to the internet.',
+                ),
+                _buildBullet(
+                  'Two firewall prompts will appear — one for Kaptchi and one for the media server (mediamtx). Please allow both.',
+                ),
+                _buildBullet(
+                  'You must enable "Private network" access in both prompts for this to work.',
+                  bold: true,
+                ),
+                const SizedBox(height: 20),
+                const Divider(),
+                const SizedBox(height: 12),
+                const Text(
+                  'Download the Android App',
+                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Scan this QR code with your phone to download the Kaptchi Android app:',
+                  style: TextStyle(fontSize: 13),
+                ),
+                const SizedBox(height: 12),
+                Center(
+                  child: Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(12),
+                    child: QrImageView(
+                      data:
+                          'https://github.com/doron3199/Kaptchi/releases/download/1.0.android/app-release.apk',
+                      version: QrVersions.auto,
+                      size: 150.0,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.orange.withAlpha(30),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.orange.withAlpha(80)),
+                  ),
+                  child: const Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Icon(Icons.warning_amber, color: Colors.orange, size: 20),
+                      SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          'This app is not on the Play Store. After downloading, '
+                          'you may need to enable "Install from unknown sources" '
+                          'in your Android settings. The installation process '
+                          'will differ from regular app installs.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Cancel'),
+          ),
+          ElevatedButton(
+            onPressed: _onMobileCameraUnlocked,
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildBullet(String text, {bool bold = false}) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 8, bottom: 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('• ', style: TextStyle(fontSize: 14)),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: bold ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMobileConnectionOverlay() {
+    return Container(
+      color: Colors.black,
+      padding: const EdgeInsets.symmetric(vertical: 48, horizontal: 32),
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Icon(Icons.phonelink_lock, color: Colors.white38, size: 64),
+          const SizedBox(height: 16),
+          const Text(
+            'Mobile Camera',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.bold,
+              color: Colors.white54,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Connect your phone as a wireless camera',
+            style: TextStyle(color: Colors.white38, fontSize: 14),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 24),
+          ElevatedButton.icon(
+            onPressed: _showMobileCameraUnlockDialog,
+            icon: const Icon(Icons.lock_open),
+            label: const Text('Unlock Mobile Camera'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.indigo,
+              foregroundColor: Colors.white,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   void _onGalleryChange() {
@@ -625,18 +814,21 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
               child: SingleChildScrollView(
                 child: Column(
                   children: [
-                    MobileConnectionSection(
-                      availableInterfaces: _availableInterfaces,
-                      serverIp: _serverIp,
-                      isMediaServerRunning: _isMediaServerRunning,
-                      onSelectIp: (val) {
-                        if (val != null) {
-                          setState(() {
-                            _serverIp = val;
-                          });
-                        }
-                      },
-                    ),
+                    if (_isMobileCameraUnlocked)
+                      MobileConnectionSection(
+                        availableInterfaces: _availableInterfaces,
+                        serverIp: _serverIp,
+                        isMediaServerRunning: _isMediaServerRunning,
+                        onSelectIp: (val) {
+                          if (val != null) {
+                            setState(() {
+                              _serverIp = val;
+                            });
+                          }
+                        },
+                      )
+                    else
+                      _buildMobileConnectionOverlay(),
                     ExportSectionWidget(
                       pdfNameController: _pdfNameController,
                       pdfPathController: _pdfPathController,
