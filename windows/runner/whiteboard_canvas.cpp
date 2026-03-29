@@ -3768,7 +3768,176 @@ bool WhiteboardCanvas::CompareGraphNodes(int id_a, int id_b, float* result) cons
     result[3] = and_overlap;
     result[4] = overlap_ratio;
 
+    // [5] bboxIou
+    float union_area = (float)(a.bbox_canvas.area() + b.bbox_canvas.area() - intersection.area());
+    result[5] = (union_area > 0) ? (float)intersection.area() / union_area : 0.0f;
+
+    // [6] widthRatio, [7] heightRatio
+    float wa = (float)a.bbox_canvas.width, wb = (float)b.bbox_canvas.width;
+    float ha = (float)a.bbox_canvas.height, hb = (float)b.bbox_canvas.height;
+    result[6] = (std::max(wa, wb) > 0) ? std::min(wa, wb) / std::max(wa, wb) : 0.0f;
+    result[7] = (std::max(ha, hb) > 0) ? std::min(ha, hb) / std::max(ha, hb) : 0.0f;
+
+    // [8] centroidAlignedOverlapPixels, [9] centroidAlignedOverlapRatio
+    // Align by centroids: shift b's bbox so centroids match, then compute overlap
+    float centroid_and_overlap = 0.0f;
+    float centroid_overlap_ratio = 0.0f;
+    {
+        int shift_x = (int)std::round(a.centroid_canvas.x - b.centroid_canvas.x);
+        int shift_y = (int)std::round(a.centroid_canvas.y - b.centroid_canvas.y);
+        cv::Rect b_shifted = b.bbox_canvas;
+        b_shifted.x += shift_x;
+        b_shifted.y += shift_y;
+        cv::Rect aligned_intersection = a.bbox_canvas & b_shifted;
+        if (aligned_intersection.area() > 0) {
+            cv::Rect a_local2(aligned_intersection.x - a.bbox_canvas.x,
+                              aligned_intersection.y - a.bbox_canvas.y,
+                              aligned_intersection.width, aligned_intersection.height);
+            cv::Rect b_local2(aligned_intersection.x - b_shifted.x,
+                              aligned_intersection.y - b_shifted.y,
+                              aligned_intersection.width, aligned_intersection.height);
+            a_local2 &= cv::Rect(0, 0, a.binary_mask.cols, a.binary_mask.rows);
+            b_local2 &= cv::Rect(0, 0, b.binary_mask.cols, b.binary_mask.rows);
+            if (a_local2.area() > 0 && b_local2.area() > 0 &&
+                a_local2.size() == b_local2.size()) {
+                cv::Mat a_roi2 = a.binary_mask(a_local2);
+                cv::Mat b_roi2 = b.binary_mask(b_local2);
+                cv::Mat and_mask2;
+                cv::bitwise_and(a_roi2, b_roi2, and_mask2);
+                centroid_and_overlap = (float)cv::countNonZero(and_mask2);
+                float min_area2 = (float)std::min(cv::countNonZero(a.binary_mask),
+                                                   cv::countNonZero(b.binary_mask));
+                if (min_area2 > 0) {
+                    centroid_overlap_ratio = centroid_and_overlap / min_area2;
+                }
+            }
+        }
+    }
+    result[8] = centroid_and_overlap;
+    result[9] = centroid_overlap_ratio;
+
     return true;
+}
+
+bool WhiteboardCanvas::CompareGraphNodesAtOffset(int id_a, int id_b,
+                                                  float dx, float dy,
+                                                  float* result) const {
+    if (!result) return false;
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return false;
+
+    const auto& group = *groups_[gi];
+    auto itA = group.nodes.find(id_a);
+    auto itB = group.nodes.find(id_b);
+    if (itA == group.nodes.end() || itB == group.nodes.end()) return false;
+
+    const DrawingNode& a = *itA->second;
+    const DrawingNode& b = *itB->second;
+
+    // Shift a's bbox by (dx,dy) and compute overlap with b
+    cv::Rect a_shifted = a.bbox_canvas;
+    a_shifted.x += (int)std::round(dx);
+    a_shifted.y += (int)std::round(dy);
+
+    cv::Rect intersection = a_shifted & b.bbox_canvas;
+
+    float and_overlap = 0.0f;
+    float overlap_ratio = 0.0f;
+    float bbox_iou = 0.0f;
+
+    if (intersection.area() > 0) {
+        cv::Rect a_local(intersection.x - a_shifted.x,
+                         intersection.y - a_shifted.y,
+                         intersection.width, intersection.height);
+        cv::Rect b_local(intersection.x - b.bbox_canvas.x,
+                         intersection.y - b.bbox_canvas.y,
+                         intersection.width, intersection.height);
+        a_local &= cv::Rect(0, 0, a.binary_mask.cols, a.binary_mask.rows);
+        b_local &= cv::Rect(0, 0, b.binary_mask.cols, b.binary_mask.rows);
+
+        if (a_local.area() > 0 && b_local.area() > 0 &&
+            a_local.size() == b_local.size()) {
+            cv::Mat a_roi = a.binary_mask(a_local);
+            cv::Mat b_roi = b.binary_mask(b_local);
+            cv::Mat and_mask;
+            cv::bitwise_and(a_roi, b_roi, and_mask);
+            and_overlap = (float)cv::countNonZero(and_mask);
+
+            float min_area = (float)std::min(cv::countNonZero(a.binary_mask),
+                                              cv::countNonZero(b.binary_mask));
+            if (min_area > 0) {
+                overlap_ratio = and_overlap / min_area;
+            }
+        }
+
+        float union_area = (float)(a_shifted.area() + b.bbox_canvas.area() - intersection.area());
+        if (union_area > 0) {
+            bbox_iou = (float)intersection.area() / union_area;
+        }
+    }
+
+    result[0] = and_overlap;
+    result[1] = overlap_ratio;
+    result[2] = bbox_iou;
+    return true;
+}
+
+int WhiteboardCanvas::GetGraphNodeMasks(uint8_t* buffer, int max_bytes) const {
+    if (!buffer || max_bytes <= 0) return 0;
+    if (remote_process_ && helper_client_) {
+        return helper_client_->GetGraphNodeMasks(buffer, max_bytes);
+    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+
+    const auto& group = *groups_[gi];
+    int offset = 0;
+
+    for (const auto& [id, node_ptr] : group.nodes) {
+        const DrawingNode& node = *node_ptr;
+        if (node.color_pixels.empty() || node.binary_mask.empty()) continue;
+
+        const int w = node.color_pixels.cols;
+        const int h = node.color_pixels.rows;
+        const int pixel_bytes = w * h * 4; // RGBA
+        const int header_bytes = 12; // node_id(4) + width(4) + height(4)
+
+        if (offset + header_bytes + pixel_bytes > max_bytes) break;
+
+        // Write header
+        int* header = reinterpret_cast<int*>(buffer + offset);
+        header[0] = node.id;
+        header[1] = w;
+        header[2] = h;
+        offset += header_bytes;
+
+        // Write RGBA pixels: color where mask is set, transparent elsewhere
+        for (int y = 0; y < h; y++) {
+            const uint8_t* mask_row = node.binary_mask.ptr<uint8_t>(y);
+            const uint8_t* color_row = node.color_pixels.ptr<uint8_t>(y);
+            uint8_t* out_row = buffer + offset + y * w * 4;
+            for (int x = 0; x < w; x++) {
+                if (mask_row[x] > 0) {
+                    out_row[x * 4 + 0] = color_row[x * 3 + 2]; // R (BGR->RGBA)
+                    out_row[x * 4 + 1] = color_row[x * 3 + 1]; // G
+                    out_row[x * 4 + 2] = color_row[x * 3 + 0]; // B
+                    out_row[x * 4 + 3] = 255;                    // A
+                } else {
+                    out_row[x * 4 + 0] = 0;
+                    out_row[x * 4 + 1] = 0;
+                    out_row[x * 4 + 2] = 0;
+                    out_row[x * 4 + 3] = 0;
+                }
+            }
+        }
+        offset += pixel_bytes;
+    }
+
+    return offset;
 }
 
 bool WhiteboardCanvas::MoveGraphNode(int node_id, float new_cx, float new_cy) {
@@ -4224,6 +4393,16 @@ int GetGraphNodeNeighbors(int node_id, int* neighbors, int max_neighbors) {
 bool CompareGraphNodes(int id_a, int id_b, float* result) {
     if (!g_whiteboard_canvas) return false;
     return g_whiteboard_canvas->CompareGraphNodes(id_a, id_b, result);
+}
+
+bool CompareGraphNodesAtOffset(int id_a, int id_b, float dx, float dy, float* result) {
+    if (!g_whiteboard_canvas) return false;
+    return g_whiteboard_canvas->CompareGraphNodesAtOffset(id_a, id_b, dx, dy, result);
+}
+
+int GetGraphNodeMasks(uint8_t* buffer, int max_bytes) {
+    if (!g_whiteboard_canvas) return 0;
+    return g_whiteboard_canvas->GetGraphNodeMasks(buffer, max_bytes);
 }
 
 bool MoveGraphNode(int node_id, float new_cx, float new_cy) {

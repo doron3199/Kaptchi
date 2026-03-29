@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:ui';
 
 class GraphNodeInfo {
@@ -58,6 +59,11 @@ class NodeComparison {
   final double bboxIntersectionArea;
   final double andOverlapPixels;
   final double maskOverlapRatio;
+  final double bboxIou;
+  final double widthRatio;
+  final double heightRatio;
+  final double centroidAlignedOverlapPixels;
+  final double centroidAlignedOverlapRatio;
 
   const NodeComparison({
     required this.shapeDistance,
@@ -65,6 +71,23 @@ class NodeComparison {
     required this.bboxIntersectionArea,
     required this.andOverlapPixels,
     required this.maskOverlapRatio,
+    required this.bboxIou,
+    required this.widthRatio,
+    required this.heightRatio,
+    required this.centroidAlignedOverlapPixels,
+    required this.centroidAlignedOverlapRatio,
+  });
+}
+
+class NodeOverlapAtOffset {
+  final double andOverlapPixels;
+  final double maskOverlapRatio;
+  final double bboxIou;
+
+  const NodeOverlapAtOffset({
+    required this.andOverlapPixels,
+    required this.maskOverlapRatio,
+    required this.bboxIou,
   });
 }
 
@@ -83,5 +106,17 @@ class GraphSnapshotComparison {
     required this.longEdgeSimilarity,
     required this.shortEdgeSimilarity,
     required this.averageEdgeSimilarity,
+  });
+}
+
+class NodeMaskImage {
+  final int width;
+  final int height;
+  final Uint8List rgbaBytes;
+
+  const NodeMaskImage({
+    required this.width,
+    required this.height,
+    required this.rgbaBytes,
   });
 }

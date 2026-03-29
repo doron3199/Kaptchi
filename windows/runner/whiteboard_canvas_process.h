@@ -40,6 +40,7 @@ public:
     int GetGraphNodeContours(float* buffer, int max_floats) const;
     bool GetGraphCanvasBounds(int* bounds) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;
+    int  GetGraphNodeMasks(uint8_t* buffer, int max_bytes) const;
 
     // User edit commands (routed through shared memory to helper process)
     int LockAllGraphNodes();

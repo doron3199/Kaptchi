@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -21,7 +22,16 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
   // Snapshot taken once on open — never refreshed from C++
   List<GraphNodeInfo> _nodes = [];
   Rect? _canvasBounds;
-  int? _selectedNodeId;
+
+  // Mask images for pixel-perfect rendering
+  Map<int, ui.Image> _maskImages = {};
+  bool _masksLoading = false;
+  bool _darkBackground = true;
+
+  // Multi-select: up to two nodes
+  int? _selectedIdA;
+  int? _selectedIdB;
+  NodeComparison? _comparison;
 
   // Change tracking
   final Set<int> _movedNodeIds = {};
@@ -34,12 +44,17 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
   Offset? _dragStartScene;
   Offset? _dragNodeStartCentroid;
 
+  // Live drag overlap
+  NodeOverlapAtOffset? _dragOverlap;
+  int? _dragOverlapTargetId;
+  DateTime _lastDragOverlapTime = DateTime(2000);
+
   bool get _hasChanges => _movedNodeIds.isNotEmpty || _deletedNodeIds.isNotEmpty;
+  bool get _hasSelection => _selectedIdA != null || _selectedIdB != null;
 
   @override
   void initState() {
     super.initState();
-    // Lock all nodes so the pipeline can't remove/modify them while editing
     final locked = _native.lockAllGraphNodes();
     debugPrint('[EditCanvas] locked $locked nodes');
     _snapshotFromCpp();
@@ -93,6 +108,53 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
       _nodes = enriched;
       _canvasBounds = bounds;
     });
+
+    _loadMaskImages();
+  }
+
+  Future<void> _loadMaskImages() async {
+    if (_masksLoading) return;
+    _masksLoading = true;
+
+    Map<int, NodeMaskImage> rawMasks;
+    try {
+      rawMasks = _native.getGraphNodeMasks();
+    } catch (e) {
+      debugPrint('[EditCanvas] getGraphNodeMasks failed: $e');
+      _masksLoading = false;
+      return;
+    }
+
+    if (rawMasks.isEmpty) {
+      _masksLoading = false;
+      return;
+    }
+
+    final decoded = <int, ui.Image>{};
+    for (final entry in rawMasks.entries) {
+      final mask = entry.value;
+      if (mask.width <= 0 || mask.height <= 0) continue;
+      try {
+        final completer = Completer<ui.Image>();
+        ui.decodeImageFromPixels(
+          mask.rgbaBytes,
+          mask.width,
+          mask.height,
+          ui.PixelFormat.rgba8888,
+          completer.complete,
+        );
+        decoded[entry.key] = await completer.future;
+      } catch (e) {
+        debugPrint('[EditCanvas] decode mask ${entry.key} failed: $e');
+      }
+    }
+
+    if (mounted) {
+      setState(() {
+        _maskImages = decoded;
+      });
+    }
+    _masksLoading = false;
   }
 
   _CanvasTransform? _canvasTransformFor(Rect? bounds, Size widgetSize) {
@@ -198,28 +260,98 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
       _dragStartCanvas = null;
       _dragStartScene = null;
       _dragNodeStartCentroid = null;
+      _dragOverlap = null;
+      _dragOverlapTargetId = null;
     });
   }
 
   void _onTapNode(int nodeId) {
     setState(() {
-      _selectedNodeId = _selectedNodeId == nodeId ? null : nodeId;
+      if (nodeId == _selectedIdA) {
+        _selectedIdA = _selectedIdB;
+        _selectedIdB = null;
+        _comparison = null;
+      } else if (nodeId == _selectedIdB) {
+        _selectedIdB = null;
+        _comparison = null;
+      } else if (_selectedIdA == null) {
+        _selectedIdA = nodeId;
+        _comparison = null;
+      } else if (_selectedIdB == null) {
+        _selectedIdB = nodeId;
+        _updateComparison();
+      } else {
+        _selectedIdA = nodeId;
+        _selectedIdB = null;
+        _comparison = null;
+      }
     });
   }
 
+  void _updateComparison() {
+    if (_selectedIdA != null && _selectedIdB != null) {
+      _comparison = _native.compareNodes(_selectedIdA!, _selectedIdB!);
+    } else {
+      _comparison = null;
+    }
+  }
+
   void _onDragEnd(int nodeId) {
-    // Just record that this node was moved — actual C++ call happens on Save
     _movedNodeIds.add(nodeId);
+    // Recompute comparison if dragged node is one of the selected pair
+    if (nodeId == _selectedIdA || nodeId == _selectedIdB) {
+      _updateComparison();
+    }
+  }
+
+  void _updateDragOverlap(int draggedNodeId, Offset canvasDelta) {
+    final now = DateTime.now();
+    if (now.difference(_lastDragOverlapTime).inMilliseconds < 100) return;
+    _lastDragOverlapTime = now;
+
+    final draggedNode = _nodes.where((n) => n.id == draggedNodeId).firstOrNull;
+    if (draggedNode == null) return;
+
+    int? bestTargetId;
+    double bestDist = 80.0; // max centroid distance to consider
+    for (final node in _nodes) {
+      if (node.id == draggedNodeId) continue;
+      final dist = (node.centroid - draggedNode.centroid).distance;
+      if (dist < bestDist) {
+        bestDist = dist;
+        bestTargetId = node.id;
+      }
+    }
+
+    if (bestTargetId != null) {
+      final overlap = _native.compareNodesAtOffset(
+        draggedNodeId, bestTargetId, canvasDelta.dx, canvasDelta.dy);
+      setState(() {
+        _dragOverlap = overlap;
+        _dragOverlapTargetId = bestTargetId;
+      });
+    } else {
+      setState(() {
+        _dragOverlap = null;
+        _dragOverlapTargetId = null;
+      });
+    }
   }
 
   void _deleteSelected() {
-    final id = _selectedNodeId;
+    final id = _selectedIdB ?? _selectedIdA;
     if (id == null) return;
     setState(() {
       _nodes.removeWhere((n) => n.id == id);
-      _selectedNodeId = null;
       _deletedNodeIds.add(id);
-      _movedNodeIds.remove(id); // no need to move a deleted node
+      _movedNodeIds.remove(id);
+      if (id == _selectedIdB) {
+        _selectedIdB = null;
+      } else {
+        _selectedIdA = _selectedIdB;
+        _selectedIdB = null;
+      }
+      _comparison = null;
     });
   }
 
@@ -249,7 +381,15 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
         backgroundColor: Colors.grey[900],
         title: Text('Edit Canvas (${_nodes.length} nodes)'),
         actions: [
-          if (_selectedNodeId != null)
+          IconButton(
+            icon: Icon(
+              _darkBackground ? Icons.light_mode : Icons.dark_mode,
+              color: Colors.white70,
+            ),
+            tooltip: 'Toggle background',
+            onPressed: () => setState(() => _darkBackground = !_darkBackground),
+          ),
+          if (_hasSelection)
             IconButton(
               icon: const Icon(Icons.delete, color: Colors.redAccent),
               tooltip: 'Delete selected node',
@@ -283,86 +423,231 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final widgetSize = Size(constraints.maxWidth, constraints.maxHeight);
-        return Listener(
-          behavior: HitTestBehavior.opaque,
-          onPointerDown: (event) {
-            final scenePoint =
-                _transformController.toScene(event.localPosition);
-            final nodeId = _findNodeAtPosition(scenePoint, widgetSize);
-            if (nodeId == null) return;
+        return Stack(
+          children: [
+            Listener(
+              behavior: HitTestBehavior.opaque,
+              onPointerDown: (event) {
+                final scenePoint =
+                    _transformController.toScene(event.localPosition);
+                final nodeId = _findNodeAtPosition(scenePoint, widgetSize);
+                if (nodeId == null) return;
 
-            final node = _nodes.where((n) => n.id == nodeId).firstOrNull;
-            if (node == null) return;
+                final node = _nodes.where((n) => n.id == nodeId).firstOrNull;
+                if (node == null) return;
 
-            setState(() {
-              _dragNodeId = nodeId;
-              _isDragging = false;
-              _dragStartScene = scenePoint;
-              _dragStartCanvas = _screenToCanvas(scenePoint, widgetSize);
-              _dragNodeStartCentroid = node.centroid;
-            });
-          },
-          onPointerMove: (event) {
-            if (_dragNodeId == null ||
-                _dragStartCanvas == null ||
-                _dragStartScene == null ||
-                _dragNodeStartCentroid == null) {
-              return;
-            }
+                setState(() {
+                  _dragNodeId = nodeId;
+                  _isDragging = false;
+                  _dragStartScene = scenePoint;
+                  _dragStartCanvas = _screenToCanvas(scenePoint, widgetSize);
+                  _dragNodeStartCentroid = node.centroid;
+                });
+              },
+              onPointerMove: (event) {
+                if (_dragNodeId == null ||
+                    _dragStartCanvas == null ||
+                    _dragStartScene == null ||
+                    _dragNodeStartCentroid == null) {
+                  return;
+                }
 
-            final scenePoint =
-                _transformController.toScene(event.localPosition);
-            final sceneDelta = scenePoint - _dragStartScene!;
-            final canvasPoint = _screenToCanvas(scenePoint, widgetSize);
-            final canvasDelta = canvasPoint - _dragStartCanvas!;
+                final scenePoint =
+                    _transformController.toScene(event.localPosition);
+                final sceneDelta = scenePoint - _dragStartScene!;
+                final canvasPoint = _screenToCanvas(scenePoint, widgetSize);
+                final canvasDelta = canvasPoint - _dragStartCanvas!;
 
-            if (!_isDragging && sceneDelta.distance < 4.0) return;
+                if (!_isDragging && sceneDelta.distance < 4.0) return;
 
-            setState(() {
-              _isDragging = true;
-              final idx = _nodes.indexWhere((n) => n.id == _dragNodeId);
-              if (idx >= 0) {
-                _nodes[idx] = _nodes[idx].copyWithPosition(
-                  newCentroid: _dragNodeStartCentroid! + canvasDelta,
-                );
-              }
-            });
-          },
-          onPointerUp: (_) {
-            final tappedNodeId = _dragNodeId;
-            final wasDragging = _isDragging;
-            if (wasDragging && tappedNodeId != null) {
-              _onDragEnd(tappedNodeId);
-            }
-            _resetDragState();
-            if (!wasDragging && tappedNodeId != null) {
-              _onTapNode(tappedNodeId);
-            }
-          },
-          onPointerCancel: (_) => _resetDragState(),
-          child: InteractiveViewer(
-            transformationController: _transformController,
-            boundaryMargin: const EdgeInsets.all(200),
-            minScale: 0.1,
-            maxScale: 10.0,
-            panEnabled: _dragNodeId == null,
-            scaleEnabled: _dragNodeId == null,
-            child: SizedBox(
-              width: widgetSize.width,
-              height: widgetSize.height,
-              child: CustomPaint(
-                painter: _EditCanvasPainter(
-                  nodes: _nodes,
-                  canvasBounds: _canvasBounds,
-                  selectedId: _selectedNodeId,
-                  movedIds: _movedNodeIds,
+                setState(() {
+                  _isDragging = true;
+                  final idx = _nodes.indexWhere((n) => n.id == _dragNodeId);
+                  if (idx >= 0) {
+                    _nodes[idx] = _nodes[idx].copyWithPosition(
+                      newCentroid: _dragNodeStartCentroid! + canvasDelta,
+                    );
+                  }
+                });
+
+                _updateDragOverlap(_dragNodeId!, canvasDelta);
+              },
+              onPointerUp: (_) {
+                final tappedNodeId = _dragNodeId;
+                final wasDragging = _isDragging;
+                if (wasDragging && tappedNodeId != null) {
+                  _onDragEnd(tappedNodeId);
+                }
+                _resetDragState();
+                if (!wasDragging && tappedNodeId != null) {
+                  _onTapNode(tappedNodeId);
+                }
+              },
+              onPointerCancel: (_) => _resetDragState(),
+              child: InteractiveViewer(
+                transformationController: _transformController,
+                boundaryMargin: const EdgeInsets.all(200),
+                minScale: 0.1,
+                maxScale: 10.0,
+                panEnabled: _dragNodeId == null,
+                scaleEnabled: _dragNodeId == null,
+                child: SizedBox(
+                  width: widgetSize.width,
+                  height: widgetSize.height,
+                  child: CustomPaint(
+                    painter: _EditCanvasPainter(
+                      nodes: _nodes,
+                      canvasBounds: _canvasBounds,
+                      selectedIdA: _selectedIdA,
+                      selectedIdB: _selectedIdB,
+                      movedIds: _movedNodeIds,
+                      dragOverlapTargetId: _dragOverlapTargetId,
+                      maskImages: _maskImages,
+                      darkBackground: _darkBackground,
+                    ),
+                    size: widgetSize,
+                  ),
                 ),
-                size: widgetSize,
               ),
             ),
-          ),
+            // Drag overlap floating label
+            if (_isDragging && _dragOverlap != null && _dragOverlapTargetId != null)
+              Positioned(
+                top: 8,
+                right: 8,
+                child: _buildDragOverlapLabel(),
+              ),
+            // Comparison info panel
+            if (_comparison != null)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: _buildComparisonPanel(),
+              ),
+          ],
         );
       },
+    );
+  }
+
+  Widget _buildDragOverlapLabel() {
+    final overlap = _dragOverlap!;
+    final ratioColor = overlap.maskOverlapRatio > 0.60
+        ? Colors.greenAccent
+        : overlap.maskOverlapRatio > 0.15
+            ? Colors.yellowAccent
+            : Colors.redAccent;
+    return Container(
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: Colors.black87,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.end,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text('Target: #$_dragOverlapTargetId',
+              style: const TextStyle(color: Colors.white70, fontSize: 11)),
+          Text(
+            'Mask overlap: ${(overlap.maskOverlapRatio * 100).toStringAsFixed(1)}%',
+            style: TextStyle(color: ratioColor, fontSize: 12, fontWeight: FontWeight.bold),
+          ),
+          Text(
+            'BBox IoU: ${(overlap.bboxIou * 100).toStringAsFixed(1)}%',
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildComparisonPanel() {
+    final comp = _comparison!;
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 220),
+      color: const Color(0xDD1A1A1A),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Compare #$_selectedIdA vs #$_selectedIdB',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const Spacer(),
+                InkWell(
+                  onTap: () => setState(() {
+                    _selectedIdB = null;
+                    _comparison = null;
+                  }),
+                  child: const Icon(Icons.close, color: Colors.white54, size: 18),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            _metricRow('Centroid dist', '${comp.centroidDistance.toStringAsFixed(1)} px',
+                _threshColor(comp.centroidDistance, 40, 80, lowerIsBetter: true)),
+            _metricRow('BBox IoU', '${(comp.bboxIou * 100).toStringAsFixed(1)}%',
+                _threshColor(comp.bboxIou, 0.50, 0.20, lowerIsBetter: false)),
+            _metricRow('Width ratio', '${(comp.widthRatio * 100).toStringAsFixed(1)}%',
+                _threshColor(comp.widthRatio, 0.70, 0.50, lowerIsBetter: false)),
+            _metricRow('Height ratio', '${(comp.heightRatio * 100).toStringAsFixed(1)}%',
+                _threshColor(comp.heightRatio, 0.70, 0.50, lowerIsBetter: false)),
+            _metricRow('Mask overlap (pos)', '${(comp.maskOverlapRatio * 100).toStringAsFixed(1)}%',
+                _threshColor(comp.maskOverlapRatio, 0.60, 0.15, lowerIsBetter: false)),
+            _metricRow('Mask overlap (centroid)', '${(comp.centroidAlignedOverlapRatio * 100).toStringAsFixed(1)}%',
+                _threshColor(comp.centroidAlignedOverlapRatio, 0.60, 0.15, lowerIsBetter: false)),
+            _metricRow('Shape dist (Hu I2)', comp.shapeDistance.toStringAsFixed(4),
+                _threshColor(comp.shapeDistance, 0.25, 0.50, lowerIsBetter: true)),
+            _metricRow('AND pixels', '${comp.andOverlapPixels.toInt()} px', Colors.white70),
+            _metricRow('AND pixels (centroid)', '${comp.centroidAlignedOverlapPixels.toInt()} px', Colors.white70),
+            _metricRow('BBox intersect', '${comp.bboxIntersectionArea.toInt()} px\u00B2', Colors.white70),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _threshColor(double value, double goodThresh, double badThresh,
+      {required bool lowerIsBetter}) {
+    if (lowerIsBetter) {
+      if (value <= goodThresh) return Colors.greenAccent;
+      if (value >= badThresh) return Colors.redAccent;
+      return Colors.yellowAccent;
+    } else {
+      if (value >= goodThresh) return Colors.greenAccent;
+      if (value <= badThresh) return Colors.redAccent;
+      return Colors.yellowAccent;
+    }
+  }
+
+  Widget _metricRow(String label, String value, Color valueColor) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 1),
+      child: Row(
+        children: [
+          SizedBox(
+            width: 160,
+            child: Text(label,
+                style: const TextStyle(color: Colors.white54, fontSize: 11)),
+          ),
+          Text(value,
+              style: TextStyle(
+                  color: valueColor,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600)),
+        ],
+      ),
     );
   }
 }
@@ -371,41 +656,41 @@ class _EditCanvasPainter extends CustomPainter {
   _EditCanvasPainter({
     required this.nodes,
     required this.canvasBounds,
-    required this.selectedId,
+    required this.selectedIdA,
+    required this.selectedIdB,
     required this.movedIds,
+    this.dragOverlapTargetId,
+    this.maskImages = const {},
+    this.darkBackground = true,
   });
 
   final List<GraphNodeInfo> nodes;
   final Rect? canvasBounds;
-  final int? selectedId;
+  final int? selectedIdA;
+  final int? selectedIdB;
   final Set<int> movedIds;
+  final int? dragOverlapTargetId;
+  final Map<int, ui.Image> maskImages;
+  final bool darkBackground;
 
   @override
   void paint(Canvas canvas, Size size) {
     canvas.drawRect(
       Rect.fromLTWH(0, 0, size.width, size.height),
-      Paint()..color = const Color(0xFF1A1A1A),
+      Paint()..color = darkBackground ? const Color(0xFF1A1A1A) : const Color(0xFFFFFFFF),
     );
 
     if (canvasBounds == null || canvasBounds!.isEmpty || nodes.isEmpty) return;
 
     final transform = _CanvasTransform.fromBounds(canvasBounds!, size);
 
-    final normalFill = Paint()
-      ..color = const Color(0xDDFFFFFF)
-      ..style = PaintingStyle.fill;
-
-    final movedFill = Paint()
-      ..color = const Color(0xDDE0FFE0)
-      ..style = PaintingStyle.fill;
-
-    final normalStroke = Paint()
-      ..color = const Color(0x88FFFFFF)
-      ..strokeWidth = 1.0
+    final selectedStrokeA = Paint()
+      ..color = const Color(0xFF4488FF)
+      ..strokeWidth = 3.0
       ..style = PaintingStyle.stroke;
 
-    final selectedStroke = Paint()
-      ..color = const Color(0xFF4488FF)
+    final selectedStrokeB = Paint()
+      ..color = const Color(0xFFFF8844)
       ..strokeWidth = 3.0
       ..style = PaintingStyle.stroke;
 
@@ -414,49 +699,70 @@ class _EditCanvasPainter extends CustomPainter {
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke;
 
+    final overlapTargetStroke = Paint()
+      ..color = const Color(0xFFFF44FF)
+      ..strokeWidth = 2.5
+      ..style = PaintingStyle.stroke;
+
     final centroidPaint = Paint()
       ..color = const Color(0xFFFF0000)
+      ..style = PaintingStyle.fill;
+
+    final centroidSelectedPaint = Paint()
+      ..color = const Color(0xFFFF4444)
       ..style = PaintingStyle.fill;
 
     final textPainter = TextPainter(textDirection: TextDirection.ltr);
 
     for (final node in nodes) {
       final screenCentroid = transform.canvasToScreen(node.centroid);
-      final isSelected = node.id == selectedId;
+      final screenBbox = transform.canvasRectToScreen(node.bboxCanvas);
+      final isSelectedA = node.id == selectedIdA;
+      final isSelectedB = node.id == selectedIdB;
+      final isSelected = isSelectedA || isSelectedB;
       final isMoved = movedIds.contains(node.id);
-      final fill = isMoved ? movedFill : normalFill;
+      final isOverlapTarget = node.id == dragOverlapTargetId;
 
-      if (node.contour.length >= 3) {
-        final path = ui.Path();
-        final first = transform.canvasToScreen(node.contour[0]);
-        path.moveTo(first.dx, first.dy);
-        for (int i = 1; i < node.contour.length; i++) {
-          final pt = transform.canvasToScreen(node.contour[i]);
-          path.lineTo(pt.dx, pt.dy);
-        }
-        path.close();
-        canvas.drawPath(path, fill);
-
-        if (isSelected) {
-          canvas.drawPath(path, selectedStroke);
-        } else if (isMoved) {
-          canvas.drawPath(path, movedStroke);
-        }
-      } else {
-        final screenBbox = transform.canvasRectToScreen(node.bboxCanvas);
-        canvas.drawRect(screenBbox, normalStroke);
-        if (isSelected) {
-          canvas.drawRect(screenBbox, selectedStroke);
-        }
+      // Render color image (enhanced color_pixels from C++)
+      final maskImage = maskImages[node.id];
+      if (maskImage != null) {
+        final src = Rect.fromLTWH(
+          0, 0,
+          maskImage.width.toDouble(),
+          maskImage.height.toDouble(),
+        );
+        canvas.drawImageRect(maskImage, src, screenBbox, Paint());
       }
 
-      canvas.drawCircle(screenCentroid, 3.0, centroidPaint);
+      // Selection / overlap / moved stroke overlays
+      if (isSelectedA || isSelectedB || isOverlapTarget || isMoved) {
+        final strokePaint = isSelectedA
+            ? selectedStrokeA
+            : isSelectedB
+                ? selectedStrokeB
+                : isOverlapTarget
+                    ? overlapTargetStroke
+                    : movedStroke;
+        canvas.drawRect(screenBbox, strokePaint);
+      }
+
+      canvas.drawCircle(
+        screenCentroid,
+        isSelected ? 4.5 : 3.0,
+        isSelected ? centroidSelectedPaint : centroidPaint,
+      );
 
       textPainter.text = TextSpan(
         text: '${node.id}',
-        style: const TextStyle(
-          color: Color(0xFFFFFF00),
-          fontSize: 10,
+        style: TextStyle(
+          color: isSelectedA
+              ? const Color(0xFF4488FF)
+              : isSelectedB
+                  ? const Color(0xFFFF8844)
+                  : darkBackground
+                      ? const Color(0xFFFFFF00)
+                      : const Color(0xFFCC8800),
+          fontSize: isSelected ? 12 : 10,
           fontWeight: FontWeight.bold,
         ),
       );
@@ -469,8 +775,12 @@ class _EditCanvasPainter extends CustomPainter {
   bool shouldRepaint(_EditCanvasPainter oldDelegate) {
     return oldDelegate.nodes != nodes ||
         oldDelegate.canvasBounds != canvasBounds ||
-        oldDelegate.selectedId != selectedId ||
-        oldDelegate.movedIds != movedIds;
+        oldDelegate.selectedIdA != selectedIdA ||
+        oldDelegate.selectedIdB != selectedIdB ||
+        oldDelegate.movedIds != movedIds ||
+        oldDelegate.dragOverlapTargetId != dragOverlapTargetId ||
+        oldDelegate.maskImages != maskImages ||
+        oldDelegate.darkBackground != darkBackground;
   }
 }
 

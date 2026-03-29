@@ -259,6 +259,8 @@ public:
     int  GetGraphNodes(float* buffer, int max_nodes) const;
     int  GetGraphNodeNeighbors(int node_id, int* neighbors, int max_neighbors) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;
+    bool CompareGraphNodesAtOffset(int id_a, int id_b, float dx, float dy, float* result) const;
+    int  GetGraphNodeMasks(uint8_t* buffer, int max_bytes) const;
     bool MoveGraphNode(int node_id, float new_cx, float new_cy);
     bool DeleteGraphNode(int node_id);
     bool ApplyUserEdits(const int* delete_ids, int delete_count,
@@ -590,6 +592,8 @@ extern "C" {
     __declspec(dllexport) int     GetGraphNodes(float* buffer, int max_nodes);
     __declspec(dllexport) int     GetGraphNodeNeighbors(int node_id, int* neighbors, int max_neighbors);
     __declspec(dllexport) bool    CompareGraphNodes(int id_a, int id_b, float* result);
+    __declspec(dllexport) bool    CompareGraphNodesAtOffset(int id_a, int id_b, float dx, float dy, float* result);
+    __declspec(dllexport) int     GetGraphNodeMasks(uint8_t* buffer, int max_bytes);
     __declspec(dllexport) bool    MoveGraphNode(int node_id, float new_cx, float new_cy);
     __declspec(dllexport) bool    DeleteGraphNode(int node_id);
     __declspec(dllexport) bool    ApplyUserEdits(const int* delete_ids, int delete_count,

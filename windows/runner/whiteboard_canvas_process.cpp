@@ -44,6 +44,8 @@ constexpr DWORD kGraphCompareTimeoutMs = 2000;
 constexpr int kMaxEditDeletes = 256;
 constexpr int kMaxEditMoves = 256;
 constexpr DWORD kEditCommandTimeoutMs = 2000;
+constexpr int kMaxMaskDataBytes = 20 * 1024 * 1024;  // 20 MB for node RGBA masks
+constexpr DWORD kMaskRequestTimeoutMs = 3000;
 bool g_is_helper_process = false;
 std::string g_helper_session_id;
 
@@ -101,7 +103,7 @@ struct SharedState {
     unsigned char overview_bgr[kMaxOverviewBytes];
     float graph_nodes[kMaxGraphNodeFloats];
     float graph_contours[kMaxGraphContourFloats];
-    float graph_compare_result[5];
+    float graph_compare_result[10];
 
     // User edit commands (client -> helper)
     LONG edit_request_id = 0;
@@ -113,6 +115,13 @@ struct SharedState {
     LONG edit_result_ready = 0;
     LONG edit_result_ok = 0;
     LONG edit_result_id = 0;
+
+    // Mask data request/response (client -> helper -> client)
+    LONG mask_request_id = 0;
+    LONG mask_result_ready = 0;
+    LONG mask_result_id = 0;
+    LONG mask_result_bytes = 0;
+    unsigned char mask_data[kMaxMaskDataBytes];
 };
 #pragma pack(pop)
 
@@ -143,6 +152,7 @@ struct HelperStateSnapshot {
     int edit_move_count = 0;
     int edit_delete_ids[kMaxEditDeletes] = {};
     float edit_moves[kMaxEditMoves * 3] = {};
+    int mask_request_id = 0;
 };
 
 std::wstring Utf16FromUtf8(const std::string& utf8) {
@@ -238,9 +248,10 @@ public:
         int graph_compare_result_id = 0;
         bool graph_compare_result_ready = false;
         bool graph_compare_result_ok = false;
-        float graph_compare_result[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+        float graph_compare_result[10] = {};
 
         int last_edit_request_id = 0;
+        int last_mask_request_id = 0;
         int edit_result_id = 0;
         bool edit_result_ready = false;
         bool edit_result_ok = false;
@@ -351,6 +362,33 @@ public:
                 edit_result_ok = edit_ok;
                 edit_result_ready = true;
                 last_edit_request_id = snapshot.edit_request_id;
+            }
+
+            // Process mask data request
+            int mask_bytes_written = 0;
+            bool mask_result_ready_flag = false;
+            int mask_result_id_val = 0;
+            if (snapshot.mask_request_id > 0 &&
+                snapshot.mask_request_id != last_mask_request_id) {
+                // Use a heap buffer to avoid stack overflow
+                static thread_local std::vector<uint8_t> local_mask_buf(kMaxMaskDataBytes);
+                mask_bytes_written = canvas.GetGraphNodeMasks(
+                    local_mask_buf.data(), kMaxMaskDataBytes);
+                mask_result_id_val = snapshot.mask_request_id;
+                mask_result_ready_flag = true;
+                last_mask_request_id = snapshot.mask_request_id;
+
+                // Write mask data directly under shared lock
+                if (WaitAndLock(mutex_.get(), 50)) {
+                    if (mask_bytes_written > 0) {
+                        std::memcpy(shared_->mask_data, local_mask_buf.data(),
+                                    mask_bytes_written);
+                    }
+                    shared_->mask_result_bytes = mask_bytes_written;
+                    shared_->mask_result_id = mask_result_id_val;
+                    shared_->mask_result_ready = 1;
+                    Unlock(mutex_.get());
+                }
             }
 
             WriteResults(canvas,
@@ -470,6 +508,9 @@ private:
             std::memcpy(snapshot.edit_moves, shared_->edit_moves,
                         snapshot.edit_move_count * 3 * sizeof(float));
         }
+
+        // Read mask request
+        snapshot.mask_request_id = static_cast<int>(shared_->mask_request_id);
 
         Unlock(mutex_.get());
         return true;
@@ -625,6 +666,7 @@ struct WhiteboardCanvasHelperClient::Impl {
     std::atomic<int> cached_active_subcanvas{-1};
     mutable std::atomic<int> next_graph_compare_request_id{1};
     mutable std::atomic<int> next_edit_request_id{1};
+    mutable std::atomic<int> next_mask_request_id{1};
 
     ~Impl() {
         if (shared) {
@@ -1130,7 +1172,7 @@ bool WhiteboardCanvasHelperClient::CompareGraphNodes(int id_a, int id_b, float* 
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = false;
         bool ok = false;
-        float local_result[5] = {0.f, 0.f, 0.f, 0.f, 0.f};
+        float local_result[10] = {};
 
         impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
             ready = impl_->shared->graph_compare_result_ready != 0 &&
@@ -1255,6 +1297,50 @@ bool WhiteboardCanvasHelperClient::ApplyUserEdits(const int* delete_ids, int del
     }
 
     return false;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphNodeMasks(uint8_t* buffer, int max_bytes) const {
+    if (!IsReady() || !buffer || max_bytes <= 0) return 0;
+
+    const int request_id =
+        impl_->next_mask_request_id.fetch_add(1, std::memory_order_relaxed);
+    const bool queued = impl_->WithLock(20, [&]() {
+        impl_->shared->mask_request_id = request_id;
+        impl_->shared->mask_result_ready = 0;
+        impl_->shared->mask_result_id = 0;
+        impl_->shared->mask_result_bytes = 0;
+    });
+    if (!queued) return 0;
+
+    impl_->SignalHelper();
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kMaskRequestTimeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool ready = false;
+        int bytes_written = 0;
+
+        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+            ready = impl_->shared->mask_result_ready != 0 &&
+                    impl_->shared->mask_result_id == request_id;
+            if (ready) {
+                bytes_written = static_cast<int>(impl_->shared->mask_result_bytes);
+                if (bytes_written > 0) {
+                    const int copy_bytes = std::min(bytes_written, max_bytes);
+                    std::memcpy(buffer, impl_->shared->mask_data, copy_bytes);
+                    bytes_written = copy_bytes;
+                }
+            }
+        });
+
+        if (ready) {
+            return bytes_written;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    return 0;
 }
 
 void SetWhiteboardCanvasHelperProcessMode(bool helper_mode, const std::string& session_id) {

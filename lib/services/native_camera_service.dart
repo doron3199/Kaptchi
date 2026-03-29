@@ -129,6 +129,11 @@ typedef CompareGraphNodesFunc = Bool Function(
 typedef CompareGraphNodesFFI = bool Function(
   int idA, int idB, Pointer<Float> result);
 
+typedef CompareGraphNodesAtOffsetFunc = Bool Function(
+  Int32 idA, Int32 idB, Float dx, Float dy, Pointer<Float> result);
+typedef CompareGraphNodesAtOffsetFFI = bool Function(
+  int idA, int idB, double dx, double dy, Pointer<Float> result);
+
 typedef MoveGraphNodeFunc = Bool Function(
   Int32 nodeId, Float newCx, Float newCy);
 typedef MoveGraphNodeFFI = bool Function(
@@ -152,6 +157,9 @@ typedef GetGraphCanvasBoundsFFI = bool Function(Pointer<Int32> bounds);
 
 typedef GetGraphNodeContoursFunc = Int32 Function(Pointer<Float> buffer, Int32 maxFloats);
 typedef GetGraphNodeContoursFFI = int Function(Pointer<Float> buffer, int maxFloats);
+
+typedef GetGraphNodeMasksFunc = Int32 Function(Pointer<Uint8> buffer, Int32 maxBytes);
+typedef GetGraphNodeMasksFFI = int Function(Pointer<Uint8> buffer, int maxBytes);
 
 typedef CaptureGraphDebugSnapshotFunc = Bool Function(Int32 slot);
 typedef CaptureGraphDebugSnapshotFFI = bool Function(int slot);
@@ -974,12 +982,14 @@ class NativeCameraService {
   late GetGraphNodesFFI _getGraphNodes;
   late GetGraphNodeNeighborsFFI _getGraphNodeNeighbors;
   late CompareGraphNodesFFI _compareGraphNodes;
+  CompareGraphNodesAtOffsetFFI? _compareGraphNodesAtOffset;
   late MoveGraphNodeFFI _moveGraphNode;
   late DeleteGraphNodeFFI _deleteGraphNode;
   late ApplyUserEditsFFI _applyUserEdits;
   late LockAllGraphNodesFFI _lockAllGraphNodes;
   late GetGraphCanvasBoundsFFI _getGraphCanvasBounds;
   GetGraphNodeContoursFFI? _getGraphNodeContours;
+  GetGraphNodeMasksFFI? _getGraphNodeMasks;
   late CaptureGraphDebugSnapshotFFI _captureGraphDebugSnapshot;
   late GetGraphSnapshotNodeCountFFI _getGraphSnapshotNodeCount;
   late GetGraphSnapshotNodesFFI _getGraphSnapshotNodes;
@@ -1039,6 +1049,14 @@ class NativeCameraService {
       rethrow;
     }
     try {
+      _compareGraphNodesAtOffset = _nativeLib
+          .lookup<NativeFunction<CompareGraphNodesAtOffsetFunc>>('CompareGraphNodesAtOffset')
+          .asFunction();
+      AppLogger.ffi('  lookup CompareGraphNodesAtOffset: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup CompareGraphNodesAtOffset FAILED (optional): $e');
+    }
+    try {
       _moveGraphNode = _nativeLib
           .lookup<NativeFunction<MoveGraphNodeFunc>>('MoveGraphNode')
           .asFunction();
@@ -1093,6 +1111,16 @@ class NativeCameraService {
     } catch (e) {
       _getGraphNodeContours = null;
       AppLogger.ffi('  lookup GetGraphNodeContours: not found (optional) - $e');
+    }
+
+    try {
+      _getGraphNodeMasks = _nativeLib
+          .lookup<NativeFunction<GetGraphNodeMasksFunc>>('GetGraphNodeMasks')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphNodeMasks: OK');
+    } catch (e) {
+      _getGraphNodeMasks = null;
+      AppLogger.ffi('  lookup GetGraphNodeMasks: not found (optional) - $e');
     }
 
     try {
@@ -1312,7 +1340,7 @@ class NativeCameraService {
 
   NodeComparison? compareNodes(int idA, int idB) {
     _initializeGraphDebug();
-    final buffer = malloc.allocate<Float>(5 * 4);
+    final buffer = malloc.allocate<Float>(10 * 4);
     try {
       final ok = _compareGraphNodes(idA, idB, buffer);
       AppLogger.graphDebug(
@@ -1324,6 +1352,28 @@ class NativeCameraService {
         bboxIntersectionArea: buffer[2],
         andOverlapPixels: buffer[3],
         maskOverlapRatio: buffer[4],
+        bboxIou: buffer[5],
+        widthRatio: buffer[6],
+        heightRatio: buffer[7],
+        centroidAlignedOverlapPixels: buffer[8],
+        centroidAlignedOverlapRatio: buffer[9],
+      );
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  NodeOverlapAtOffset? compareNodesAtOffset(int idA, int idB, double dx, double dy) {
+    _initializeGraphDebug();
+    if (_compareGraphNodesAtOffset == null) return null;
+    final buffer = malloc.allocate<Float>(3 * 4);
+    try {
+      final ok = _compareGraphNodesAtOffset!(idA, idB, dx, dy, buffer);
+      if (!ok) return null;
+      return NodeOverlapAtOffset(
+        andOverlapPixels: buffer[0],
+        maskOverlapRatio: buffer[1],
+        bboxIou: buffer[2],
       );
     } finally {
       malloc.free(buffer);
@@ -1392,6 +1442,53 @@ class NativeCameraService {
           : (buffer, maxFloats) => _getGraphNodeContours!(buffer, maxFloats),
       logLabel: 'getGraphNodeContours',
     );
+  }
+
+  /// Returns per-node RGBA mask images: {nodeId: NodeMaskImage(width, height, rgbaBytes)}.
+  /// Color pixels on white transparent background.
+  Map<int, NodeMaskImage> getGraphNodeMasks() {
+    _initializeGraphDebug();
+    if (_getGraphNodeMasks == null) return {};
+
+    // Allocate generous buffer: 20 MB should handle ~60 nodes of ~200x200
+    const maxBytes = 20 * 1024 * 1024;
+    final buffer = malloc.allocate<Uint8>(maxBytes);
+    try {
+      final written = _getGraphNodeMasks!(buffer, maxBytes);
+      if (written <= 0) return {};
+
+      final result = <int, NodeMaskImage>{};
+      int offset = 0;
+      while (offset + 12 <= written) {
+        // Read header: node_id(4), width(4), height(4)
+        final idBytes = buffer.cast<Int32>().elementAt(offset ~/ 4).value;
+        final wBytes = buffer.cast<Int32>().elementAt(offset ~/ 4 + 1).value;
+        final hBytes = buffer.cast<Int32>().elementAt(offset ~/ 4 + 2).value;
+        offset += 12;
+
+        final pixelBytes = wBytes * hBytes * 4;
+        if (offset + pixelBytes > written) break;
+        if (wBytes <= 0 || hBytes <= 0) break;
+
+        // Copy RGBA bytes
+        final rgba = Uint8List(pixelBytes);
+        for (int i = 0; i < pixelBytes; i++) {
+          rgba[i] = buffer.elementAt(offset + i).value;
+        }
+        offset += pixelBytes;
+
+        result[idBytes] = NodeMaskImage(
+          width: wBytes,
+          height: hBytes,
+          rgbaBytes: rgba,
+        );
+      }
+
+      AppLogger.graphDebug('getGraphNodeMasks: ${result.length} masks, $written bytes');
+      return result;
+    } finally {
+      malloc.free(buffer);
+    }
   }
 
   bool captureGraphSnapshot(int slot) {
