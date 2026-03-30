@@ -62,7 +62,7 @@ std::atomic<float> g_canvas_pan_y{0.5f};
 std::atomic<float> g_canvas_zoom{1.0f};
 std::atomic<bool>  g_whiteboard_debug{false};
 std::atomic<float> g_yolo_fps{2.0f};
-std::atomic<float> g_canvas_enhance_threshold{5.0f};
+std::atomic<float> g_canvas_enhance_threshold{4.0f};
 
 // ============================================================================
 //  SECTION 2: Static helpers
@@ -770,14 +770,16 @@ static cv::Rect ExpandRectWithinFrame(const cv::Rect& rect,
 }
 
 static cv::Mat BuildFrameStrokeRejectMask(const cv::Size& frame_size,
-                                          const cv::Rect& lecturer_frame_rect) {
+                                          const cv::Rect& lecturer_frame_rect,
+                                          float cluster_radius = 20.0f) {
     if (frame_size.width <= 0 || frame_size.height <= 0) {
         return cv::Mat();
     }
 
     cv::Mat reject_mask(frame_size, CV_8UC1, cv::Scalar(0));
+    const int min_margin = static_cast<int>(std::ceil(cluster_radius));
     const int side_margin = std::min(frame_size.width,
-                                     std::max(5, frame_size.width / 100));
+                                     std::max(min_margin, frame_size.width / 100));
     reject_mask(cv::Rect(0, 0, side_margin, frame_size.height)).setTo(255);
 
     const int right_start = std::max(0, frame_size.width - side_margin);
@@ -785,8 +787,8 @@ static cv::Mat BuildFrameStrokeRejectMask(const cv::Size& frame_size,
                          frame_size.width - right_start,
                          frame_size.height)).setTo(255);
 
-    const int lecturer_margin_x = std::max(5, frame_size.width / 100);
-    const int lecturer_margin_y = std::max(5, frame_size.height / 100);
+    const int lecturer_margin_x = std::max(min_margin, frame_size.width / 100);
+    const int lecturer_margin_y = std::max(min_margin, frame_size.height / 100);
     const cv::Rect expanded_lecturer = ExpandRectWithinFrame(
         lecturer_frame_rect,
         frame_size,
@@ -1933,7 +1935,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame, const cv
     cv::Mat stroke_reject_mask;
     if (kEnableFrameStrokeRejectFilter) {
         stroke_reject_mask = BuildFrameStrokeRejectMask(
-            frame.size(), lecturer_frame_rect);
+            frame.size(), lecturer_frame_rect, kStrokeClusterRadius);
     }
 
     // -------------------------------------------------------------------
@@ -2645,8 +2647,8 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
         }
 
         // Apply asymmetric EMA: slow build when seen, fast decay when absent
-        static constexpr float kAbsenceAlphaSeen  = 0.9f;  // fast build
-        static constexpr float kAbsenceAlphaAbsent = 0.1f;  // slow decay
+        static constexpr float kAbsenceAlphaSeen  = 0.3f;  // fast build
+        static constexpr float kAbsenceAlphaAbsent = 0.6f;  // slow decay
 
         // Seen nodes: delta = +1
         for (int nid : seen_node_ids) {
@@ -2810,9 +2812,10 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
 
             int existing_match_id = -1;
             double best_shape_dist = 1e9;
-            const float search_r = std::max(kMergeSearchRadiusPx,
+            const float search_r = std::max({kMergeSearchRadiusPx,
+                kPreAdmitCentroidSearchRadiusPx,
                 std::max(static_cast<float>(blob.bbox.width),
-                         static_cast<float>(blob.bbox.height)) * 0.5f);
+                         static_cast<float>(blob.bbox.height)) * 0.5f});
             const auto nearby_nodes = group.spatial_index.QueryRadius(
                 canvas_centroid, search_r);
 
@@ -2922,6 +2925,133 @@ void WhiteboardCanvas::ProcessCandidateBlobs(
                     placed.push_back(blob_index);
                     placed_any = true;
                     continue;
+                }
+            }
+
+            // --- Centroid-aligned mask overlap gate ---
+            // Catches duplicates that bbox-based checks miss because canvas
+            // positions are offset by camera estimation error.  Alignment is
+            // by local centroid (position-invariant).
+            {
+                const int blob_px = blob.binary_mask.empty() ? 0
+                    : cv::countNonZero(blob.binary_mask);
+                int centroid_match_node_id = -1;
+                float best_centroid_overlap = 0.0f;
+
+                if (blob_px > 0) {
+                    const float blob_local_cx = blob.centroid.x - blob.bbox.x;
+                    const float blob_local_cy = blob.centroid.y - blob.bbox.y;
+
+                    for (int nid : nearby_nodes) {
+                        auto nit = group.nodes.find(nid);
+                        if (nit == group.nodes.end()) continue;
+                        const auto& existing = *nit->second;
+
+                        if (existing.created_frame == current_frame) continue;
+                        if (existing.user_locked) continue;
+                        if (existing.binary_mask.empty()) continue;
+
+                        const int existing_px = cv::countNonZero(existing.binary_mask);
+                        if (existing_px <= 0) continue;
+
+                        const float area_ratio =
+                            static_cast<float>(std::min(blob_px, existing_px)) /
+                            static_cast<float>(std::max(blob_px, existing_px));
+                        if (area_ratio < kPreAdmitMinAreaRatio) continue;
+
+                        // Place existing mask on canvas with margin for jiggle
+                        const int margin = kPreAdmitJiggleMaxPx + 1;
+                        const int cw = existing.binary_mask.cols + 2 * margin;
+                        const int ch = existing.binary_mask.rows + 2 * margin;
+                        if (cw <= 0 || ch <= 0) continue;
+
+                        cv::Mat node_canvas = cv::Mat::zeros(ch, cw, CV_8UC1);
+                        cv::Rect node_roi(margin, margin,
+                                          existing.binary_mask.cols,
+                                          existing.binary_mask.rows);
+                        node_roi &= cv::Rect(0, 0, cw, ch);
+                        if (node_roi.empty()) continue;
+                        existing.binary_mask(
+                            cv::Rect(0, 0, node_roi.width, node_roi.height))
+                            .copyTo(node_canvas(node_roi));
+
+                        // Base offset: align blob centroid onto node centroid
+                        const float node_local_cx =
+                            existing.centroid_canvas.x - existing.bbox_canvas.x;
+                        const float node_local_cy =
+                            existing.centroid_canvas.y - existing.bbox_canvas.y;
+                        const int base_ox = margin +
+                            static_cast<int>(std::round(node_local_cx - blob_local_cx));
+                        const int base_oy = margin +
+                            static_cast<int>(std::round(node_local_cy - blob_local_cy));
+                        const int min_px = std::min(blob_px, existing_px);
+
+                        float pair_best = 0.0f;
+                        for (int dy = -kPreAdmitJiggleMaxPx;
+                             dy <= kPreAdmitJiggleMaxPx;
+                             dy += kPreAdmitJiggleStepPx) {
+                            for (int dx = -kPreAdmitJiggleMaxPx;
+                                 dx <= kPreAdmitJiggleMaxPx;
+                                 dx += kPreAdmitJiggleStepPx) {
+                                cv::Rect blob_roi(base_ox + dx, base_oy + dy,
+                                                  blob.binary_mask.cols,
+                                                  blob.binary_mask.rows);
+                                cv::Rect clipped = blob_roi & cv::Rect(0, 0, cw, ch);
+                                if (clipped.empty()) continue;
+                                cv::Rect src_roi(clipped.x - blob_roi.x,
+                                                 clipped.y - blob_roi.y,
+                                                 clipped.width, clipped.height);
+                                if (src_roi.x < 0 || src_roi.y < 0 ||
+                                    src_roi.x + src_roi.width > blob.binary_mask.cols ||
+                                    src_roi.y + src_roi.height > blob.binary_mask.rows)
+                                    continue;
+
+                                cv::Mat overlap;
+                                cv::bitwise_and(blob.binary_mask(src_roi),
+                                                node_canvas(clipped), overlap);
+                                const float ratio =
+                                    static_cast<float>(cv::countNonZero(overlap)) /
+                                    static_cast<float>(min_px);
+                                if (ratio > pair_best) pair_best = ratio;
+                                if (pair_best >= kPreAdmitCentroidOverlapThresh)
+                                    goto jiggle_done;
+                            }
+                        }
+                        jiggle_done:
+
+                        if (pair_best > best_centroid_overlap) {
+                            best_centroid_overlap = pair_best;
+                            centroid_match_node_id = nid;
+                        }
+                        if (best_centroid_overlap >= kPreAdmitCentroidOverlapThresh)
+                            break;
+                    }
+                }
+
+                if (best_centroid_overlap >= kPreAdmitCentroidOverlapThresh &&
+                    centroid_match_node_id >= 0) {
+                    auto nit = group.nodes.find(centroid_match_node_id);
+                    if (nit != group.nodes.end()) {
+                        auto& node = *nit->second;
+                        node.last_seen_frame = current_frame;
+                        node.seen_count++;
+                        node.max_area_seen = std::max(node.max_area_seen, blob.area);
+                        node.absence_score = std::min(
+                            node.absence_score + 1.0f, kAbsenceScoreMax);
+
+                        // REFRESH if blob has more pixels (better view)
+                        if (!node.user_locked &&
+                            blob_px > cv::countNonZero(node.binary_mask)) {
+                            RefreshNodeFromBlob(group, node, blob,
+                                                canvas_centroid, canvas_bbox);
+                            graph_changed = true;
+                        }
+
+                        blob_to_graph_node_id[blob_index] = centroid_match_node_id;
+                        placed.push_back(blob_index);
+                        placed_any = true;
+                        continue;
+                    }
                 }
             }
 
@@ -3137,7 +3267,72 @@ void WhiteboardCanvas::MergeOverlappingNodes(WhiteboardGroup& group,
                                            kMergeSlideStepPx));
             }
 
-            if (best_overlap < kMergeOverlapThreshold) continue;
+            // Tier 3: centroid-aligned containment check
+            // When one node is much smaller, align by centroid offset
+            // and jiggle to find if the small one is contained in the big one.
+            if (best_overlap < kContainmentOverlapThresh) {
+                const int min_px = std::min(a_px, b_px);
+                const int max_px = std::max(a_px, b_px);
+                if (max_px > 0 &&
+                    static_cast<float>(min_px) / static_cast<float>(max_px) < kContainmentMaxSizeRatio) {
+                    // Identify smaller / bigger
+                    const DrawingNode& smaller = (a_px <= b_px) ? a : b;
+                    const DrawingNode& bigger  = (a_px <= b_px) ? b : a;
+
+                    // Place bigger mask on a canvas, slide smaller mask around centroid offset
+                    const int margin = kContainmentSlideMax + 1;
+                    const int cw = bigger.binary_mask.cols + 2 * margin;
+                    const int ch = bigger.binary_mask.rows + 2 * margin;
+                    if (cw > 0 && ch > 0) {
+                        cv::Mat big_canvas = cv::Mat::zeros(ch, cw, CV_8UC1);
+                        cv::Rect big_roi(margin, margin,
+                                         bigger.binary_mask.cols, bigger.binary_mask.rows);
+                        big_roi &= cv::Rect(0, 0, cw, ch);
+                        if (!big_roi.empty()) {
+                            bigger.binary_mask(cv::Rect(0, 0, big_roi.width, big_roi.height))
+                                .copyTo(big_canvas(big_roi));
+
+                            // Base offset: position smaller mask so centroids align
+                            // smaller centroid in its mask: centroid_canvas - bbox_canvas.tl()
+                            const float s_local_cx = smaller.centroid_canvas.x - smaller.bbox_canvas.x;
+                            const float s_local_cy = smaller.centroid_canvas.y - smaller.bbox_canvas.y;
+                            const float b_local_cx = bigger.centroid_canvas.x - bigger.bbox_canvas.x;
+                            const float b_local_cy = bigger.centroid_canvas.y - bigger.bbox_canvas.y;
+                            // Position smaller mask so its centroid lands on bigger's centroid in the canvas
+                            const int base_ox = margin + static_cast<int>(std::round(b_local_cx - s_local_cx));
+                            const int base_oy = margin + static_cast<int>(std::round(b_local_cy - s_local_cy));
+
+                            for (int dy = -kContainmentSlideMax; dy <= kContainmentSlideMax; dy += kContainmentSlideStep) {
+                                for (int dx = -kContainmentSlideMax; dx <= kContainmentSlideMax; dx += kContainmentSlideStep) {
+                                    cv::Rect small_roi(base_ox + dx, base_oy + dy,
+                                                       smaller.binary_mask.cols,
+                                                       smaller.binary_mask.rows);
+                                    cv::Rect clipped = small_roi & cv::Rect(0, 0, cw, ch);
+                                    if (clipped.empty()) continue;
+                                    cv::Rect src_roi(clipped.x - small_roi.x,
+                                                     clipped.y - small_roi.y,
+                                                     clipped.width, clipped.height);
+                                    if (src_roi.x < 0 || src_roi.y < 0 ||
+                                        src_roi.x + src_roi.width > smaller.binary_mask.cols ||
+                                        src_roi.y + src_roi.height > smaller.binary_mask.rows) {
+                                        continue;
+                                    }
+                                    cv::Mat overlap;
+                                    cv::bitwise_and(smaller.binary_mask(src_roi),
+                                                    big_canvas(clipped), overlap);
+                                    const float ratio = static_cast<float>(cv::countNonZero(overlap))
+                                                      / static_cast<float>(min_px);
+                                    if (ratio > best_overlap) best_overlap = ratio;
+                                    if (best_overlap >= 1.0f) goto containment_done;
+                                }
+                            }
+                            containment_done:;
+                        }
+                    }
+                }
+            }
+
+            if (best_overlap < kContainmentOverlapThresh) continue;
 
             // Never merge user-edited nodes
             if (a.user_locked || b.user_locked) continue;
@@ -4148,7 +4343,7 @@ bool WhiteboardCanvas::CaptureGraphDebugSnapshot(int slot,
     cv::Mat stroke_reject_mask;
     if (kEnableFrameStrokeRejectFilter) {
         stroke_reject_mask = BuildFrameStrokeRejectMask(
-            frame_roi.size(), lecturer_frame_rect);
+            frame_roi.size(), lecturer_frame_rect, kStrokeClusterRadius);
     }
 
     int stroke_pixel_count = 0;

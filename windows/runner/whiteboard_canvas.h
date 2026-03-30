@@ -333,9 +333,22 @@ private:
     static constexpr bool   kEnableFrameStrokeRejectFilter = true;          // Reject whole frame blobs that touch the side margins or padded lecturer area before graph admission.
     static constexpr float  kMergeOverlapThreshold    = 0.60f;  // overlap_px / min_pixels to trigger merge
     static constexpr float  kMergeSearchRadiusPx      = 40.0f;  // Max centroid distance to consider a pair
-    static constexpr int    kMergeSlideMaxX             = 30;    // Horizontal half-range of sliding window (±pixels)
-    static constexpr int    kMergeSlideMaxY             = 15;     // Vertical half-range of sliding window (±pixels)
-    static constexpr int    kMergeSlideStepPx           = 3;     // Step size for sliding window search
+    static constexpr int    kMergeSlideMaxX             = 10;    // Horizontal half-range of sliding window (±pixels)
+    static constexpr int    kMergeSlideMaxY             = 10;     // Vertical half-range of sliding window (±pixels)
+    static constexpr int    kMergeSlideStepPx           = 1;     // Step size for sliding window search
+
+    // Containment merge: absorb small fragments into larger nodes
+    static constexpr float  kContainmentMaxSizeRatio   = 0.99f;  // small_px / big_px must be below this to trigger containment check
+    static constexpr float  kContainmentOverlapThresh  = 0.55f;  // AND_px / small_px threshold for absorption
+    static constexpr int    kContainmentSlideMax        = 15;     // ±pixels centroid-aligned jiggle
+    static constexpr int    kContainmentSlideStep       = 1;      // step size for containment jiggle
+
+    // Pre-admission centroid-aligned mask overlap gate
+    static constexpr float  kPreAdmitCentroidSearchRadiusPx = 80.0f;  // Search radius for centroid-overlap duplicate check (larger than kMergeSearchRadiusPx to catch offset errors)
+    static constexpr float  kPreAdmitCentroidOverlapThresh  = 0.55f;  // AND_px / min_px threshold to declare duplicate
+    static constexpr float  kPreAdmitMinAreaRatio           = 0.15f;  // min_px / max_px area ratio gate (skip wildly different sizes)
+    static constexpr int    kPreAdmitJiggleMaxPx             = 15;    // ±pixels centroid-aligned jiggle half-range
+    static constexpr int    kPreAdmitJiggleStepPx            = 2;     // Step size for jiggle grid search
 
     // Battle thresholds
     static constexpr float kBattleCoexistOverlap = 0.10f; // Minimum IoU for a new blob to coexist with an existing node (no refresh or replacement).
