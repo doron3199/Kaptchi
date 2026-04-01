@@ -354,6 +354,234 @@ static void RefreshNodeFromBlob(WhiteboardGroup& group, DrawingNode& node,
     group.spatial_index.Insert(node.id, canvas_centroid);
 }
 
+// ---------------------------------------------------------------------------
+// FindBestAlignment -- sliding window to find best (dx,dy) to align mask_b
+// onto mask_a, using one of three scoring modes.
+// Returns the offset to SHIFT mask_b's bbox so it best aligns with mask_a.
+// The search space is [-r, +r] in both axes.
+// ---------------------------------------------------------------------------
+struct AlignResult { int dx = 0; int dy = 0; float score = -1e30f; };
+
+static AlignResult FindBestAlignment(
+    const cv::Rect& bbox_a, const cv::Mat& mask_a,
+    const cv::Rect& bbox_b, const cv::Mat& mask_b,
+    int search_radius, AlignmentScoreMode mode)
+{
+    if (mask_a.empty() || mask_b.empty()) return {};
+
+    const int a_px = cv::countNonZero(mask_a);
+    const int b_px = cv::countNonZero(mask_b);
+    if (a_px == 0 || b_px == 0) return {};
+
+    // Build a canvas large enough to hold both masks at any offset in search range.
+    // Origin of the canvas is (canvas_ox, canvas_oy) in the global coord system.
+    const int canvas_x0 = std::min(bbox_a.x, bbox_b.x - search_radius);
+    const int canvas_y0 = std::min(bbox_a.y, bbox_b.y - search_radius);
+    const int canvas_x1 = std::max(bbox_a.x + bbox_a.width,
+                                   bbox_b.x + bbox_b.width + search_radius);
+    const int canvas_y1 = std::max(bbox_a.y + bbox_a.height,
+                                   bbox_b.y + bbox_b.height + search_radius);
+    const int cw = canvas_x1 - canvas_x0;
+    const int ch = canvas_y1 - canvas_y0;
+    if (cw <= 0 || ch <= 0) return {};
+
+    // Place mask_a once on the canvas
+    cv::Mat canvas_a = cv::Mat::zeros(ch, cw, CV_8UC1);
+    {
+        int ax = bbox_a.x - canvas_x0, ay = bbox_a.y - canvas_y0;
+        if (ax >= 0 && ay >= 0 && ax + mask_a.cols <= cw && ay + mask_a.rows <= ch)
+            mask_a.copyTo(canvas_a(cv::Rect(ax, ay, mask_a.cols, mask_a.rows)));
+    }
+
+    // For chamfer mode: precompute distance transform of A's edges
+    cv::Mat dist_a;
+    if (mode == AlignmentScoreMode::kChamfer) {
+        cv::Mat edge_a;
+        cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+        cv::morphologyEx(canvas_a, edge_a, cv::MORPH_GRADIENT, kernel);
+        cv::Mat inv_edge;
+        cv::bitwise_not(edge_a, inv_edge);
+        cv::distanceTransform(inv_edge, dist_a, cv::DIST_L2, 3);
+    }
+
+    AlignResult best;
+
+    for (int dy = -search_radius; dy <= search_radius; ++dy) {
+        for (int dx = -search_radius; dx <= search_radius; ++dx) {
+            // Place shifted mask_b on a temporary canvas
+            int bx = bbox_b.x + dx - canvas_x0;
+            int by = bbox_b.y + dy - canvas_y0;
+            if (bx < 0 || by < 0 || bx + mask_b.cols > cw || by + mask_b.rows > ch)
+                continue;
+
+            cv::Rect b_roi(bx, by, mask_b.cols, mask_b.rows);
+
+            float score = -1e30f;
+
+            if (mode == AlignmentScoreMode::kIoU) {
+                cv::Mat overlap;
+                cv::bitwise_and(canvas_a(b_roi), mask_b, overlap);
+                int and_px = cv::countNonZero(overlap);
+                int union_px = a_px + b_px - and_px;
+                score = (union_px > 0) ? (float)and_px / (float)union_px : 0.0f;
+
+            } else if (mode == AlignmentScoreMode::kChamfer) {
+                // Edge of shifted B
+                cv::Mat edge_b;
+                cv::Mat kernel = cv::getStructuringElement(cv::MORPH_RECT, cv::Size(3, 3));
+                cv::morphologyEx(mask_b, edge_b, cv::MORPH_GRADIENT, kernel);
+                // Sample dist_a at edge_b pixel locations
+                cv::Mat dist_roi = dist_a(b_roi);
+                double sum = 0.0; int cnt = 0;
+                for (int y = 0; y < edge_b.rows; ++y) {
+                    const uchar* ep = edge_b.ptr<uchar>(y);
+                    const float* dp = dist_roi.ptr<float>(y);
+                    for (int x = 0; x < edge_b.cols; ++x) {
+                        if (ep[x]) { sum += dp[x]; ++cnt; }
+                    }
+                }
+                float chamfer = (cnt > 0) ? (float)(sum / cnt) : 1e6f;
+                score = -chamfer;  // lower distance = better
+
+            } else if (mode == AlignmentScoreMode::kLargestBlob) {
+                cv::Mat combined;
+                cv::bitwise_or(canvas_a(b_roi), mask_b, combined);
+                // We need the full combined canvas for connected components
+                cv::Mat full_combined = canvas_a.clone();
+                combined.copyTo(full_combined(b_roi));
+                cv::Mat labels, stats, centroids;
+                int n = cv::connectedComponentsWithStats(full_combined, labels, stats, centroids);
+                int max_area = 0;
+                for (int i = 1; i < n; ++i) {
+                    int area = stats.at<int>(i, cv::CC_STAT_AREA);
+                    if (area > max_area) max_area = area;
+                }
+                score = (float)max_area;
+            }
+
+            if (score > best.score) {
+                best = {dx, dy, score};
+            }
+        }
+    }
+    return best;
+}
+
+// ---------------------------------------------------------------------------
+// MergeNodes -- Combine two nodes into one using winner-priority compositing
+// at the best sliding-window alignment. Winner = larger node by area.
+// ---------------------------------------------------------------------------
+static void MergeNodes(WhiteboardGroup& group, DrawingNode& winner, DrawingNode& loser,
+                       int search_radius, AlignmentScoreMode mode) {
+    // Find best alignment offset for loser relative to its current position
+    AlignResult align = FindBestAlignment(
+        winner.bbox_canvas, winner.binary_mask,
+        loser.bbox_canvas,  loser.binary_mask,
+        search_radius, mode);
+
+    // Aligned loser bbox
+    cv::Rect aligned_loser_bbox(
+        loser.bbox_canvas.x + align.dx, loser.bbox_canvas.y + align.dy,
+        loser.bbox_canvas.width, loser.bbox_canvas.height);
+
+    // Combined bounding box
+    cv::Rect combined_bbox = winner.bbox_canvas | aligned_loser_bbox;
+
+    // --- Binary mask: winner priority ---
+    cv::Mat combined_mask = cv::Mat::zeros(combined_bbox.height, combined_bbox.width, CV_8UC1);
+    {
+        int wx = winner.bbox_canvas.x - combined_bbox.x;
+        int wy = winner.bbox_canvas.y - combined_bbox.y;
+        cv::Rect w_roi(wx, wy, winner.binary_mask.cols, winner.binary_mask.rows);
+        winner.binary_mask.copyTo(combined_mask(w_roi));
+    }
+    {
+        int lx = aligned_loser_bbox.x - combined_bbox.x;
+        int ly = aligned_loser_bbox.y - combined_bbox.y;
+        cv::Rect l_roi(lx, ly, loser.binary_mask.cols, loser.binary_mask.rows);
+        // Only add loser pixels where winner has nothing
+        cv::Mat winner_region = combined_mask(l_roi);
+        cv::Mat loser_unique;
+        cv::Mat inv_winner;
+        cv::bitwise_not(winner_region, inv_winner);
+        cv::bitwise_and(loser.binary_mask, inv_winner, loser_unique);
+        combined_mask(l_roi) |= loser_unique;
+    }
+
+    // --- Color pixels: winner priority ---
+    cv::Mat combined_color = cv::Mat::zeros(combined_bbox.height, combined_bbox.width, CV_8UC3);
+    bool has_color = !winner.color_pixels.empty() || !loser.color_pixels.empty();
+    if (has_color) {
+        if (!winner.color_pixels.empty()) {
+            int wx = winner.bbox_canvas.x - combined_bbox.x;
+            int wy = winner.bbox_canvas.y - combined_bbox.y;
+            winner.color_pixels.copyTo(combined_color(cv::Rect(wx, wy,
+                winner.color_pixels.cols, winner.color_pixels.rows)));
+        }
+        if (!loser.color_pixels.empty()) {
+            int lx = aligned_loser_bbox.x - combined_bbox.x;
+            int ly = aligned_loser_bbox.y - combined_bbox.y;
+            cv::Rect l_roi(lx, ly, loser.color_pixels.cols, loser.color_pixels.rows);
+            // Only copy where loser_unique was set (winner had no mask)
+            cv::Mat winner_region = cv::Mat::zeros(loser.color_pixels.rows,
+                                                    loser.color_pixels.cols, CV_8UC1);
+            {
+                int wx_in_l = winner.bbox_canvas.x - aligned_loser_bbox.x;
+                int wy_in_l = winner.bbox_canvas.y - aligned_loser_bbox.y;
+                cv::Rect isect = cv::Rect(0, 0, loser.binary_mask.cols, loser.binary_mask.rows) &
+                                 cv::Rect(wx_in_l, wy_in_l,
+                                          winner.binary_mask.cols, winner.binary_mask.rows);
+                if (!isect.empty()) {
+                    cv::Rect src_roi(isect.x - wx_in_l, isect.y - wy_in_l,
+                                     isect.width, isect.height);
+                    winner.binary_mask(src_roi).copyTo(winner_region(isect));
+                }
+            }
+            cv::Mat loser_only_mask;
+            cv::Mat inv_wr;
+            cv::bitwise_not(winner_region, inv_wr);
+            cv::bitwise_and(loser.binary_mask, inv_wr, loser_only_mask);
+            // 3-channel mask for copyTo
+            cv::Mat mask3;
+            cv::cvtColor(loser_only_mask, mask3, cv::COLOR_GRAY2BGR);
+            cv::Mat loser_masked;
+            cv::bitwise_and(loser.color_pixels, mask3, loser_masked);
+            combined_color(l_roi) |= loser_masked;
+        }
+    }
+
+    // --- Recompute derived properties ---
+    cv::Point2f local_center = ComputeGravityCenter(combined_mask);
+    cv::Point2f new_centroid(local_center.x + combined_bbox.x,
+                              local_center.y + combined_bbox.y);
+
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(combined_mask.clone(), contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
+    int best_ci = -1;
+    double best_ca = 0.0;
+    for (int i = 0; i < (int)contours.size(); ++i) {
+        double ca = cv::contourArea(contours[i]);
+        if (ca > best_ca) { best_ca = ca; best_ci = i; }
+    }
+
+    // Update winner node
+    group.spatial_index.Remove(winner.id, winner.centroid_canvas);
+    winner.bbox_canvas = combined_bbox;
+    winner.binary_mask = combined_mask;
+    if (has_color) winner.color_pixels = combined_color;
+    winner.centroid_canvas = new_centroid;
+    if (best_ci >= 0) {
+        winner.contour = contours[best_ci];
+        winner.area = best_ca;
+        cv::Moments m = cv::moments(contours[best_ci]);
+        cv::HuMoments(m, winner.hu);
+    } else {
+        winner.area = (double)cv::countNonZero(combined_mask);
+    }
+    winner.created_frame = std::min(winner.created_frame, loser.created_frame);
+    group.spatial_index.Insert(winner.id, new_centroid);
+}
+
 static bool RenderOverviewToFrame(const cv::Mat& cache, cv::Size vs, cv::Mat& out) {
     if (cache.empty() || vs.width <= 0 || vs.height <= 0) return false;
     out = cv::Mat(vs.height, vs.width, CV_8UC3, cv::Scalar(255, 255, 255));
@@ -1092,8 +1320,10 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
 
             // Duplicate check: positional IoU, with centroid-aligned fallback.
             // Same-frame nodes are excluded (they may be legitimately similar strokes).
-            const auto nearby = group.spatial_index.QueryRadius(canvas_centroid,
-                                                                  kMergeSearchRadiusPx * 2.0f);
+            const float search_r = std::max({(float)canvas_bbox.width,
+                                               (float)canvas_bbox.height,
+                                               kMergeSearchRadiusPx});
+            const auto nearby = group.spatial_index.QueryRadius(canvas_centroid, search_r);
             bool is_dup = false;
             for (int nid : nearby) {
                 if (group.user_deleted_ids.count(nid)) continue;
@@ -1139,8 +1369,8 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
         }
     }
 
-    // --- 5d. IOU dedup pass: merge existing nodes whose masks overlap > threshold ---
-    {
+    // --- 5d. Containment removal + overlap merge pass (every 4 frames) ---
+    if (current_frame % 4 == 0) {
         std::vector<int> all_ids;
         all_ids.reserve(group.nodes.size());
         for (auto& pair : group.nodes) all_ids.push_back(pair.first);
@@ -1153,30 +1383,51 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
             if (ait == group.nodes.end()) continue;
             auto& a = *ait->second;
 
-            auto nearby = group.spatial_index.QueryRadius(a.centroid_canvas,
-                                                          kMergeSearchRadiusPx * 2.0f);
+            const float search_r = std::max({(float)a.bbox_canvas.width,
+                                               (float)a.bbox_canvas.height,
+                                               kMergeSearchRadiusPx});
+            auto nearby = group.spatial_index.QueryRadius(a.centroid_canvas, search_r);
             for (int bid : nearby) {
                 if (bid == aid || removed.count(bid)) continue;
                 auto bit = group.nodes.find(bid);
                 if (bit == group.nodes.end()) continue;
                 auto& b = *bit->second;
 
+                // Skip nodes created in the same frame (e.g. "T" and "-")
+                if (a.created_frame == b.created_frame) continue;
+
                 MaskRelation rel = ComputeMaskRelation(
                     a.bbox_canvas, a.binary_mask, a.centroid_canvas,
                     b.bbox_canvas, b.binary_mask, b.centroid_canvas);
-                if (!rel.valid || rel.iou < kNodeIouMergeThreshold) continue;
+                if (!rel.valid || rel.overlap_px == 0) continue;
 
-                // Keep the larger node; tie-break by newer creation frame.
-                int loser;
-                if (a.area != b.area)
-                    loser = (a.area < b.area) ? aid : bid;
-                else
-                    loser = (a.created_frame < b.created_frame) ? aid : bid;
+                // Identify smaller/larger by mask pixel count
+                bool a_is_smaller = (rel.first_px <= rel.second_px);
+                int smaller_id = a_is_smaller ? aid : bid;
+                int larger_id  = a_is_smaller ? bid : aid;
 
-                removed.insert(loser);
-                RemoveNodeFromGraph(group, loser);
-                graph_changed = true;
-                if (loser == aid) break;  // a is gone, stop checking its neighbors
+                // Tier 1: Containment — smaller node is mostly inside larger → remove smaller
+                if (rel.overlap_over_min >= kContainmentRemoveThreshold) {
+                    removed.insert(smaller_id);
+                    RemoveNodeFromGraph(group, smaller_id);
+                    graph_changed = true;
+                    if (smaller_id == aid) break;
+                    continue;
+                }
+
+                // Tier 2: Overlap merge — significant shared area → combine with alignment
+                if (rel.overlap_over_min >= kOverlapMergeThreshold) {
+                    auto lit = group.nodes.find(larger_id);
+                    auto sit = group.nodes.find(smaller_id);
+                    if (lit != group.nodes.end() && sit != group.nodes.end()) {
+                        MergeNodes(group, *lit->second, *sit->second,
+                                   kAlignSearchRadius, kAlignmentMode);
+                        removed.insert(smaller_id);
+                        RemoveNodeFromGraph(group, smaller_id);
+                        graph_changed = true;
+                        if (smaller_id == aid) break;
+                    }
+                }
             }
         }
     }

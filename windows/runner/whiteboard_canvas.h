@@ -33,6 +33,12 @@ enum class CanvasRenderMode : int {
     kRaw = 1,
 };
 
+enum class AlignmentScoreMode : int {
+    kIoU = 0,
+    kChamfer = 1,
+    kLargestBlob = 2,
+};
+
 // ---------------------------------------------------------------------------
 // DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
@@ -275,7 +281,7 @@ private:
     static constexpr float kMaxAllowedRectangle          = 115.0f;
     // Connected components within this pixel radius are merged into a single blob.
     // Raise to join fragmented strokes into one node. Lower to keep individual marks separate.
-    static constexpr float kStrokeClusterRadius          = 40.0f;
+    static constexpr float kStrokeClusterRadius          = 70.0f;
     // When true, rejects blobs whose pixels overlap:
     //   (a) Left/right frame border strips of width max(ceil(kStrokeClusterRadius), frame_w/100).
     //       Note: top and bottom borders are NOT masked.
@@ -313,11 +319,19 @@ private:
     static constexpr float kMergeSearchRadiusPx          = 60.0f;
     // Overlap ratio (overlap / min_area) above which a new blob is treated as a duplicate of an
     // existing node and suppressed (or used to refresh it). Lower = more aggressive deduplication.
-    static constexpr float kDuplicateOverlapThreshold    = 0.99f;
+    static constexpr float kDuplicateOverlapThreshold    = 0.90f;
 
-    // IOU (intersection-over-union) above which two existing nodes are considered the same
-    // drawing and the smaller/older one is removed. Runs as a post-pass after new blobs are added.
-    static constexpr float kNodeIouMergeThreshold        = 0.99f;
+    // --- Node merge (post-pass dedup between existing nodes) ---
+    // Scoring method for sliding-window alignment before merging two nodes.
+    static constexpr AlignmentScoreMode kAlignmentMode   = AlignmentScoreMode::kIoU;
+    // Sliding window search radius (px). Best offset searched in [-r, +r] x [-r, +r].
+    static constexpr int   kAlignSearchRadius            = 10;
+    // Mask containment (overlap / smaller_node_px) above which the smaller node is
+    // removed as a fragment of the larger. Only between different-frame nodes.
+    static constexpr float kContainmentRemoveThreshold   = 0.80f;
+    // Mask overlap (overlap / min_area) above which two different-frame nodes are
+    // combined into a single merged node via sliding-window alignment.
+    static constexpr float kOverlapMergeThreshold        = 0.50f;
 
     // --- Battle (overlap resolution between existing nodes) ---
     // Overlap fraction above which a matched blob refreshes (overwrites) its node.
