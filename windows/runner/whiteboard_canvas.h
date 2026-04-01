@@ -319,9 +319,12 @@ private:
     static constexpr float kMergeSearchRadiusPx          = 60.0f;
     // Overlap ratio (overlap / min_area) above which a new blob is treated as a duplicate of an
     // existing node and suppressed (or used to refresh it). Lower = more aggressive deduplication.
-    static constexpr float kDuplicateOverlapThreshold    = 0.90f;
+    static constexpr float kDuplicateOverlapThreshold    = 0.80f;
 
     // --- Node merge (post-pass dedup between existing nodes) ---
+    // BBox IOU above which two existing nodes are considered the same drawing and
+    // the smaller/older one is removed. Runs every frame as a fast pre-filter.
+    static constexpr float kNodeIouMergeThreshold        = 0.88f;
     // Scoring method for sliding-window alignment before merging two nodes.
     static constexpr AlignmentScoreMode kAlignmentMode   = AlignmentScoreMode::kIoU;
     // Sliding window search radius (px). Best offset searched in [-r, +r] x [-r, +r].

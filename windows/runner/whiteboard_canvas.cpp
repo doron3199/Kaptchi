@@ -1369,7 +1369,52 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
         }
     }
 
-    // --- 5d. Containment removal + overlap merge pass (every 4 frames) ---
+    // --- 5d. BBox IoU dedup (every frame, fast) ---
+    {
+        std::vector<int> all_ids;
+        all_ids.reserve(group.nodes.size());
+        for (auto& pair : group.nodes) all_ids.push_back(pair.first);
+
+        std::unordered_set<int> removed;
+        for (size_t i = 0; i < all_ids.size(); ++i) {
+            int aid = all_ids[i];
+            if (removed.count(aid)) continue;
+            auto ait = group.nodes.find(aid);
+            if (ait == group.nodes.end()) continue;
+            auto& a = *ait->second;
+
+            const float search_r = std::max({(float)a.bbox_canvas.width,
+                                               (float)a.bbox_canvas.height,
+                                               kMergeSearchRadiusPx});
+            auto nearby = group.spatial_index.QueryRadius(a.centroid_canvas, search_r);
+            for (int bid : nearby) {
+                if (bid == aid || removed.count(bid)) continue;
+                auto bit = group.nodes.find(bid);
+                if (bit == group.nodes.end()) continue;
+                auto& b = *bit->second;
+
+                cv::Rect isect = a.bbox_canvas & b.bbox_canvas;
+                if (isect.empty()) continue;
+                float isect_area = (float)(isect.width * isect.height);
+                float union_area = (float)(a.bbox_canvas.area() + b.bbox_canvas.area()) - isect_area;
+                float bbox_iou = (union_area > 0.0f) ? isect_area / union_area : 0.0f;
+                if (bbox_iou < kNodeIouMergeThreshold) continue;
+
+                int loser;
+                if (a.area != b.area)
+                    loser = (a.area < b.area) ? aid : bid;
+                else
+                    loser = (a.created_frame < b.created_frame) ? aid : bid;
+
+                removed.insert(loser);
+                RemoveNodeFromGraph(group, loser);
+                graph_changed = true;
+                if (loser == aid) break;
+            }
+        }
+    }
+
+    // --- 5e. Containment removal + overlap merge pass (every 4 frames) ---
     if (current_frame % 4 == 0) {
         std::vector<int> all_ids;
         all_ids.reserve(group.nodes.size());

@@ -1450,8 +1450,8 @@ class NativeCameraService {
     _initializeGraphDebug();
     if (_getGraphNodeMasks == null) return {};
 
-    // Allocate generous buffer: 20 MB should handle ~60 nodes of ~200x200
-    const maxBytes = 20 * 1024 * 1024;
+    // Allocate generous buffer: 200 MB to ensure all nodes get masks
+    const maxBytes = 200 * 1024 * 1024;
     final buffer = malloc.allocate<Uint8>(maxBytes);
     try {
       final written = _getGraphNodeMasks!(buffer, maxBytes);
