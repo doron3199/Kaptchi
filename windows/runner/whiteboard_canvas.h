@@ -39,6 +39,13 @@ enum class AlignmentScoreMode : int {
     kLargestBlob = 2,
 };
 
+enum class NodeReplacementMode : int {
+    kAlwaysReplace   = 0,  // Always replace matched canvas node with frame blob
+    kIouThreshold    = 1,  // Replace only if mask IoU < 50%
+    kPeriodicReplace = 2,  // Replace every N-th time a node is matched
+    kLocationAverage = 3,  // Don't replace content, average centroid positions
+};
+
 // ---------------------------------------------------------------------------
 // DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
@@ -58,6 +65,7 @@ struct DrawingNode {
     int    last_seen_frame = 0;
     int    created_frame   = 0;
     bool   user_locked     = false;
+    int    match_count     = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -270,12 +278,12 @@ private:
     static const int       kBinarizeMinBlobArea          = 3;
     // Morphological dilation kernel size (NxN). Larger = wider strokes and more connected blobs.
     // Raise to join nearby strokes into one blob. Lower to keep strokes thin and separate.
-    static const int       kDilationKernelSize           = 11;
+    static const int       kDilationKernelSize           = 5;
 
     // --- Blob extraction ---
     // Connected components smaller than this (px²) are discarded as noise.
     // Lower = more small marks captured. Higher = cleaner graph but may miss fine writing.
-    static const int       kMinContourArea               = 10;
+    static const int       kMinContourArea               = 30;
     // Blobs whose long-edge / short-edge ratio exceeds this are rejected (e.g. board edges).
     // Raise if long horizontal strokes are being incorrectly filtered out.
     static constexpr float kMaxAllowedRectangle          = 115.0f;
@@ -284,7 +292,7 @@ private:
     static constexpr float kMaxBlobDimensionFraction      = 0.70f;
     // Connected components within this pixel radius are merged into a single blob.
     // Raise to join fragmented strokes into one node. Lower to keep individual marks separate.
-    static constexpr float kStrokeClusterRadius          = 30.0f;
+    static constexpr float kStrokeClusterRadius          = 1.0f;
     // When true, rejects blobs whose pixels overlap:
     //   (a) Left/right frame border strips of width max(ceil(kStrokeClusterRadius), frame_w/100).
     //       Note: top and bottom borders are NOT masked.
@@ -292,46 +300,57 @@ private:
     // Disable to capture content that touches the side edges or the lecturer region.
     static constexpr bool  kEnableFrameStrokeRejectFilter = true;
 
-    // --- Matching ---
-    // Maximum Hu-moment L2 distance (in log10 space) to accept a blob↔node match.
-    // Lower = stricter shape matching, fewer but more reliable matches.
-    // Higher = more matches but more false positives between similar shapes.
-    static constexpr double kHuDistanceThreshold         = 0.5;
-    // A matched blob must be within this many pixels of the median consensus offset
-    // to be counted as an inlier. Lower = tighter consensus required.
-    static constexpr float kRansacTolerancePx            = 5.0f;
-    // Blob area must fall in [kAreaRatioMin × node_area,  node_area / kAreaRatioMin].
-    // e.g. 0.4 → blob can be at most 2.5× larger or 2.5× smaller than the node.
-    //      0.5 → tighter: at most 2×.   0.1 → nearly useless: up to 10×.
-    // Must be in (0, 1). Lower = stricter size gate.
-    static constexpr float kAreaRatioMin                 = 0.1f;
-    // Lowe's ratio test. A match is rejected when BOTH:
-    //   (a) a second candidate also falls within kHuDistanceThreshold, AND
-    //   (b) best_hu_dist / second_best_hu_dist > kHuUniquenessRatio  (best is not clearly better).
-    // If only one candidate exists within threshold, the test is skipped (match always accepted).
-    // 1.0 = test is off (always accept). 0.5 = very strict (best must be <50% of second-best dist).
-    static constexpr float kHuUniquenessRatio            = 1.00f;
-    // Minimum number of inlier blob↔node matches required before new strokes are added to the graph.
-    // This gates how trustworthy frame_offset must be before committing new nodes.
-    // Raise if lecturer motion causes spurious new strokes. Lower if new strokes are missed.
-    static const int       kMinMatchesForNewNode         = 2;
+    // --- Matching (3-step pipeline) ---
+    // Radius (px) for shape matching (step 2) after rough offset is applied.
+    static constexpr float kShapeMatchSearchRadius       = 70.0f;
+    // Hu distance threshold for the global Hu pass.
+    static constexpr double kGlobalHuDistThreshold       = 0.5;
+    // Area ratio gate for Hu matching.
+    static constexpr float kAreaRatioMin                 = 0.9f;
+    // Weight for Hu similarity score in combined shape-match scoring (step 2).
+    static constexpr float kShapeMatchHuWeight           = 0.5f;
+    // Weight for mask IoU in combined shape-match scoring (step 2).
+    static constexpr float kShapeMatchIouWeight          = 0.5f;
+    // Minimum combined score (Hu+IoU) to accept a shape match in step 2.
+    // Rejects weak matches even if they're the "best" nearby candidate.
+    static constexpr float kShapeMatchMinScore           = 0.4f;
+    // Max distance (px) of a match vector from the mean before it's rejected as outlier.
+    static constexpr float kOutlierVectorThreshold       = 15.0f;
+    // Max centroid distance (px) for final nearest-centroid matching (step 3).
+    // After precise alignment, real matches should be within a few pixels.
+    // Keep tight to avoid false matches when no real match exists.
+    static constexpr float kFinalMatchRadius             = 30.0f;
+    // Max Hu distance to accept a nearest-centroid match in step 3.
+    // Prevents matching to a close but completely different shape.
+    static constexpr float kFinalMatchMaxHuDist          = 0.4f;
+    // Minimum number of inlier matches required before new strokes are added to the graph.
+    static const int       kMinMatchesForNewNode         = 3;
+
+    // --- Replacement mode ---
+    static constexpr NodeReplacementMode kReplacementMode = NodeReplacementMode::kAlwaysReplace;
+    // IoU below which replacement happens (for kIouThreshold mode).
+    static constexpr float kIouReplaceThreshold          = 0.50f;
+    // Replace every N-th match (for kPeriodicReplace mode).
+    static const int       kPeriodicReplaceInterval      = 5;
+    // Blend factor for location averaging (for kLocationAverage mode). 0=keep old, 1=use new.
+    static constexpr float kLocationAverageAlpha         = 0.5f;
 
     // --- Merge (duplicate insertion check) ---
     // Radius (px, canvas coords) to search for duplicate candidates around each new node's centroid.
     // Raise if near-duplicate nodes from nearby positions are not being caught.
-    static constexpr float kMergeSearchRadiusPx          = 1.0f;
+    static constexpr float kMergeSearchRadiusPx          = 60.0f;
     // Overlap ratio (overlap / min_area) above which a new blob is treated as a duplicate of an
     // existing node and suppressed (or used to refresh it). Lower = more aggressive deduplication.
-    static constexpr float kDuplicateOverlapThreshold    = 0.99f;
+    static constexpr float kDuplicateOverlapThreshold    = 0.80f;
 
     // --- Node merge (post-pass dedup between existing nodes) ---
     // BBox IOU above which two existing nodes are considered the same drawing and
     // the smaller/older one is removed. Runs every frame as a fast pre-filter.
-    static constexpr float kNodeIouMergeThreshold        = 0.99f;
+    static constexpr float kNodeIouMergeThreshold        = 0.70f;
     // Hu-moment distance (log10-space L2) below which two nearby nodes are
     // considered the same shape and the smaller one is removed. Separate from
     // the BBox-IoU dedup — catches duplicates that shifted slightly between frames.
-    static constexpr float kHuDuplicateThreshold         = 0.01f;
+    static constexpr float kHuDuplicateThreshold         = 0.1f;
     // Scoring method for sliding-window alignment before merging two nodes.
     static constexpr AlignmentScoreMode kAlignmentMode   = AlignmentScoreMode::kIoU;
     // Sliding window search radius (px). Best offset searched in [-r, +r] x [-r, +r].
@@ -342,15 +361,6 @@ private:
     // Mask overlap (overlap / min_area) above which two different-frame nodes are
     // combined into a single merged node via sliding-window alignment.
     static constexpr float kOverlapMergeThreshold        = 0.98f;
-
-    // --- Battle (overlap resolution between existing nodes) ---
-    // Overlap fraction above which a matched blob refreshes (overwrites) its node.
-    // Higher = harder to refresh a node; only large overlaps trigger an update.
-    // Lower = nodes update more eagerly on partial overlap.
-    static constexpr float kBattleRefreshOverlap         = 0.01f;
-    // Centroid shift (canvas px) above which a refreshing blob always replaces the node even
-    // if the incoming blob is not larger. Allows node to follow a moving stroke.
-    static constexpr float kBattleRefreshShiftPx         = 3.0f;
 
     // --- Absence (natural erasure) ---
     // Score subtracted per frame when a node is in the visible area but not matched.
@@ -422,6 +432,8 @@ private:
                                     int& stroke_pixel_count);
     std::vector<FrameBlob> ExtractFrameBlobs(const cv::Mat& binary,
                                               const cv::Mat& frame_bgr) const;
+    cv::Point2f GlobalHuPass(WhiteboardGroup& group,
+                             const std::vector<FrameBlob>& blobs);
     cv::Point2f MatchBlobsToGraph(WhiteboardGroup& group,
                                    std::vector<FrameBlob>& blobs);
     bool UpdateGraph(WhiteboardGroup& group, std::vector<FrameBlob>& blobs,

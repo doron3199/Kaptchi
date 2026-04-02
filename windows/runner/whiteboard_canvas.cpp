@@ -1135,31 +1135,30 @@ std::vector<FrameBlob> WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary
 }
 
 // ============================================================================
-//  SECTION 9: Graph Matching (simple spatial + Hu distance + median vote)
+//  SECTION 9: Graph Matching (3-step: GlobalHu → ShapeMatch → FinalMatch)
 // ============================================================================
 
-cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
-                                                  std::vector<FrameBlob>& blobs) {
-    if (blobs.empty() || group.nodes.empty()) return {};
+// ---------------------------------------------------------------------------
+// Step 1: Global Hu Pass — rough offset via Hu-distance matching + median vote
+// ---------------------------------------------------------------------------
+cv::Point2f WhiteboardCanvas::GlobalHuPass(WhiteboardGroup& group,
+                                            const std::vector<FrameBlob>& blobs) {
+    struct HuCandidate { cv::Point2f offset; float hu_dist; };
+    std::vector<HuCandidate> offset_vectors;
 
-    for (auto& b : blobs) { b.matched_node_id = -1; b.matched_offset = {}; }
-
-    struct Candidate { int blob_idx; int node_id; cv::Point2f offset; float hu_dist; };
-    std::vector<Candidate> candidates;
-
-    for (int i = 0; i < (int)blobs.size(); i++) {
-        const auto& blob = blobs[i];
+    for (const auto& blob : blobs) {
         auto blob_hu = ComputeLogHuFeatures(blob.hu);
 
+        // Search ALL canvas nodes — blob is in frame space, canvas nodes can be
+        // anywhere, so spatial index queries around frame centroid won't work.
         int best_node = -1;
-        float best_dist = (float)kHuDistanceThreshold;
-        float second_dist = (float)kHuDistanceThreshold;
+        float best_dist = (float)kGlobalHuDistThreshold;
         cv::Point2f best_offset;
 
         for (const auto& pair : group.nodes) {
             const auto& node = *pair.second;
 
-            // [1] Area ratio filter: reject grossly different sizes
+            // Area ratio filter
             if (node.area > 0.0) {
                 float ratio = (float)(blob.area / node.area);
                 if (ratio < kAreaRatioMin || ratio > (1.0f / kAreaRatioMin)) continue;
@@ -1172,59 +1171,192 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
                 hu_dist += d * d;
             }
             hu_dist = std::sqrt(hu_dist);
+
             if (hu_dist < best_dist) {
-                second_dist = best_dist;
-                best_dist   = hu_dist;
-                best_node   = node.id;
+                best_dist = hu_dist;
+                best_node = node.id;
                 best_offset = node.centroid_canvas - blob.centroid;
-            } else if (hu_dist < second_dist) {
-                second_dist = hu_dist;
             }
         }
 
-        // [2] Uniqueness (Lowe's ratio): reject ambiguous matches
-        if (best_node < 0) continue;
-        if (second_dist < (float)kHuDistanceThreshold &&
-            best_dist / second_dist > kHuUniquenessRatio) continue;
-
-        candidates.push_back({i, best_node, best_offset, best_dist});
-    }
-
-    if (candidates.empty()) return {};
-
-    // [3] One-to-one: keep only the best blob per node
-    std::unordered_map<int, int> node_to_best; // node_id -> candidate index
-    for (int i = 0; i < (int)candidates.size(); i++) {
-        auto it = node_to_best.find(candidates[i].node_id);
-        if (it == node_to_best.end() || candidates[i].hu_dist < candidates[it->second].hu_dist)
-            node_to_best[candidates[i].node_id] = i;
-    }
-    std::vector<Candidate> unique_candidates;
-    unique_candidates.reserve(node_to_best.size());
-    for (const auto& p : node_to_best)
-        unique_candidates.push_back(candidates[p.second]);
-    candidates = std::move(unique_candidates);
-
-    if (candidates.empty()) return {};
-
-    // Median vote for consensus frame offset
-    std::vector<float> dxs, dys;
-    dxs.reserve(candidates.size()); dys.reserve(candidates.size());
-    for (const auto& c : candidates) { dxs.push_back(c.offset.x); dys.push_back(c.offset.y); }
-    std::sort(dxs.begin(), dxs.end()); std::sort(dys.begin(), dys.end());
-    cv::Point2f median(dxs[dxs.size()/2], dys[dys.size()/2]);
-
-    // Tag inliers
-    const float tol2 = kRansacTolerancePx * kRansacTolerancePx;
-    for (const auto& c : candidates) {
-        cv::Point2f diff = c.offset - median;
-        if (diff.x*diff.x + diff.y*diff.y <= tol2) {
-            blobs[c.blob_idx].matched_node_id = c.node_id;
-            blobs[c.blob_idx].matched_offset  = c.offset;
+        if (best_node >= 0) {
+            offset_vectors.push_back({best_offset, best_dist});
         }
     }
 
-    return median;
+    if (offset_vectors.empty()) return {};
+
+    // Median vote for rough offset
+    std::vector<float> dxs, dys;
+    dxs.reserve(offset_vectors.size());
+    dys.reserve(offset_vectors.size());
+    for (const auto& ov : offset_vectors) {
+        dxs.push_back(ov.offset.x);
+        dys.push_back(ov.offset.y);
+    }
+    std::sort(dxs.begin(), dxs.end());
+    std::sort(dys.begin(), dys.end());
+    return cv::Point2f(dxs[dxs.size() / 2], dys[dys.size() / 2]);
+}
+
+// ---------------------------------------------------------------------------
+// MatchBlobsToGraph — orchestrates all 3 steps
+// ---------------------------------------------------------------------------
+cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
+                                                  std::vector<FrameBlob>& blobs) {
+    if (blobs.empty() || group.nodes.empty()) return {};
+
+    for (auto& b : blobs) { b.matched_node_id = -1; b.matched_offset = {}; }
+
+    // =====================================================================
+    // Step 1: Global Hu pass — rough offset
+    // =====================================================================
+    cv::Point2f rough_offset = GlobalHuPass(group, blobs);
+
+    // =====================================================================
+    // Step 2: Shape matching — shift by rough offset, match with Hu+IoU,
+    //         compute mean vector, reject outliers → precise offset
+    // =====================================================================
+    struct ShapeMatch { int blob_idx; int node_id; cv::Point2f delta_vec; float score; };
+    std::vector<ShapeMatch> shape_matches;
+    std::unordered_set<int> matched_nodes_step2;
+
+    for (int i = 0; i < (int)blobs.size(); i++) {
+        const auto& blob = blobs[i];
+        auto blob_hu = ComputeLogHuFeatures(blob.hu);
+
+        // Shifted centroid using rough offset
+        cv::Point2f canvas_centroid = blob.centroid + rough_offset;
+        cv::Rect canvas_bbox(
+            blob.bbox.x + (int)std::round(rough_offset.x),
+            blob.bbox.y + (int)std::round(rough_offset.y),
+            blob.bbox.width, blob.bbox.height);
+
+        auto nearby = group.spatial_index.QueryRadius(canvas_centroid, kShapeMatchSearchRadius);
+
+        int best_node = -1;
+        float best_score = -1.0f;
+        cv::Point2f best_delta;
+
+        for (int nid : nearby) {
+            if (matched_nodes_step2.count(nid)) continue;
+            auto nit = group.nodes.find(nid);
+            if (nit == group.nodes.end()) continue;
+            const auto& node = *nit->second;
+
+            // Area ratio filter
+            if (node.area > 0.0) {
+                float ratio = (float)(blob.area / node.area);
+                if (ratio < kAreaRatioMin || ratio > (1.0f / kAreaRatioMin)) continue;
+            }
+
+            // Hu similarity score (normalized to [0,1])
+            auto node_hu = ComputeLogHuFeatures(node.hu);
+            float hu_dist = 0.0f;
+            for (int j = 0; j < 7; j++) {
+                float d = blob_hu[j] - node_hu[j];
+                hu_dist += d * d;
+            }
+            hu_dist = std::sqrt(hu_dist);
+            if (hu_dist >= (float)kGlobalHuDistThreshold) continue;
+            float hu_score = std::max(0.0f, 1.0f - hu_dist / (float)kGlobalHuDistThreshold);
+
+            // Mask IoU between blob (at rough offset) and node
+            MaskRelation rel = ComputeMaskRelation(
+                canvas_bbox, blob.binary_mask, canvas_centroid,
+                node.bbox_canvas, node.binary_mask, node.centroid_canvas);
+            float mask_iou = rel.valid ? rel.iou : 0.0f;
+
+            float combined = kShapeMatchHuWeight * hu_score + kShapeMatchIouWeight * mask_iou;
+            if (combined > best_score) {
+                best_score = combined;
+                best_node = nid;
+                // Delta = how much further the frame needs to shift beyond rough_offset
+                best_delta = node.centroid_canvas - canvas_centroid;
+            }
+        }
+
+        if (best_node >= 0 && best_score >= kShapeMatchMinScore) {
+            shape_matches.push_back({i, best_node, best_delta, best_score});
+            matched_nodes_step2.insert(best_node);
+        }
+    }
+
+    if (shape_matches.empty()) return rough_offset;
+
+    // Compute mean delta vector
+    cv::Point2f sum_delta(0, 0);
+    for (const auto& sm : shape_matches) sum_delta += sm.delta_vec;
+    cv::Point2f mean_delta(sum_delta.x / (float)shape_matches.size(),
+                           sum_delta.y / (float)shape_matches.size());
+
+    // Reject outlier vectors
+    std::vector<ShapeMatch> inlier_matches;
+    const float outlier_tol2 = kOutlierVectorThreshold * kOutlierVectorThreshold;
+    for (const auto& sm : shape_matches) {
+        cv::Point2f diff = sm.delta_vec - mean_delta;
+        if (diff.x * diff.x + diff.y * diff.y <= outlier_tol2) {
+            inlier_matches.push_back(sm);
+        }
+    }
+
+    // Recompute mean from inliers only
+    cv::Point2f precise_delta(0, 0);
+    if (!inlier_matches.empty()) {
+        cv::Point2f inlier_sum(0, 0);
+        for (const auto& sm : inlier_matches) inlier_sum += sm.delta_vec;
+        precise_delta = cv::Point2f(inlier_sum.x / (float)inlier_matches.size(),
+                                    inlier_sum.y / (float)inlier_matches.size());
+    }
+
+    cv::Point2f precise_offset = rough_offset + precise_delta;
+
+    // =====================================================================
+    // Step 3: Final nearest-centroid matching with precise offset
+    // =====================================================================
+    std::unordered_set<int> claimed_nodes;
+
+    for (int i = 0; i < (int)blobs.size(); i++) {
+        auto& blob = blobs[i];
+        auto blob_hu = ComputeLogHuFeatures(blob.hu);
+        cv::Point2f canvas_centroid = blob.centroid + precise_offset;
+
+        auto nearby = group.spatial_index.QueryRadius(canvas_centroid, kFinalMatchRadius);
+
+        int closest_node = -1;
+        float closest_dist = kFinalMatchRadius;
+
+        for (int nid : nearby) {
+            if (claimed_nodes.count(nid)) continue;
+            auto nit = group.nodes.find(nid);
+            if (nit == group.nodes.end()) continue;
+            const auto& node = *nit->second;
+
+            // Shape verification: reject if Hu distance is too large
+            auto node_hu = ComputeLogHuFeatures(node.hu);
+            float hu_dist = 0.0f;
+            for (int j = 0; j < 7; j++) {
+                float d = blob_hu[j] - node_hu[j];
+                hu_dist += d * d;
+            }
+            hu_dist = std::sqrt(hu_dist);
+            if (hu_dist > kFinalMatchMaxHuDist) continue;
+
+            float dist = (float)cv::norm(canvas_centroid - node.centroid_canvas);
+            if (dist < closest_dist) {
+                closest_dist = dist;
+                closest_node = nid;
+            }
+        }
+
+        if (closest_node >= 0) {
+            blob.matched_node_id = closest_node;
+            blob.matched_offset = precise_offset;
+            claimed_nodes.insert(closest_node);
+        }
+    }
+
+    return precise_offset;
 }
 
 // ============================================================================
@@ -1245,7 +1377,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
     bool graph_changed = false;
     const cv::Rect cropped_frame = BuildCroppedFrameRect(frame_w_, frame_h_);
 
-    // --- 5a. Refresh matched nodes ---
+    // --- 4a. Process matched nodes using replacement mode ---
     std::unordered_set<int> seen_node_ids;
     for (auto& blob : blobs) {
         if (blob.matched_node_id < 0) continue;
@@ -1264,22 +1396,57 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
 
         // Update absence score (node is healthy)
         node.absence_score = std::min(kAbsenceScoreMax, node.absence_score + kAbsenceIncrement);
+        node.match_count++;
 
         if (!node.user_locked) {
-            const MaskRelation rel = ComputeMaskRelation(
-                canvas_bbox, blob.binary_mask, canvas_centroid,
-                node.bbox_canvas, node.binary_mask, node.centroid_canvas);
-            if (rel.valid && rel.overlap_over_min >= kBattleRefreshOverlap) {
-                float shift = (float)cv::norm(canvas_centroid - node.centroid_canvas);
-                if (blob.area > node.area || shift > kBattleRefreshShiftPx) {
+            switch (kReplacementMode) {
+            case NodeReplacementMode::kAlwaysReplace:
+                RefreshNodeFromBlob(group, node, blob, canvas_centroid, canvas_bbox);
+                graph_changed = true;
+                break;
+
+            case NodeReplacementMode::kIouThreshold: {
+                const MaskRelation rel = ComputeMaskRelation(
+                    canvas_bbox, blob.binary_mask, canvas_centroid,
+                    node.bbox_canvas, node.binary_mask, node.centroid_canvas);
+                if (!rel.valid || rel.iou < kIouReplaceThreshold) {
                     RefreshNodeFromBlob(group, node, blob, canvas_centroid, canvas_bbox);
                     graph_changed = true;
                 }
+                break;
+            }
+
+            case NodeReplacementMode::kPeriodicReplace:
+                if (node.match_count % kPeriodicReplaceInterval == 0) {
+                    RefreshNodeFromBlob(group, node, blob, canvas_centroid, canvas_bbox);
+                    graph_changed = true;
+                }
+                break;
+
+            case NodeReplacementMode::kLocationAverage: {
+                // Blend centroid positions, keep existing content
+                cv::Point2f new_centroid(
+                    node.centroid_canvas.x * (1.0f - kLocationAverageAlpha) +
+                        canvas_centroid.x * kLocationAverageAlpha,
+                    node.centroid_canvas.y * (1.0f - kLocationAverageAlpha) +
+                        canvas_centroid.y * kLocationAverageAlpha);
+                int dx = (int)std::round(new_centroid.x - node.centroid_canvas.x);
+                int dy = (int)std::round(new_centroid.y - node.centroid_canvas.y);
+                if (dx != 0 || dy != 0) {
+                    group.spatial_index.Remove(node.id, node.centroid_canvas);
+                    node.centroid_canvas = new_centroid;
+                    node.bbox_canvas.x += dx;
+                    node.bbox_canvas.y += dy;
+                    group.spatial_index.Insert(node.id, new_centroid);
+                    graph_changed = true;
+                }
+                break;
+            }
             }
         }
     }
 
-    // --- 5b. Absence tracking ---
+    // --- 4b. Absence tracking ---
     // Penalise unseen nodes that are near a matched node (visible area proxy).
     {
         std::vector<int> to_remove;
@@ -1308,7 +1475,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
         for (int nid : to_remove) { RemoveNodeFromGraph(group, nid); graph_changed = true; }
     }
 
-    // --- 5c. Add unmatched blobs (only when frame_offset is trustworthy) ---
+    // --- 4c. Always add unmatched frame blobs as new nodes ---
     const int matched_count = (int)seen_node_ids.size();
     if (matched_count >= kMinMatchesForNewNode) {
         for (auto& blob : blobs) {
@@ -1325,7 +1492,6 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                 blob.bbox.width, blob.bbox.height);
 
             // Duplicate check: positional IoU, with centroid-aligned fallback.
-            // Same-frame nodes are excluded (they may be legitimately similar strokes).
             const float search_r = std::max({(float)canvas_bbox.width,
                                                (float)canvas_bbox.height,
                                                kMergeSearchRadiusPx});
@@ -1345,9 +1511,9 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                 if (ov > kDuplicateOverlapThreshold) {
                     is_dup = true;
                     if (!existing.user_locked && blob.area > existing.area) {
-                        auto& node = *nit->second;
-                        node.last_seen_frame = current_frame;
-                        RefreshNodeFromBlob(group, node, blob, canvas_centroid, canvas_bbox);
+                        auto& enode = *nit->second;
+                        enode.last_seen_frame = current_frame;
+                        RefreshNodeFromBlob(group, enode, blob, canvas_centroid, canvas_bbox);
                         graph_changed = true;
                     }
                     break;
