@@ -1102,6 +1102,12 @@ std::vector<FrameBlob> WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary
         float se = (float)std::min(g_bbox.width, g_bbox.height);
         if (se > 0 && le / se > kMaxAllowedRectangle) continue;
 
+        // Skip blobs that span most of the frame (whiteboard edges / borders)
+        if (frame_h_ > 0) {
+            float max_dim = frame_h_ * kMaxBlobDimensionFraction;
+            if (g_bbox.width > max_dim || g_bbox.height > max_dim) continue;
+        }
+
         cv::Mat g_mask = cv::Mat::zeros(g_bbox.size(), CV_8UC1);
         double max_area = -1; int best_idx = -1;
         for (int idx : ids) {
@@ -1400,6 +1406,63 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                 float bbox_iou = (union_area > 0.0f) ? isect_area / union_area : 0.0f;
                 if (bbox_iou < kNodeIouMergeThreshold) continue;
 
+                int loser;
+                if (a.area != b.area)
+                    loser = (a.area < b.area) ? aid : bid;
+                else
+                    loser = (a.created_frame < b.created_frame) ? aid : bid;
+
+                removed.insert(loser);
+                RemoveNodeFromGraph(group, loser);
+                graph_changed = true;
+                if (loser == aid) break;
+            }
+        }
+    }
+
+    // --- 5d2. Hu-similarity dedup (every frame, separate from BBox-IoU) ---
+    {
+        std::vector<int> all_ids;
+        all_ids.reserve(group.nodes.size());
+        for (auto& pair : group.nodes) all_ids.push_back(pair.first);
+
+        std::unordered_set<int> removed;
+        for (size_t i = 0; i < all_ids.size(); ++i) {
+            int aid = all_ids[i];
+            if (removed.count(aid)) continue;
+            auto ait = group.nodes.find(aid);
+            if (ait == group.nodes.end()) continue;
+            auto& a = *ait->second;
+
+            auto a_hu = ComputeLogHuFeatures(a.hu);
+
+            const float search_r = std::max({(float)a.bbox_canvas.width,
+                                               (float)a.bbox_canvas.height,
+                                               kMergeSearchRadiusPx});
+            auto nearby = group.spatial_index.QueryRadius(a.centroid_canvas, search_r);
+            for (int bid : nearby) {
+                if (bid == aid || removed.count(bid)) continue;
+                auto bit = group.nodes.find(bid);
+                if (bit == group.nodes.end()) continue;
+                auto& b = *bit->second;
+
+                // Spatial gate: bboxes must intersect OR centroids within merge radius
+                cv::Rect isect = a.bbox_canvas & b.bbox_canvas;
+                cv::Point2f cd = a.centroid_canvas - b.centroid_canvas;
+                float centroid_dist = std::sqrt(cd.x*cd.x + cd.y*cd.y);
+                if (isect.empty() && centroid_dist > kMergeSearchRadiusPx) continue;
+
+                // Hu distance in log10 space
+                auto b_hu = ComputeLogHuFeatures(b.hu);
+                float hu_dist = 0.0f;
+                for (int j = 0; j < 7; j++) {
+                    float d = a_hu[j] - b_hu[j];
+                    hu_dist += d * d;
+                }
+                hu_dist = std::sqrt(hu_dist);
+                if (hu_dist >= kHuDuplicateThreshold) continue;
+
+                // Similar shape nearby → remove smaller
                 int loser;
                 if (a.area != b.area)
                     loser = (a.area < b.area) ? aid : bid;

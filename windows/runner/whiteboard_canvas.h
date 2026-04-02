@@ -279,9 +279,12 @@ private:
     // Blobs whose long-edge / short-edge ratio exceeds this are rejected (e.g. board edges).
     // Raise if long horizontal strokes are being incorrectly filtered out.
     static constexpr float kMaxAllowedRectangle          = 115.0f;
+    // Blobs whose width OR height exceeds this fraction of the frame height are rejected
+    // (filters out whiteboard edges / frame borders captured as strokes).
+    static constexpr float kMaxBlobDimensionFraction      = 0.70f;
     // Connected components within this pixel radius are merged into a single blob.
     // Raise to join fragmented strokes into one node. Lower to keep individual marks separate.
-    static constexpr float kStrokeClusterRadius          = 70.0f;
+    static constexpr float kStrokeClusterRadius          = 30.0f;
     // When true, rejects blobs whose pixels overlap:
     //   (a) Left/right frame border strips of width max(ceil(kStrokeClusterRadius), frame_w/100).
     //       Note: top and bottom borders are NOT masked.
@@ -293,7 +296,7 @@ private:
     // Maximum Hu-moment L2 distance (in log10 space) to accept a blob↔node match.
     // Lower = stricter shape matching, fewer but more reliable matches.
     // Higher = more matches but more false positives between similar shapes.
-    static constexpr double kHuDistanceThreshold         = 0.7;
+    static constexpr double kHuDistanceThreshold         = 0.5;
     // A matched blob must be within this many pixels of the median consensus offset
     // to be counted as an inlier. Lower = tighter consensus required.
     static constexpr float kRansacTolerancePx            = 5.0f;
@@ -316,31 +319,35 @@ private:
     // --- Merge (duplicate insertion check) ---
     // Radius (px, canvas coords) to search for duplicate candidates around each new node's centroid.
     // Raise if near-duplicate nodes from nearby positions are not being caught.
-    static constexpr float kMergeSearchRadiusPx          = 60.0f;
+    static constexpr float kMergeSearchRadiusPx          = 1.0f;
     // Overlap ratio (overlap / min_area) above which a new blob is treated as a duplicate of an
     // existing node and suppressed (or used to refresh it). Lower = more aggressive deduplication.
-    static constexpr float kDuplicateOverlapThreshold    = 0.80f;
+    static constexpr float kDuplicateOverlapThreshold    = 0.99f;
 
     // --- Node merge (post-pass dedup between existing nodes) ---
     // BBox IOU above which two existing nodes are considered the same drawing and
     // the smaller/older one is removed. Runs every frame as a fast pre-filter.
-    static constexpr float kNodeIouMergeThreshold        = 0.88f;
+    static constexpr float kNodeIouMergeThreshold        = 0.99f;
+    // Hu-moment distance (log10-space L2) below which two nearby nodes are
+    // considered the same shape and the smaller one is removed. Separate from
+    // the BBox-IoU dedup — catches duplicates that shifted slightly between frames.
+    static constexpr float kHuDuplicateThreshold         = 0.01f;
     // Scoring method for sliding-window alignment before merging two nodes.
     static constexpr AlignmentScoreMode kAlignmentMode   = AlignmentScoreMode::kIoU;
     // Sliding window search radius (px). Best offset searched in [-r, +r] x [-r, +r].
-    static constexpr int   kAlignSearchRadius            = 10;
+    static constexpr int   kAlignSearchRadius            = 1;
     // Mask containment (overlap / smaller_node_px) above which the smaller node is
     // removed as a fragment of the larger. Only between different-frame nodes.
-    static constexpr float kContainmentRemoveThreshold   = 0.80f;
+    static constexpr float kContainmentRemoveThreshold   = 0.99f;
     // Mask overlap (overlap / min_area) above which two different-frame nodes are
     // combined into a single merged node via sliding-window alignment.
-    static constexpr float kOverlapMergeThreshold        = 0.50f;
+    static constexpr float kOverlapMergeThreshold        = 0.98f;
 
     // --- Battle (overlap resolution between existing nodes) ---
     // Overlap fraction above which a matched blob refreshes (overwrites) its node.
     // Higher = harder to refresh a node; only large overlaps trigger an update.
     // Lower = nodes update more eagerly on partial overlap.
-    static constexpr float kBattleRefreshOverlap         = 0.70f;
+    static constexpr float kBattleRefreshOverlap         = 0.01f;
     // Centroid shift (canvas px) above which a refreshing blob always replaces the node even
     // if the incoming blob is not larger. Allows node to follow a moving stroke.
     static constexpr float kBattleRefreshShiftPx         = 3.0f;
@@ -348,10 +355,10 @@ private:
     // --- Absence (natural erasure) ---
     // Score subtracted per frame when a node is in the visible area but not matched.
     // Higher = nodes erase faster when not seen.
-    static constexpr float kAbsenceDecrement             = 0.3f;
+    static constexpr float kAbsenceDecrement             = 0.5f;
     // Score added per frame when a node is successfully matched.
     // Higher = nodes recover faster after being re-seen.
-    static constexpr float kAbsenceIncrement             = 0.7f;
+    static constexpr float kAbsenceIncrement             = 0.5f;
     // A node is only absence-penalised if a matched node exists within this radius (canvas px).
     // This acts as a "visibility proxy": we only penalise what we can actually see.
     // Raise if nodes far from current strokes are decaying too fast.
