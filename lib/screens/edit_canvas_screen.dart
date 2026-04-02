@@ -15,6 +15,9 @@ class EditCanvasScreen extends StatefulWidget {
 }
 
 class _EditCanvasScreenState extends State<EditCanvasScreen> {
+  static const double _duplicatePosOverlapThreshold = 0.30;
+  static const double _duplicateCentroidOverlapThreshold = 0.80;
+
   final NativeCameraService _native = NativeCameraService();
   final TransformationController _transformController =
       TransformationController();
@@ -565,6 +568,10 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
 
   Widget _buildComparisonPanel() {
     final comp = _comparison!;
+    final passesLiveDuplicate =
+        comp.maskOverlapRatio > _duplicatePosOverlapThreshold ||
+        comp.centroidAlignedOverlapRatio >
+            _duplicateCentroidOverlapThreshold;
     return Container(
       constraints: const BoxConstraints(maxHeight: 220),
       color: const Color(0xDD1A1A1A),
@@ -603,10 +610,26 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
                 _threshColor(comp.widthRatio, 0.70, 0.50, lowerIsBetter: false)),
             _metricRow('Height ratio', '${(comp.heightRatio * 100).toStringAsFixed(1)}%',
                 _threshColor(comp.heightRatio, 0.70, 0.50, lowerIsBetter: false)),
-            _metricRow('Mask overlap (pos)', '${(comp.maskOverlapRatio * 100).toStringAsFixed(1)}%',
-                _threshColor(comp.maskOverlapRatio, 0.60, 0.15, lowerIsBetter: false)),
-            _metricRow('Mask overlap (centroid)', '${(comp.centroidAlignedOverlapRatio * 100).toStringAsFixed(1)}%',
-                _threshColor(comp.centroidAlignedOverlapRatio, 0.60, 0.15, lowerIsBetter: false)),
+            _metricRow(
+              'Mask overlap (pos > 30%)',
+              '${(comp.maskOverlapRatio * 100).toStringAsFixed(1)}%',
+              _threshColor(
+                comp.maskOverlapRatio,
+                _duplicatePosOverlapThreshold,
+                _duplicatePosOverlapThreshold * 0.5,
+                lowerIsBetter: false)),
+            _metricRow(
+              'Mask overlap (centroid > 80%)',
+              '${(comp.centroidAlignedOverlapRatio * 100).toStringAsFixed(1)}%',
+              _threshColor(
+                comp.centroidAlignedOverlapRatio,
+                _duplicateCentroidOverlapThreshold,
+                _duplicateCentroidOverlapThreshold * 0.5,
+                lowerIsBetter: false)),
+            _metricRow(
+              'Live duplicate gate',
+              passesLiveDuplicate ? 'YES' : 'NO',
+              passesLiveDuplicate ? Colors.greenAccent : Colors.redAccent),
             _metricRow('Shape dist (Hu I2)', comp.shapeDistance.toStringAsFixed(4),
                 _threshColor(comp.shapeDistance, 0.25, 0.50, lowerIsBetter: true)),
             _metricRow('AND pixels', '${comp.andOverlapPixels.toInt()} px', Colors.white70),
