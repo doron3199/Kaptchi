@@ -49,8 +49,8 @@ enum class NodeReplacementMode : int {
 // ---------------------------------------------------------------------------
 // DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
-static constexpr float kAbsenceScoreInitial = 1.0f;
-static constexpr float kAbsenceScoreMax     = 5.0f;
+static constexpr float kAbsenceScoreInitial = 0.0f;
+static constexpr float kAbsenceScoreMax     = 8.0f;
 
 struct DrawingNode {
     int id = -1;
@@ -278,18 +278,18 @@ private:
     static const int       kBinarizeMinBlobArea          = 3;
     // Morphological dilation kernel size (NxN). Larger = wider strokes and more connected blobs.
     // Raise to join nearby strokes into one blob. Lower to keep strokes thin and separate.
-    static const int       kDilationKernelSize           = 11;
+    static const int       kDilationKernelSize           = 13;
 
     // --- Blob extraction ---
     // Connected components smaller than this (px²) are discarded as noise.
     // Lower = more small marks captured. Higher = cleaner graph but may miss fine writing.
-    static const int       kMinContourArea               = 30;
+    static const int       kMinContourArea               = 10;
     // Blobs whose long-edge / short-edge ratio exceeds this are rejected (e.g. board edges).
     // Raise if long horizontal strokes are being incorrectly filtered out.
     static constexpr float kMaxAllowedRectangle          = 115.0f;
     // Blobs whose width OR height exceeds this fraction of the frame height are rejected
     // (filters out whiteboard edges / frame borders captured as strokes).
-    static constexpr float kMaxBlobDimensionFraction      = 0.70f;
+    static constexpr float kMaxBlobDimensionFraction      = 0.650f;
     // When true, rejects blobs whose pixels overlap:
     //   (a) Left/right frame border strips of width max(1, frame_w/100).
     //       Note: top and bottom borders are NOT masked.
@@ -312,16 +312,16 @@ private:
     // Rejects weak matches even if they're the "best" nearby candidate.
     static constexpr float kShapeMatchMinScore           = 0.5f;
     // Max distance (px) of a match vector from the mean before it's rejected as outlier.
-    static constexpr float kOutlierVectorThreshold       = 4.0f;
+    static constexpr float kOutlierVectorThreshold       = 1.0f;
     // Max centroid distance (px) for final nearest-centroid matching (step 3).
     // After precise alignment, real matches should be within a few pixels.
     // Keep tight to avoid false matches when no real match exists.
-    static constexpr float kFinalMatchRadius             = 40.0f;
+    static constexpr float kFinalMatchRadius             = 20.0f;
     // Max Hu distance to accept a nearest-centroid match in step 3.
     // Prevents matching to a close but completely different shape.
-    static constexpr float kFinalMatchMaxHuDist          = 0.7f;
+    static constexpr float kFinalMatchMaxHuDist          = 1.20f;
     // Minimum number of inlier matches required before new strokes are added to the graph.
-    static const int       kMinMatchesForNewNode         = 4;
+    static const int       kMinMatchesForNewNode         = 5;
 
     // --- Replacement mode ---
     static constexpr NodeReplacementMode kReplacementMode = NodeReplacementMode::kAlwaysReplace;
@@ -333,15 +333,26 @@ private:
     static constexpr float kLocationAverageAlpha         = 0.5f;
 
     // --- Merge (duplicate insertion check) ---
+    // Enable duplicate suppression when inserting new blobs into the graph.
+    // Disable to always insert unmatched blobs as fresh nodes, even if they overlap existing ones.
+    static constexpr bool  kEnableInsertMergeDeduplication = true;
     // Radius (px, canvas coords) to search for duplicate candidates around each new node's centroid.
     // Raise if near-duplicate nodes from nearby positions are not being caught.
-    static constexpr float kMergeSearchRadiusPx          = 60.0f;
+    static constexpr float kMergeSearchRadiusPx          = 1.0f;
     // Positional overlap ratio (overlap / min_area) above which a new blob is treated as a
     // duplicate without centroid alignment. Lower = more aggressive deduplication.
     static constexpr float kDuplicatePosOverlapThreshold = 0.30f;
     // Centroid-aligned overlap ratio (overlap / min_area) above which a new blob is treated as a
     // duplicate after aligning centroids. Lower = more aggressive deduplication.
-    static constexpr float kDuplicateCentroidOverlapThreshold = 0.80f;
+    static constexpr float kDuplicateCentroidOverlapThreshold = 0.93f;
+    // Original-position bbox IoU threshold above which two shapes are treated as duplicates.
+    static constexpr float kDuplicateBboxIouThreshold  = 0.70f;
+    // Hu-distance threshold below which two shapes are treated as duplicates, as long as they were
+    // not created in the same frame.
+    static constexpr float kDuplicateMaxHuDistance      = 0.1f;
+    // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
+    // that were admitted earlier or drifted together after later updates.
+    static const int       kGraphDedupeIntervalFrames   = 10;
 
     // --- Absence (natural erasure) ---
     // Score subtracted per frame when a node is in the visible area but not matched.

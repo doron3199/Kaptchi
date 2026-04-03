@@ -99,6 +99,17 @@ static std::array<float, 7> ComputeLogHuFeatures(const double hu[7]) {
     return result;
 }
 
+static float ComputeHuDistance(const double first[7], const double second[7]) {
+    const auto first_hu = ComputeLogHuFeatures(first);
+    const auto second_hu = ComputeLogHuFeatures(second);
+    float hu_dist = 0.0f;
+    for (int i = 0; i < 7; ++i) {
+        const float diff = first_hu[i] - second_hu[i];
+        hu_dist += diff * diff;
+    }
+    return std::sqrt(hu_dist);
+}
+
 static int CopyGraphNodesToBuffer(const WhiteboardGroup& group,
                                   float* buffer, int max_nodes) {
     if (!buffer || max_nodes <= 0) return 0;
@@ -259,47 +270,6 @@ static void FilterBlobsForCanvas(std::vector<FrameBlob>& blobs, const cv::Mat& r
         blobs.end());
 }
 
-struct MaskOverlapScores {
-    float positional = 0.0f;
-    float centroid_aligned = 0.0f;
-};
-
-static MaskOverlapScores ComputeMaskOverlapScores(const cv::Rect& bbox_a, const cv::Mat& mask_a,
-                                                   const cv::Point2f& centroid_a,
-                                                   const cv::Rect& bbox_b, const cv::Mat& mask_b,
-                                                   const cv::Point2f& centroid_b) {
-    int a_px = mask_a.empty() ? 0 : cv::countNonZero(mask_a);
-    int b_px = mask_b.empty() ? 0 : cv::countNonZero(mask_b);
-    int min_px = std::min(a_px, b_px);
-    if (min_px <= 0) return {};
-
-    auto overlap_at = [&](int dx, int dy) -> float {
-        cv::Rect shifted_b(bbox_b.x + dx, bbox_b.y + dy, bbox_b.width, bbox_b.height);
-        const cv::Rect isect = bbox_a & shifted_b;
-        if (isect.empty()) return 0.0f;
-        cv::Rect al(isect.x - bbox_a.x,    isect.y - bbox_a.y,    isect.width, isect.height);
-        cv::Rect bl(isect.x - shifted_b.x, isect.y - shifted_b.y, isect.width, isect.height);
-        if (al.x < 0 || al.y < 0 || al.x+al.width > mask_a.cols ||
-            al.y+al.height > mask_a.rows ||
-            bl.x < 0 || bl.y < 0 || bl.x+bl.width > mask_b.cols ||
-            bl.y+bl.height > mask_b.rows) return 0.0f;
-        cv::Mat ov;
-        cv::bitwise_and(mask_a(al), mask_b(bl), ov);
-        return (float)cv::countNonZero(ov) / (float)min_px;
-    };
-
-    MaskOverlapScores scores;
-    scores.positional = overlap_at(0, 0);
-    if (scores.positional >= 1.0f) {
-        scores.centroid_aligned = scores.positional;
-        return scores;
-    }
-    int dx = (int)std::round(centroid_a.x - centroid_b.x);
-    int dy = (int)std::round(centroid_a.y - centroid_b.y);
-    scores.centroid_aligned = overlap_at(dx, dy);
-    return scores;
-}
-
 static cv::Rect TranslateFrameRectToCanvas(const cv::Rect& r, const cv::Point2f& offset) {
     if (r.width <= 0 || r.height <= 0) return {};
     return cv::Rect(r.x + (int)std::round(offset.x),
@@ -385,6 +355,23 @@ struct MaskRelation {
     float iou = 0.0f;
 };
 
+struct DuplicateCandidateView {
+    cv::Rect bbox;
+    const cv::Mat* mask = nullptr;
+    cv::Point2f centroid;
+    const double* hu = nullptr;
+    int created_frame = 0;
+};
+
+struct DuplicateCheckResult {
+    float positional_overlap = 0.0f;
+    float centroid_overlap = 0.0f;
+    float bbox_iou = 0.0f;
+    float hu_distance = 0.0f;
+    bool same_creation_frame = false;
+    bool is_duplicate = false;
+};
+
 static MaskRelation ComputeMaskRelation(const cv::Rect& fb, const cv::Mat& fm,
                                         const cv::Point2f&,
                                         const cv::Rect& sb, const cv::Mat& sm,
@@ -415,6 +402,58 @@ static MaskRelation ComputeMaskRelation(const cv::Rect& fb, const cv::Mat& fm,
     return rel;
 }
 
+static float ComputeBboxIou(const cv::Rect& first, const cv::Rect& second) {
+    const cv::Rect isect = first & second;
+    if (isect.width <= 0 || isect.height <= 0) return 0.0f;
+    const int union_area = first.area() + second.area() - isect.area();
+    return (float)isect.area() / (float)std::max(1, union_area);
+}
+
+static DuplicateCheckResult EvaluateDuplicateCandidate(
+        const DuplicateCandidateView& first,
+        const DuplicateCandidateView& second,
+        float duplicate_pos_overlap_threshold,
+        float duplicate_centroid_overlap_threshold,
+        float duplicate_bbox_iou_threshold,
+        float duplicate_max_hu_distance) {
+    DuplicateCheckResult result;
+
+    const cv::Mat empty_mask;
+    const cv::Mat& first_mask = first.mask ? *first.mask : empty_mask;
+    const cv::Mat& second_mask = second.mask ? *second.mask : empty_mask;
+
+    const MaskRelation positional_relation = ComputeMaskRelation(
+        first.bbox, first_mask, first.centroid,
+        second.bbox, second_mask, second.centroid);
+    result.positional_overlap = positional_relation.valid
+        ? positional_relation.overlap_over_min
+        : 0.0f;
+    result.bbox_iou = ComputeBboxIou(first.bbox, second.bbox);
+
+    const int dx = (int)std::round(first.centroid.x - second.centroid.x);
+    const int dy = (int)std::round(first.centroid.y - second.centroid.y);
+    const cv::Rect centroid_aligned_bbox(second.bbox.x + dx,
+                                         second.bbox.y + dy,
+                                         second.bbox.width,
+                                         second.bbox.height);
+    const MaskRelation centroid_relation = ComputeMaskRelation(
+        first.bbox, first_mask, first.centroid,
+        centroid_aligned_bbox, second_mask, first.centroid);
+    result.centroid_overlap = centroid_relation.valid
+        ? centroid_relation.overlap_over_min
+        : 0.0f;
+    result.same_creation_frame = first.created_frame == second.created_frame;
+    result.hu_distance = (first.hu && second.hu)
+        ? ComputeHuDistance(first.hu, second.hu)
+        : (duplicate_max_hu_distance + 1.0f);
+    result.is_duplicate =
+        result.positional_overlap > duplicate_pos_overlap_threshold ||
+        result.centroid_overlap > duplicate_centroid_overlap_threshold ||
+        result.bbox_iou > duplicate_bbox_iou_threshold ||
+        (!result.same_creation_frame && result.hu_distance < duplicate_max_hu_distance);
+    return result;
+}
+
 static void RefreshNodeFromBlob(WhiteboardGroup& group, DrawingNode& node,
                                 const FrameBlob& blob,
                                 const cv::Point2f& canvas_centroid,
@@ -428,6 +467,163 @@ static void RefreshNodeFromBlob(WhiteboardGroup& group, DrawingNode& node,
     std::copy(blob.hu, blob.hu + 7, node.hu);
     node.area = blob.area;
     group.spatial_index.Insert(node.id, canvas_centroid);
+}
+
+static bool InsertOrMergeBlobNode(WhiteboardGroup& group,
+                                  const FrameBlob& blob,
+                                  const cv::Point2f& canvas_centroid,
+                                  const cv::Rect& canvas_bbox,
+                                  int current_frame,
+                                  bool enable_duplicate_merge,
+                                  float merge_search_radius_px,
+                                  float duplicate_pos_overlap_threshold,
+                                  float duplicate_centroid_overlap_threshold,
+                                  float duplicate_bbox_iou_threshold,
+                                  float duplicate_max_hu_distance) {
+    if (enable_duplicate_merge) {
+        const float search_r = std::max({(float)canvas_bbox.width,
+                                         (float)canvas_bbox.height,
+                                         merge_search_radius_px});
+        const auto nearby = group.spatial_index.QueryRadius(canvas_centroid, search_r);
+        const DuplicateCandidateView blob_candidate{
+            canvas_bbox, &blob.binary_mask, canvas_centroid, blob.hu, current_frame};
+        for (int nid : nearby) {
+            if (group.user_deleted_ids.count(nid)) continue;
+            auto nit = group.nodes.find(nid);
+            if (nit == group.nodes.end()) continue;
+
+            auto& existing = *nit->second;
+            const DuplicateCandidateView existing_candidate{
+                existing.bbox_canvas,
+                &existing.binary_mask,
+                existing.centroid_canvas,
+                existing.hu,
+                existing.created_frame};
+            const DuplicateCheckResult duplicate_check = EvaluateDuplicateCandidate(
+                existing_candidate,
+                blob_candidate,
+                duplicate_pos_overlap_threshold,
+                duplicate_centroid_overlap_threshold,
+                duplicate_bbox_iou_threshold,
+                duplicate_max_hu_distance);
+
+            if (!duplicate_check.is_duplicate) {
+                continue;
+            }
+
+            if (!existing.user_locked && blob.area > existing.area) {
+                existing.last_seen_frame = current_frame;
+                existing.created_frame = std::min(existing.created_frame, current_frame);
+                RefreshNodeFromBlob(group, existing, blob, canvas_centroid, canvas_bbox);
+                return true;
+            }
+            return false;
+        }
+    }
+
+    auto node = std::make_unique<DrawingNode>();
+    node->id = group.next_node_id++;
+    node->binary_mask = blob.binary_mask.clone();
+    if (!blob.color_pixels.empty()) node->color_pixels = blob.color_pixels.clone();
+    node->bbox_canvas = canvas_bbox;
+    node->centroid_canvas = canvas_centroid;
+    node->contour = blob.contour;
+    std::copy(blob.hu, blob.hu + 7, node->hu);
+    node->area = blob.area;
+    node->absence_score = kAbsenceScoreInitial;
+    node->last_seen_frame = current_frame;
+    node->created_frame = current_frame;
+    const int nid = node->id;
+    group.spatial_index.Insert(nid, canvas_centroid);
+    group.nodes[nid] = std::move(node);
+    return true;
+}
+
+static int SelectDuplicateWinnerId(const DrawingNode& first, const DrawingNode& second) {
+    if (first.user_locked != second.user_locked) {
+        return first.user_locked ? first.id : second.id;
+    }
+    if (first.area != second.area) {
+        return first.area > second.area ? first.id : second.id;
+    }
+    if (first.created_frame != second.created_frame) {
+        return first.created_frame < second.created_frame ? first.id : second.id;
+    }
+    return first.id < second.id ? first.id : second.id;
+}
+
+static bool SweepGraphDuplicates(WhiteboardGroup& group,
+                                 int current_frame,
+                                 int dedupe_interval_frames,
+                                 float merge_search_radius_px,
+                                 float duplicate_pos_overlap_threshold,
+                                 float duplicate_centroid_overlap_threshold,
+                                 float duplicate_bbox_iou_threshold,
+                                 float duplicate_max_hu_distance) {
+    if (dedupe_interval_frames <= 0 || ((current_frame + 1) % dedupe_interval_frames) != 0) {
+        return false;
+    }
+    if (group.nodes.size() < 2) return false;
+
+    std::vector<int> node_ids;
+    node_ids.reserve(group.nodes.size());
+    for (const auto& [nid, _] : group.nodes) node_ids.push_back(nid);
+    std::sort(node_ids.begin(), node_ids.end());
+
+    std::unordered_set<int> removed_ids;
+    bool changed = false;
+
+    for (int nid : node_ids) {
+        if (removed_ids.count(nid) || group.user_deleted_ids.count(nid)) continue;
+        auto it = group.nodes.find(nid);
+        if (it == group.nodes.end()) continue;
+
+        const DrawingNode& node = *it->second;
+        const float search_r = std::max({(float)node.bbox_canvas.width,
+                                         (float)node.bbox_canvas.height,
+                                         merge_search_radius_px});
+        const auto nearby = group.spatial_index.QueryRadius(node.centroid_canvas, search_r);
+
+        for (int other_id : nearby) {
+            if (other_id == nid || other_id < nid) continue;
+            if (removed_ids.count(other_id) || group.user_deleted_ids.count(other_id)) continue;
+
+            auto other_it = group.nodes.find(other_id);
+            if (other_it == group.nodes.end()) continue;
+
+            const DrawingNode& other = *other_it->second;
+            const DuplicateCandidateView node_candidate{
+                node.bbox_canvas, &node.binary_mask, node.centroid_canvas, node.hu,
+                node.created_frame};
+            const DuplicateCandidateView other_candidate{
+                other.bbox_canvas, &other.binary_mask, other.centroid_canvas, other.hu,
+                other.created_frame};
+            const DuplicateCheckResult duplicate_check = EvaluateDuplicateCandidate(
+                node_candidate,
+                other_candidate,
+                duplicate_pos_overlap_threshold,
+                duplicate_centroid_overlap_threshold,
+                duplicate_bbox_iou_threshold,
+                duplicate_max_hu_distance);
+            if (!duplicate_check.is_duplicate) {
+                continue;
+            }
+
+            const int keep_id = SelectDuplicateWinnerId(node, other);
+            const int remove_id = keep_id == nid ? other_id : nid;
+            removed_ids.insert(remove_id);
+            changed = true;
+            if (remove_id == nid) break;
+        }
+    }
+
+    for (int remove_id : removed_ids) {
+        auto remove_it = group.nodes.find(remove_id);
+        if (remove_it == group.nodes.end()) continue;
+        group.spatial_index.Remove(remove_id, remove_it->second->centroid_canvas);
+        group.nodes.erase(remove_it);
+    }
+    return changed;
 }
 
 static bool RenderOverviewToFrame(const cv::Mat& cache, cv::Size vs, cv::Mat& out) {
@@ -1296,7 +1492,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
         for (int nid : to_remove) { RemoveNodeFromGraph(group, nid); graph_changed = true; }
     }
 
-    // --- 4c. Always add unmatched frame blobs as new nodes ---
+    // --- 4c. Dedupe unmatched frame blobs, then add surviving ones as new nodes ---
     const int matched_count = (int)seen_node_ids.size();
     if (matched_count >= kMinMatchesForNewNode) {
         for (auto& blob : blobs) {
@@ -1312,55 +1508,26 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                 blob.bbox.y + (int)std::round(frame_offset.y),
                 blob.bbox.width, blob.bbox.height);
 
-            // Duplicate check: positional IoU, with centroid-aligned fallback.
-            const float search_r = std::max({(float)canvas_bbox.width,
-                                               (float)canvas_bbox.height,
-                                               kMergeSearchRadiusPx});
-            const auto nearby = group.spatial_index.QueryRadius(canvas_centroid, search_r);
-            bool is_dup = false;
-            for (int nid : nearby) {
-                if (group.user_deleted_ids.count(nid)) continue;
-                auto nit = group.nodes.find(nid);
-                if (nit == group.nodes.end()) continue;
-                const auto& existing = *nit->second;
-                if (existing.created_frame == current_frame) continue;
-
-                const MaskOverlapScores overlap_scores = ComputeMaskOverlapScores(
-                    existing.bbox_canvas, existing.binary_mask, existing.centroid_canvas,
-                    canvas_bbox,          blob.binary_mask,      canvas_centroid);
-
-                if (overlap_scores.positional > kDuplicatePosOverlapThreshold ||
-                    overlap_scores.centroid_aligned > kDuplicateCentroidOverlapThreshold) {
-                    is_dup = true;
-                    if (!existing.user_locked && blob.area > existing.area) {
-                        auto& enode = *nit->second;
-                        enode.last_seen_frame = current_frame;
-                        RefreshNodeFromBlob(group, enode, blob, canvas_centroid, canvas_bbox);
-                        graph_changed = true;
-                    }
-                    break;
-                }
-            }
-
-            if (!is_dup) {
-                auto node = std::make_unique<DrawingNode>();
-                node->id = group.next_node_id++;
-                node->binary_mask = blob.binary_mask.clone();
-                if (!blob.color_pixels.empty()) node->color_pixels = blob.color_pixels.clone();
-                node->bbox_canvas    = canvas_bbox;
-                node->centroid_canvas = canvas_centroid;
-                node->contour = blob.contour;
-                std::copy(blob.hu, blob.hu + 7, node->hu);
-                node->area = blob.area;
-                node->absence_score = kAbsenceScoreInitial;
-                node->last_seen_frame = current_frame;
-                node->created_frame   = current_frame;
-                const int nid = node->id;
-                group.spatial_index.Insert(nid, canvas_centroid);
-                group.nodes[nid] = std::move(node);
+            if (InsertOrMergeBlobNode(group, blob, canvas_centroid, canvas_bbox, current_frame,
+                                      kEnableInsertMergeDeduplication,
+                                      kMergeSearchRadiusPx,
+                                      kDuplicatePosOverlapThreshold,
+                                      kDuplicateCentroidOverlapThreshold,
+                                      kDuplicateBboxIouThreshold,
+                                      kDuplicateMaxHuDistance)) {
                 graph_changed = true;
             }
         }
+    }
+
+    if (SweepGraphDuplicates(group, current_frame,
+                             kGraphDedupeIntervalFrames,
+                             kMergeSearchRadiusPx,
+                             kDuplicatePosOverlapThreshold,
+                             kDuplicateCentroidOverlapThreshold,
+                             kDuplicateBboxIouThreshold,
+                             kDuplicateMaxHuDistance)) {
+        graph_changed = true;
     }
 
     if (graph_changed) {
@@ -1486,21 +1653,13 @@ void WhiteboardCanvas::SeedGroupFromFrameBlobs(WhiteboardGroup& group,
     group.spatial_index.Clear();
     group.next_node_id = 0;
     for (const auto& blob : blobs) {
-        auto node = std::make_unique<DrawingNode>();
-        node->id = group.next_node_id++;
-        node->binary_mask = blob.binary_mask.clone();
-        if (!blob.color_pixels.empty()) node->color_pixels = blob.color_pixels.clone();
-        node->bbox_canvas    = blob.bbox;
-        node->centroid_canvas = blob.centroid;
-        node->contour = blob.contour;
-        std::copy(blob.hu, blob.hu + 7, node->hu);
-        node->area = blob.area;
-        node->absence_score = kAbsenceScoreInitial;
-        node->last_seen_frame = current_frame;
-        node->created_frame   = current_frame;
-        int nid = node->id;
-        group.spatial_index.Insert(nid, blob.centroid);
-        group.nodes[nid] = std::move(node);
+        InsertOrMergeBlobNode(group, blob, blob.centroid, blob.bbox, current_frame,
+                              kEnableInsertMergeDeduplication,
+                              kMergeSearchRadiusPx,
+                              kDuplicatePosOverlapThreshold,
+                              kDuplicateCentroidOverlapThreshold,
+                              kDuplicateBboxIouThreshold,
+                              kDuplicateMaxHuDistance);
     }
     UpdateGroupBounds(group);
     group.stroke_cache_dirty = true;
