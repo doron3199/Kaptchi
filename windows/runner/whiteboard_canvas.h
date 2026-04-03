@@ -296,6 +296,9 @@ private:
     //   (b) The lecturer bounding box expanded by max(1, frame_dim/100).
     // Disable to capture content that touches the side edges or the lecturer region.
     static constexpr bool  kEnableFrameStrokeRejectFilter = true;
+    // Blobs wider than this (px) bypass the frame-stroke reject filter.
+    // Large blobs (e.g. full diagram) should not be discarded just because they touch the border.
+    static constexpr int   kFrameStrokeRejectMinWidth     = 300;
 
     // --- Matching (3-step pipeline) ---
     // Radius (px) for shape matching (step 2) after rough offset is applied.
@@ -341,7 +344,7 @@ private:
     static constexpr float kMergeSearchRadiusPx          = 1.0f;
     // Positional overlap ratio (overlap / min_area) above which a new blob is treated as a
     // duplicate without centroid alignment. Lower = more aggressive deduplication.
-    static constexpr float kDuplicatePosOverlapThreshold = 0.30f;
+    static constexpr float kDuplicatePosOverlapThreshold = 0.20f;
     // Centroid-aligned overlap ratio (overlap / min_area) above which a new blob is treated as a
     // duplicate after aligning centroids. Lower = more aggressive deduplication.
     static constexpr float kDuplicateCentroidOverlapThreshold = 0.93f;

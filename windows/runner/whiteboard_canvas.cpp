@@ -263,10 +263,15 @@ static bool BlobTouchesRejectMask(const FrameBlob& blob, const cv::Mat& reject_m
     return cv::countNonZero(ov) > 0;
 }
 
-static void FilterBlobsForCanvas(std::vector<FrameBlob>& blobs, const cv::Mat& reject_mask) {
+static void FilterBlobsForCanvas(std::vector<FrameBlob>& blobs, const cv::Mat& reject_mask,
+                                  int min_width_bypass) {
     blobs.erase(
         std::remove_if(blobs.begin(), blobs.end(),
-            [&](const FrameBlob& b) { return BlobTouchesRejectMask(b, reject_mask); }),
+            [&](const FrameBlob& b) {
+                if (b.bbox.width > min_width_bypass)
+                    return false;
+                return BlobTouchesRejectMask(b, reject_mask);
+            }),
         blobs.end());
 }
 
@@ -1004,7 +1009,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
     EnhanceFrameBlobs(blobs, frame, g_canvas_enhance_threshold.load());
 
     if (kEnableFrameStrokeRejectFilter && !reject_mask.empty())
-        FilterBlobsForCanvas(blobs, reject_mask);
+        FilterBlobsForCanvas(blobs, reject_mask, kFrameStrokeRejectMinWidth);
 
     std::lock_guard<std::mutex> state_lock(state_mutex_);
 
