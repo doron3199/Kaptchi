@@ -293,7 +293,7 @@ private:
     static const int       kBinarizeBlockSize            = 51;
     // Constant subtracted from the adaptive threshold mean. Higher = only high-contrast marks
     // are binarized. Lower = thicker strokes captured (more sensitive).
-    static const int       kBinarizeOffset               = 4;
+    static const int       kBinarizeOffset               = 6;
     // Connected components smaller than this area (px²) at half-resolution are removed before
     // upscaling. Eliminates isolated noise specks from the binary mask.
     static const int       kBinarizeMinBlobArea          = 3;
