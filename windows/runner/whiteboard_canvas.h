@@ -4,7 +4,7 @@
 //
 // Captures whiteboard content from a moving camera using:
 //   1. Connected-component blob extraction per frame
-//   2. Spatial + Hu-distance matching to find camera offset
+//   2. Spatial + total-shape matching to find camera offset
 //   3. Battle logic for overlap resolution (refresh/coexist)
 //   4. Absence tracking for natural erasure
 //
@@ -50,7 +50,8 @@ enum class NodeReplacementMode : int {
 // DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
 static constexpr float kAbsenceScoreInitial = 0.0f;
-static constexpr float kAbsenceScoreMax     = 8.0f;
+static constexpr float kAbsenceScoreMax     = 20.0f;
+static constexpr float kAbsenceScoreSeenThreshold = 0.0f;
 
 struct DrawingNode {
     int id = -1;
@@ -62,10 +63,18 @@ struct DrawingNode {
     double hu[7] = {};
     double area = 0.0;
     float  absence_score = kAbsenceScoreInitial;
+    bool   has_crossed_absence_seen_threshold = false;
     int    last_seen_frame = 0;
     int    created_frame   = 0;
     bool   user_locked     = false;
     int    match_count     = 0;
+    bool   duplicate_debug_marked = false;
+    int    duplicate_debug_partner_id = -1;
+    float  duplicate_debug_positional_overlap = 0.0f;
+    float  duplicate_debug_centroid_iou = 0.0f;
+    float  duplicate_debug_bbox_iou = 0.0f;
+    float  duplicate_debug_shape_difference = 1.0f;
+    int    duplicate_debug_reason_mask = 0;
 };
 
 // ---------------------------------------------------------------------------
@@ -163,6 +172,11 @@ std::unordered_map<int, std::unique_ptr<DrawingNode>> nodes;
     bool    raw_cache_dirty    = true;
 
     std::unordered_set<int> user_deleted_ids;
+
+    // Hard edges: adjacency list connecting nodes that were created in the same
+    // frame when their centroids are nearby. When one node moves, all
+    // transitively connected nodes move by the same delta.
+    std::unordered_map<int, std::unordered_set<int>> hard_edges;
 };
 
 // ---------------------------------------------------------------------------
@@ -197,6 +211,8 @@ public:
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
     CanvasRenderMode GetRenderMode() const;
+    void SetDuplicateDebugMode(bool enabled);
+    bool IsDuplicateDebugMode() const;
     bool IsRemoteProcess() const;
     cv::Size GetCanvasSize() const;
     uint64_t GetCanvasVersion() const {
@@ -216,6 +232,7 @@ public:
     // --- Graph node access (for edit screen) ---
     int  GetGraphNodeCount() const;
     int  GetGraphNodes(float* buffer, int max_nodes) const;
+    int  GetGraphHardEdges(int* buffer, int max_edges) const;
     int  GetGraphNodeNeighbors(int node_id, int* neighbors, int max_neighbors) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;
     bool CompareGraphNodesAtOffset(int id_a, int id_b, float dx, float dy,
@@ -251,6 +268,9 @@ private:
     // Fraction of changed pixels above which a frame is considered too shaky and skipped.
     // Lower = stricter (fewer frames accepted, less ghosting). Higher = more frames processed including shaky ones.
     static constexpr float kMaxMotionFraction            = 0.05f;
+    // Once a low-motion frame is accepted, the gate enters a lock state and stays there
+    // until a later frame exceeds this motion fraction. The unlocking frame is also skipped.
+    static constexpr float kOpenMotionGateLockFraction   = 0.1f;
     // Frame is downscaled to this long-edge size before computing motion. Smaller = faster.
     static const int       kMotionLongEdge               = 256;
     // Pixel absolute-difference value above which a pixel is counted as "changed" for motion.
@@ -272,13 +292,13 @@ private:
     static const int       kBinarizeBlockSize            = 25;
     // Constant subtracted from the adaptive threshold mean. Higher = only high-contrast marks
     // are binarized. Lower = thicker strokes captured (more sensitive).
-    static const int       kBinarizeOffset               = 5;
+    static const int       kBinarizeOffset               = 4;
     // Connected components smaller than this area (px²) at half-resolution are removed before
     // upscaling. Eliminates isolated noise specks from the binary mask.
     static const int       kBinarizeMinBlobArea          = 3;
     // Morphological dilation kernel size (NxN). Larger = wider strokes and more connected blobs.
     // Raise to join nearby strokes into one blob. Lower to keep strokes thin and separate.
-    static const int       kDilationKernelSize           = 13;
+    static const int       kDilationKernelSize           = 3;
 
     // --- Blob extraction ---
     // Connected components smaller than this (px²) are discarded as noise.
@@ -298,31 +318,33 @@ private:
     static constexpr bool  kEnableFrameStrokeRejectFilter = true;
     // Blobs wider than this (px) bypass the frame-stroke reject filter.
     // Large blobs (e.g. full diagram) should not be discarded just because they touch the border.
-    static constexpr int   kFrameStrokeRejectMinWidth     = 30000;
+    static constexpr int   kFrameStrokeRejectMinWidth     = 100000000;
 
     // --- Matching (3-step pipeline) ---
     // Radius (px) for shape matching (step 2) after rough offset is applied.
     static constexpr float kShapeMatchSearchRadius       = 70.0f;
-    // Hu distance threshold for the global Hu pass.
-    static constexpr double kGlobalHuDistThreshold       = 0.5;
-    // Area ratio gate for Hu matching.
+    // Max shape differentness for the global rough-matching pass.
+    // This now prefers contour matching, with Shape Context taking precedence
+    // when the local OpenCV build includes the contrib shape module.
+    static constexpr float kGlobalShapeMaxDifference     = 0.50f;
+    // Area ratio gate for coarse candidate filtering before shape comparison.
     static constexpr float kAreaRatioMin                 = 0.9f;
-    // Weight for Hu similarity score in combined shape-match scoring (step 2).
-    static constexpr float kShapeMatchHuWeight           = 0.5f;
-    // Weight for mask IoU in combined shape-match scoring (step 2).
-    static constexpr float kShapeMatchIouWeight          = 0.6f;
-    // Minimum combined score (Hu+IoU) to accept a shape match in step 2.
+    // Minimum combined similarity to accept a shape match in step 2.
     // Rejects weak matches even if they're the "best" nearby candidate.
-    static constexpr float kShapeMatchMinScore           = 0.5f;
-    // Max distance (px) of a match vector from the mean before it's rejected as outlier.
-    static constexpr float kOutlierVectorThreshold       = 1.0f;
-    // Max centroid distance (px) for final nearest-centroid matching (step 3).
-    // After precise alignment, real matches should be within a few pixels.
-    // Keep tight to avoid false matches when no real match exists.
-    static constexpr float kFinalMatchRadius             = 20.0f;
-    // Max Hu distance to accept a nearest-centroid match in step 3.
-    // Prevents matching to a close but completely different shape.
-    static constexpr float kFinalMatchMaxHuDist          = 1.20f;
+    // Live matching uses the same centroid-aligned shape geometry as duplicate detection.
+    static constexpr float kShapeMatchMinScore           = 0.30f;
+    // Max distance (px) of a match vector from the global mean before it is rejected.
+    static constexpr float kOutlierVectorThreshold       = 5.0f;
+    // Max distance (px) of a match vector from its width-third mean before it is rejected.
+    static constexpr float kPartitionOutlierVectorThreshold = 1.0f;
+    // Number of horizontal frame partitions used for independent motion estimation.
+    static const int       kHorizontalMatchPartitions    = 3;
+    // Radius (px) for the final shape-matching refinement pass (step 3).
+    // This reuses the step-2 matcher with a tighter search window after offset refinement.
+    static constexpr float kFinalShapeMatchSearchRadius  = 30.0f;
+    // Minimum combined similarity to accept a shape match in step 3.
+    // Keep this separate from step 2 so the final refinement gate can be tuned independently.
+    static constexpr float kFinalShapeMatchMinScore      = 0.70f;
     // Minimum number of inlier matches required before new strokes are added to the graph.
     static const int       kMinMatchesForNewNode         = 5;
 
@@ -341,40 +363,49 @@ private:
     static constexpr bool  kEnableInsertMergeDeduplication = true;
     // Radius (px, canvas coords) to search for duplicate candidates around each new node's centroid.
     // Raise if near-duplicate nodes from nearby positions are not being caught.
-    static constexpr float kMergeSearchRadiusPx          = 1.0f;
+    static constexpr float kMergeSearchRadiusPx          = 60.0f;
     // Positional overlap ratio (overlap / min_area) above which a new blob is treated as a
     // duplicate without centroid alignment. Lower = more aggressive deduplication.
-    static constexpr float kDuplicatePosOverlapThreshold = 0.20f;
-    // Centroid-aligned overlap ratio (overlap / min_area) above which a new blob is treated as a
-    // duplicate after aligning centroids. Lower = more aggressive deduplication.
-    static constexpr float kDuplicateCentroidOverlapThreshold = 0.93f;
+    static constexpr float kDuplicatePosOverlapThreshold = 0.70f;
+    // Centroid-aligned mask IoU threshold above which a new blob is treated as a duplicate after
+    // aligning centroids. Lower = more aggressive deduplication.
+    static constexpr float kDuplicateCentroidIouThreshold = 0.90f;
     // Original-position bbox IoU threshold above which two shapes are treated as duplicates.
-    static constexpr float kDuplicateBboxIouThreshold  = 0.70f;
-    // Hu-distance threshold below which two shapes are treated as duplicates, as long as they were
-    // not created in the same frame.
-    static constexpr float kDuplicateMaxHuDistance      = 0.1f;
+    static constexpr float kDuplicateBboxIouThreshold  = 0.90f;
+    // Total-shape differentness threshold below which two shapes are treated as duplicates, as
+    // long as they were not created in the same frame.
+    static constexpr float kDuplicateMaxShapeDifference = 0.001f;
     // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
     // that were admitted earlier or drifted together after later updates.
-    static const int       kGraphDedupeIntervalFrames   = 10;
+    static const int       kGraphDedupeIntervalFrames   = 1;
 
     // --- Absence (natural erasure) ---
     // Score subtracted per frame when a node is in the visible area but not matched.
     // Higher = nodes erase faster when not seen.
-    static constexpr float kAbsenceDecrement             = 0.4f;
+    static constexpr float kAbsenceDecrement             = 0.5f;
     // Score added per frame when a node is successfully matched.
     // Higher = nodes recover faster after being re-seen.
-    static constexpr float kAbsenceIncrement             = 0.6f;
+    static constexpr float kAbsenceIncrement             = 0.5f;
     // A node is only absence-penalised if a matched node exists within this radius (canvas px).
     // This acts as a "visibility proxy": we only penalise what we can actually see.
     // Raise if nodes far from current strokes are decaying too fast.
-    static constexpr float kAbsenceNearbyRadius          = 50.0f;
-    // Minimum fraction of a projected node bbox that must still overlap the processed frame
-    // before the node is considered plausibly visible for absence decay.
-    static constexpr float kAbsenceVisibleFractionMin    = 0.20f;
-    // Expanded frame margin used when projecting canvas nodes back into the current frame.
-    static constexpr int   kAbsenceVisibilityMarginPx    = 24;
+    static constexpr float kAbsenceNearbyRadius          = 40.0f;
+    // Minimum fraction of a projected node bbox that must overlap the observable region
+    // (the inset frame) before the node is considered plausibly visible for absence decay.
+    static constexpr float kAbsenceVisibleFractionMin    = 1.0f;
+    // Inward margin shrunk from the cropped frame edges to define the "observable region."
+    // When -1, uses max(1, frame_dim/50) (~2%), which exceeds the reject-mask edge strips (~1%).
+    // Nodes outside this region are protected from absence decay.
+    static constexpr int   kAbsenceFrameInsetPx          = -1;
+    // Expansion added to the lecturer rect for absence-protection.
+    // When -1, uses max(1, frame_dim/50) (~2%), strictly > reject-mask lecturer expansion (~1%).
+    static constexpr int   kAbsenceLecturerExpansionPx   = -1;
     // If this fraction of a node bbox overlaps the lecturer region, protect it from decay.
-    static constexpr float kAbsenceLecturerOverlapMin    = 0.15f;
+    static constexpr float kAbsenceLecturerOverlapMin    = 0.01f;
+
+    // --- Hard edges ---
+    // Maximum centroid distance for creating a hard edge between nodes from the same frame.
+    static constexpr float kHardEdgeMaxCentroidDist      = 100.0f;
 
     // --- Canvas defaults ---
     static const int kDefaultCanvasWidth  = 1920;
@@ -400,6 +431,7 @@ private:
     std::atomic<bool>       stop_worker_{false};
     std::unique_ptr<WhiteboardCanvasHelperClient> helper_client_;
     bool                    remote_process_ = false;
+    bool                    duplicate_debug_mode_ = false;
 
     mutable std::mutex state_mutex_;
 
@@ -407,6 +439,7 @@ private:
     // Motion gate
     // -----------------------------------------------------------------------
     cv::Mat prev_gray_;
+    bool motion_gate_locked_ = false;
 
     // -----------------------------------------------------------------------
     // Atomic flags
@@ -434,8 +467,8 @@ private:
                                     int& stroke_pixel_count);
     std::vector<FrameBlob> ExtractFrameBlobs(const cv::Mat& binary,
                                               const cv::Mat& frame_bgr) const;
-    cv::Point2f GlobalHuPass(WhiteboardGroup& group,
-                             const std::vector<FrameBlob>& blobs);
+    cv::Point2f GlobalShapePass(WhiteboardGroup& group,
+                                const std::vector<FrameBlob>& blobs);
     cv::Point2f MatchBlobsToGraph(WhiteboardGroup& group,
                                    std::vector<FrameBlob>& blobs);
     bool UpdateGraph(WhiteboardGroup& group, std::vector<FrameBlob>& blobs,
@@ -462,6 +495,7 @@ extern std::atomic<float> g_canvas_pan_x;
 extern std::atomic<float> g_canvas_pan_y;
 extern std::atomic<float> g_canvas_zoom;
 extern std::atomic<bool>  g_whiteboard_debug;
+extern std::atomic<bool>  g_duplicate_debug_mode;
 extern std::atomic<float> g_yolo_fps;
 extern std::atomic<float> g_canvas_enhance_threshold;
 
@@ -490,11 +524,14 @@ extern "C" {
     __declspec(dllexport) int     GetSortedPosition(int idx);
 
     __declspec(dllexport) void    SetWhiteboardDebug(bool enabled);
+    __declspec(dllexport) void    SetDuplicateDebugMode(bool enabled);
+    __declspec(dllexport) bool    GetDuplicateDebugMode();
     __declspec(dllexport) void    SetCanvasEnhanceThreshold(float threshold);
 
     // Graph node access
     __declspec(dllexport) int     GetGraphNodeCount();
     __declspec(dllexport) int     GetGraphNodes(float* buffer, int max_nodes);
+    __declspec(dllexport) int     GetGraphHardEdges(int* buffer, int max_edges);
     __declspec(dllexport) int     GetGraphNodeNeighbors(int node_id, int* neighbors,
                                                          int max_neighbors);
     __declspec(dllexport) bool    CompareGraphNodes(int id_a, int id_b, float* result);

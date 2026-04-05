@@ -32,11 +32,15 @@ public:
     void SetActiveSubCanvas(int idx);
     int GetSortedSubCanvasIndex(int pos) const;
     int GetSortedPosition(int idx) const;
-    void SyncSettings(bool debug_enabled, float enhance_threshold, float yolo_fps);
+    void SyncSettings(bool debug_enabled,
+                      bool duplicate_debug_enabled,
+                      float enhance_threshold,
+                      float yolo_fps);
 
     // Graph debug methods (read from shared memory written by helper process)
     int GetGraphNodeCount() const;
     int GetGraphNodes(float* buffer, int max_nodes) const;
+    int GetGraphHardEdges(int* buffer, int max_edges) const;
     int GetGraphNodeContours(float* buffer, int max_floats) const;
     bool GetGraphCanvasBounds(int* bounds) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;

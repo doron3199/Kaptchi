@@ -37,10 +37,14 @@ constexpr int kNoSubCanvasRequest = -1;
 constexpr int kDefaultCanvasWidth = 1920;
 constexpr int kDefaultCanvasHeight = 1080;
 constexpr int kMaxGraphNodes = 512;
-constexpr int kGraphNodeStride = 16;
+constexpr int kGraphNodeStride = 24;
 constexpr int kMaxGraphNodeFloats = kMaxGraphNodes * kGraphNodeStride;
+constexpr int kMaxGraphEdges = 16384;
+constexpr int kGraphEdgeStride = 2;
+constexpr int kMaxGraphEdgeInts = kMaxGraphEdges * kGraphEdgeStride;
 constexpr int kMaxGraphContourFloats = 500000;
 constexpr DWORD kGraphCompareTimeoutMs = 2000;
+constexpr int kGraphCompareResultFloats = 19;
 constexpr int kMaxEditDeletes = 256;
 constexpr int kMaxEditMoves = 256;
 constexpr DWORD kEditCommandTimeoutMs = 2000;
@@ -58,6 +62,7 @@ struct SharedState {
     LONG canvas_view_mode = 0;
     LONG render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
     LONG whiteboard_debug = 0;
+    LONG duplicate_debug_mode = 0;
     LONG reset_requested = 0;
     LONG pending_active_subcanvas = kNoSubCanvasRequest;
     float pan_x = 0.5f;
@@ -85,6 +90,7 @@ struct SharedState {
     LONG overview_height = 0;
     LONG graph_node_count = 0;
     LONG graph_node_floats_written = 0;
+    LONG graph_edge_count = 0;
     LONG graph_contour_floats_written = 0;
     LONG graph_bounds_x = 0;
     LONG graph_bounds_y = 0;
@@ -102,8 +108,9 @@ struct SharedState {
     unsigned char viewport_bgr[kMaxFrameBytes];
     unsigned char overview_bgr[kMaxOverviewBytes];
     float graph_nodes[kMaxGraphNodeFloats];
+    int graph_edges[kMaxGraphEdgeInts];
     float graph_contours[kMaxGraphContourFloats];
-    float graph_compare_result[10];
+    float graph_compare_result[kGraphCompareResultFloats];
 
     // User edit commands (client -> helper)
     LONG edit_request_id = 0;
@@ -131,6 +138,7 @@ struct HelperStateSnapshot {
     bool canvas_view_mode = false;
     CanvasRenderMode render_mode = CanvasRenderMode::kStroke;
     bool debug_enabled = false;
+    bool duplicate_debug_enabled = false;
     bool reset_requested = false;
     int requested_active_subcanvas = kNoSubCanvasRequest;
     float pan_x = 0.5f;
@@ -248,7 +256,7 @@ public:
         int graph_compare_result_id = 0;
         bool graph_compare_result_ready = false;
         bool graph_compare_result_ok = false;
-        float graph_compare_result[10] = {};
+        float graph_compare_result[kGraphCompareResultFloats] = {};
 
         int last_edit_request_id = 0;
         int last_mask_request_id = 0;
@@ -269,11 +277,13 @@ public:
             }
 
             g_whiteboard_debug.store(snapshot.debug_enabled);
+            g_duplicate_debug_mode.store(snapshot.duplicate_debug_enabled);
             g_canvas_enhance_threshold.store(snapshot.enhance_threshold);
             g_yolo_fps.store(snapshot.yolo_fps);
 
             canvas.SetCanvasViewMode(snapshot.canvas_view_mode);
             canvas.SetRenderMode(snapshot.render_mode);
+            canvas.SetDuplicateDebugMode(snapshot.duplicate_debug_enabled);
 
             if (snapshot.reset_requested) {
                 canvas.Reset();
@@ -458,6 +468,7 @@ private:
             ? CanvasRenderMode::kRaw
             : CanvasRenderMode::kStroke;
         snapshot.debug_enabled = shared_->whiteboard_debug != 0;
+        snapshot.duplicate_debug_enabled = shared_->duplicate_debug_mode != 0;
         snapshot.reset_requested = shared_->reset_requested != 0;
         snapshot.requested_active_subcanvas = shared_->pending_active_subcanvas;
         snapshot.pan_x = shared_->pan_x;
@@ -541,10 +552,12 @@ private:
         // Pre-read graph debug data outside the shared mutex
         int graph_node_count = 0;
         int graph_node_floats = 0;
+        int graph_edge_count = 0;
         int graph_contour_floats = 0;
         int graph_bounds[4] = {0, 0, 0, 0};
         bool graph_bounds_valid = false;
         float local_graph_nodes[kMaxGraphNodeFloats];
+        int local_graph_edges[kMaxGraphEdgeInts];
         // Use a heap buffer for contours (too large for stack)
         static thread_local std::vector<float> local_graph_contours(kMaxGraphContourFloats);
 
@@ -552,6 +565,7 @@ private:
             graph_node_count = canvas.GetGraphNodeCount();
             if (graph_node_count > 0) {
                 graph_node_floats = canvas.GetGraphNodes(local_graph_nodes, kMaxGraphNodes) * kGraphNodeStride;
+                graph_edge_count = canvas.GetGraphHardEdges(local_graph_edges, kMaxGraphEdges);
                 graph_contour_floats = canvas.GetGraphNodeContours(
                     local_graph_contours.data(), kMaxGraphContourFloats);
                 graph_bounds_valid = canvas.GetGraphCanvasBounds(graph_bounds);
@@ -582,6 +596,7 @@ private:
             shared_->overview_height = 0;
             shared_->graph_node_count = 0;
             shared_->graph_node_floats_written = 0;
+            shared_->graph_edge_count = 0;
             shared_->graph_contour_floats_written = 0;
             shared_->graph_bounds_valid = 0;
             Unlock(mutex_.get());
@@ -611,10 +626,15 @@ private:
         // Write graph debug data
         shared_->graph_node_count = graph_node_count;
         shared_->graph_node_floats_written = graph_node_floats;
+        shared_->graph_edge_count = graph_edge_count;
         shared_->graph_contour_floats_written = graph_contour_floats;
         if (graph_node_floats > 0) {
             std::memcpy(shared_->graph_nodes, local_graph_nodes,
                         static_cast<size_t>(graph_node_floats) * sizeof(float));
+        }
+        if (graph_edge_count > 0) {
+            std::memcpy(shared_->graph_edges, local_graph_edges,
+                        static_cast<size_t>(graph_edge_count) * kGraphEdgeStride * sizeof(int));
         }
         if (graph_contour_floats > 0) {
             std::memcpy(shared_->graph_contours, local_graph_contours.data(),
@@ -769,6 +789,7 @@ bool WhiteboardCanvasHelperClient::Start() {
     impl_->shared->pan_x = 0.5f;
     impl_->shared->pan_y = 0.5f;
     impl_->shared->zoom = 1.0f;
+    impl_->shared->duplicate_debug_mode = 0;
     impl_->shared->enhance_threshold = 5.0f;
     impl_->shared->yolo_fps = 2.0f;
     impl_->shared->canvas_width = kDefaultCanvasWidth;
@@ -1085,11 +1106,13 @@ int WhiteboardCanvasHelperClient::GetSortedPosition(int idx) const {
 }
 
 void WhiteboardCanvasHelperClient::SyncSettings(bool debug_enabled,
+                                                bool duplicate_debug_enabled,
                                                 float enhance_threshold,
                                                 float yolo_fps) {
     if (!IsReady()) return;
     impl_->WithLock(20, [&]() {
         impl_->shared->whiteboard_debug = debug_enabled ? 1 : 0;
+        impl_->shared->duplicate_debug_mode = duplicate_debug_enabled ? 1 : 0;
         impl_->shared->enhance_threshold = enhance_threshold;
         impl_->shared->yolo_fps = yolo_fps;
         impl_->RefreshCachedStateUnsafe();
@@ -1116,6 +1139,20 @@ int WhiteboardCanvasHelperClient::GetGraphNodes(float* buffer, int max_nodes) co
         if (count > 0) {
             std::memcpy(buffer, impl_->shared->graph_nodes,
                         static_cast<size_t>(count) * kGraphNodeStride * sizeof(float));
+        }
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphHardEdges(int* buffer, int max_edges) const {
+    if (!IsReady() || !buffer || max_edges <= 0) return 0;
+    int count = 0;
+    impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
+        const int available_edges = static_cast<int>(impl_->shared->graph_edge_count);
+        count = std::min(available_edges, max_edges);
+        if (count > 0) {
+            std::memcpy(buffer, impl_->shared->graph_edges,
+                        static_cast<size_t>(count) * kGraphEdgeStride * sizeof(int));
         }
     });
     return count;
@@ -1172,7 +1209,7 @@ bool WhiteboardCanvasHelperClient::CompareGraphNodes(int id_a, int id_b, float* 
     while (std::chrono::steady_clock::now() < deadline) {
         bool ready = false;
         bool ok = false;
-        float local_result[10] = {};
+        float local_result[kGraphCompareResultFloats] = {};
 
         impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
             ready = impl_->shared->graph_compare_result_ready != 0 &&

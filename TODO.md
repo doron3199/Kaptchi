@@ -26,3 +26,33 @@
 - [ ] **Performance Tuning**: Optimize C++ processing pipeline for real-time frame rates.
 - [ ] **Battery Optimization**: Ensure the Android "Camera Mode" is efficient.
 - [ ] **Testing**: Verify connectivity and stability across different network conditions.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+CHECK IF THE MAPPING IS EXTREAMLY ACCURATE, IF NOT REVERT LAST CHANGES AND JUST UPDATE THE DE DUPLICATE
+
+
+
+
+
+
+

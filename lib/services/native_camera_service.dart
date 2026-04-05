@@ -1,5 +1,6 @@
 import 'dart:ffi' hide Size;
 import 'dart:io';
+import 'dart:math' as math;
 import 'dart:typed_data';
 import 'dart:ui';
 import 'package:ffi/ffi.dart';
@@ -93,6 +94,12 @@ typedef GetCanvasOverviewRgba = bool Function(
 typedef SetWhiteboardDebugFunc = Void Function(Bool enabled);
 typedef SetWhiteboardDebug = void Function(bool enabled);
 
+typedef SetDuplicateDebugModeFunc = Void Function(Bool enabled);
+typedef SetDuplicateDebugMode = void Function(bool enabled);
+
+typedef GetDuplicateDebugModeFunc = Bool Function();
+typedef GetDuplicateDebugMode = bool Function();
+
 typedef SetCanvasEnhanceThresholdFunc = Void Function(Float threshold);
 typedef SetCanvasEnhanceThreshold = void Function(double threshold);
 
@@ -118,6 +125,9 @@ typedef GetGraphNodeCount = int Function();
 
 typedef GetGraphNodesFunc = Int32 Function(Pointer<Float> buffer, Int32 maxNodes);
 typedef GetGraphNodesFFI = int Function(Pointer<Float> buffer, int maxNodes);
+
+typedef GetGraphHardEdgesFunc = Int32 Function(Pointer<Int32> buffer, Int32 maxEdges);
+typedef GetGraphHardEdgesFFI = int Function(Pointer<Int32> buffer, int maxEdges);
 
 typedef GetGraphNodeNeighborsFunc = Int32 Function(
   Int32 nodeId, Pointer<Int32> neighbors, Int32 maxNeighbors);
@@ -263,6 +273,8 @@ class NativeCameraService {
   late GetCanvasTextureId _getCanvasTextureId;
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
   late SetWhiteboardDebug _setWhiteboardDebug;
+  late SetDuplicateDebugMode _setDuplicateDebugMode;
+  late GetDuplicateDebugMode _getDuplicateDebugMode;
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
   // Sub-canvas navigation bindings
   late GetSubCanvasCount _getSubCanvasCount;
@@ -363,6 +375,16 @@ class NativeCameraService {
       .asFunction();
     _setWhiteboardDebug = _nativeLib
         .lookup<NativeFunction<SetWhiteboardDebugFunc>>('SetWhiteboardDebug')
+        .asFunction();
+    _setDuplicateDebugMode = _nativeLib
+        .lookup<NativeFunction<SetDuplicateDebugModeFunc>>(
+          'SetDuplicateDebugMode',
+        )
+        .asFunction();
+    _getDuplicateDebugMode = _nativeLib
+        .lookup<NativeFunction<GetDuplicateDebugModeFunc>>(
+          'GetDuplicateDebugMode',
+        )
         .asFunction();
     _setCanvasEnhanceThreshold = _nativeLib
         .lookup<NativeFunction<SetCanvasEnhanceThresholdFunc>>(
@@ -589,6 +611,16 @@ class NativeCameraService {
   void setWhiteboardDebug(bool enabled) {
     initialize();
     _setWhiteboardDebug(enabled);
+  }
+
+  void setDuplicateDebugMode(bool enabled) {
+    initialize();
+    _setDuplicateDebugMode(enabled);
+  }
+
+  bool getDuplicateDebugMode() {
+    initialize();
+    return _getDuplicateDebugMode();
   }
 
   /// Set the DoG noise-suppression threshold for WhiteboardEnhance (1–30).
@@ -980,6 +1012,7 @@ class NativeCameraService {
 
   late GetGraphNodeCount _getGraphNodeCount;
   late GetGraphNodesFFI _getGraphNodes;
+  late GetGraphHardEdgesFFI _getGraphHardEdges;
   late GetGraphNodeNeighborsFFI _getGraphNodeNeighbors;
   late CompareGraphNodesFFI _compareGraphNodes;
   CompareGraphNodesAtOffsetFFI? _compareGraphNodesAtOffset;
@@ -1028,6 +1061,15 @@ class NativeCameraService {
       AppLogger.ffi('  lookup GetGraphNodes: OK');
     } catch (e) {
       AppLogger.ffi('  lookup GetGraphNodes FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphHardEdges = _nativeLib
+          .lookup<NativeFunction<GetGraphHardEdgesFunc>>('GetGraphHardEdges')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphHardEdges: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphHardEdges FAILED: $e');
       rethrow;
     }
     try {
@@ -1221,7 +1263,7 @@ class NativeCameraService {
   List<GraphNodeInfo> _decodeGraphNodes(Pointer<Float> buffer, int actual) {
     final nodes = <GraphNodeInfo>[];
     for (int i = 0; i < actual; i++) {
-      final p = buffer + i * 16;
+      final p = buffer + i * 24;
       nodes.add(GraphNodeInfo(
         id: p[0].toInt(),
         bboxCanvas: Rect.fromLTWH(p[1], p[2], p[3], p[4]),
@@ -1234,6 +1276,13 @@ class NativeCameraService {
         canvasOrigin: Offset(p[12], p[13]),
         matchDistance: p[14].toInt(),
         isUserLocked: p[15] > 0.5,
+        isDuplicateDebug: p[16] > 0.5,
+        duplicatePartnerId: p[17].toInt(),
+        duplicatePositionalOverlap: p[18],
+        duplicateCentroidIou: p[19],
+        duplicateBboxIou: p[20],
+        duplicateShapeDifference: p[21],
+        duplicateReasonMask: p[22].toInt(),
       ));
     }
     return nodes;
@@ -1246,7 +1295,7 @@ class NativeCameraService {
   }) {
     if (count <= 0) return [];
 
-    final buffer = malloc.allocate<Float>(count * 16 * 4);
+    final buffer = malloc.allocate<Float>(count * 24 * 4);
     try {
       final actual = reader(buffer, count);
       AppLogger.graphDebug(
@@ -1326,6 +1375,29 @@ class NativeCameraService {
     );
   }
 
+  List<GraphHardEdge> getGraphHardEdges() {
+    _initializeGraphDebug();
+    final nodeCount = _getGraphNodeCount();
+    final maxEdges = math.max(16, (nodeCount * math.max(0, nodeCount - 1)) ~/ 2);
+    final buffer = malloc.allocate<Int32>(maxEdges * 2 * 4);
+    try {
+      final count = _getGraphHardEdges(buffer, maxEdges);
+      final edges = <GraphHardEdge>[];
+      for (int i = 0; i < count; i++) {
+        final offset = i * 2;
+        edges.add(
+          GraphHardEdge(
+            firstNodeId: buffer[offset],
+            secondNodeId: buffer[offset + 1],
+          ),
+        );
+      }
+      return edges;
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
   List<int> getNodeNeighbors(int nodeId) {
     _initializeGraphDebug();
     const maxNeighbors = 32;
@@ -1340,7 +1412,7 @@ class NativeCameraService {
 
   NodeComparison? compareNodes(int idA, int idB) {
     _initializeGraphDebug();
-    final buffer = malloc.allocate<Float>(10 * 4);
+    final buffer = malloc.allocate<Float>(19 * 4);
     try {
       final ok = _compareGraphNodes(idA, idB, buffer);
       AppLogger.graphDebug(
@@ -1357,6 +1429,15 @@ class NativeCameraService {
         heightRatio: buffer[7],
         centroidAlignedOverlapPixels: buffer[8],
         centroidAlignedOverlapRatio: buffer[9],
+        centroidAlignedIou: buffer[10],
+        contourRawDistance: buffer[14],
+        contourDifference: buffer[15],
+        usedShapeContext: buffer[16] > 0.5,
+        huRawDistance: buffer[17],
+        huDifference: buffer[18],
+        sameCreationFrame: buffer[11] > 0.5,
+        isDuplicate: buffer[12] > 0.5,
+        duplicateReasonMask: buffer[13].toInt(),
       );
     } finally {
       malloc.free(buffer);

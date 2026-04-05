@@ -1351,8 +1351,8 @@ class _GraphDebugScreenState extends State<GraphDebugScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _compRow(
-              'OpenCV shape',
-              'I2 = ${comp.shapeDistance.toStringAsFixed(4)}',
+              'Total shape diff',
+              comp.shapeDistance.toStringAsFixed(4),
               shapeVerdict,
             ),
             _compRow(
@@ -1401,8 +1401,8 @@ class _GraphDebugScreenState extends State<GraphDebugScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             _compRow(
-              'OpenCV shape',
-              'I2 = ${comp.shapeDistance.toStringAsFixed(4)}',
+              'Total shape diff',
+              comp.shapeDistance.toStringAsFixed(4),
               shapeVerdict,
             ),
             _compRow(

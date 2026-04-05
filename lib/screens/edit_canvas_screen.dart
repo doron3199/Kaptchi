@@ -15,8 +15,10 @@ class EditCanvasScreen extends StatefulWidget {
 }
 
 class _EditCanvasScreenState extends State<EditCanvasScreen> {
-  static const double _duplicatePosOverlapThreshold = 0.30;
-  static const double _duplicateCentroidOverlapThreshold = 0.80;
+  static const double _duplicatePosOverlapThreshold = 0.50;
+  static const double _duplicateCentroidIouThreshold = 0.70;
+  static const double _duplicateBboxIouThreshold = 0.70;
+  static const double _duplicateShapeDifferenceThreshold = 0.0001;
 
   final NativeCameraService _native = NativeCameraService();
   final TransformationController _transformController =
@@ -24,12 +26,14 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
 
   // Snapshot taken once on open — never refreshed from C++
   List<GraphNodeInfo> _nodes = [];
+  List<GraphHardEdge> _hardEdges = [];
   Rect? _canvasBounds;
 
   // Mask images for pixel-perfect rendering
   Map<int, ui.Image> _maskImages = {};
   bool _masksLoading = false;
   bool _darkBackground = true;
+  bool _duplicateDebugMode = false;
 
   // Multi-select: up to two nodes
   int? _selectedIdA;
@@ -54,12 +58,26 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
 
   bool get _hasChanges => _movedNodeIds.isNotEmpty || _deletedNodeIds.isNotEmpty;
   bool get _hasSelection => _selectedIdA != null || _selectedIdB != null;
+  int get _duplicateNodeCount =>
+      _nodes.where((node) => node.isDuplicateDebug).length;
+  GraphNodeInfo? get _selectedNode {
+    final id = _selectedIdB == null ? _selectedIdA : null;
+    if (id == null) return null;
+    return _nodes.where((node) => node.id == id).firstOrNull;
+  }
+
+  int? get _highlightedDuplicatePartnerId {
+    final node = _selectedNode;
+    if (node == null || !node.isDuplicateDebug || node.duplicatePartnerId < 0) {
+      return null;
+    }
+    final partnerExists = _nodes.any((entry) => entry.id == node.duplicatePartnerId);
+    return partnerExists ? node.duplicatePartnerId : null;
+  }
 
   @override
   void initState() {
     super.initState();
-    final locked = _native.lockAllGraphNodes();
-    debugPrint('[EditCanvas] locked $locked nodes');
     _snapshotFromCpp();
   }
 
@@ -84,6 +102,20 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
       bounds = null;
     }
 
+    bool duplicateDebugMode;
+    try {
+      duplicateDebugMode = _native.getDuplicateDebugMode();
+    } catch (e) {
+      duplicateDebugMode = false;
+    }
+
+    List<GraphHardEdge> hardEdges;
+    try {
+      hardEdges = _native.getGraphHardEdges();
+    } catch (e) {
+      hardEdges = [];
+    }
+
     Map<int, List<Offset>> contours;
     try {
       contours = _native.getGraphNodeContours();
@@ -104,15 +136,50 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
               canvasOrigin: node.canvasOrigin,
               contour: contours[node.id] ?? const [],
               isUserLocked: node.isUserLocked,
+              isDuplicateDebug: node.isDuplicateDebug,
+              duplicatePartnerId: node.duplicatePartnerId,
+              duplicatePositionalOverlap: node.duplicatePositionalOverlap,
+              duplicateCentroidIou: node.duplicateCentroidIou,
+              duplicateBboxIou: node.duplicateBboxIou,
+              duplicateShapeDifference: node.duplicateShapeDifference,
+              duplicateReasonMask: node.duplicateReasonMask,
             ))
         .toList();
 
     setState(() {
       _nodes = enriched;
+      _hardEdges = hardEdges;
       _canvasBounds = bounds;
+      _duplicateDebugMode = duplicateDebugMode;
     });
 
     _loadMaskImages();
+  }
+
+  void _setDuplicateDebugMode(bool enabled) {
+    _native.setDuplicateDebugMode(enabled);
+    setState(() {
+      _duplicateDebugMode = enabled;
+    });
+    _snapshotFromCpp();
+  }
+
+  void _cleanFlaggedNodes() {
+    if (_duplicateNodeCount == 0) return;
+    final keepDebugModeEnabled = _duplicateDebugMode;
+    _native.setDuplicateDebugMode(false);
+    if (keepDebugModeEnabled) {
+      _native.setDuplicateDebugMode(true);
+    }
+    setState(() {
+      _duplicateDebugMode = keepDebugModeEnabled;
+      _selectedIdA = null;
+      _selectedIdB = null;
+      _comparison = null;
+      _dragOverlap = null;
+      _dragOverlapTargetId = null;
+    });
+    _snapshotFromCpp();
   }
 
   Future<void> _loadMaskImages() async {
@@ -382,8 +449,36 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.grey[900],
-        title: Text('Edit Canvas (${_nodes.length} nodes)'),
+        title: Text(
+          'Edit Canvas (${_nodes.length} nodes, $_duplicateNodeCount flagged)',
+        ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.refresh, color: Colors.white70),
+            tooltip: 'Refresh graph snapshot',
+            onPressed: _snapshotFromCpp,
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                'Dup debug',
+                style: TextStyle(
+                  color: _duplicateDebugMode
+                      ? Colors.redAccent
+                      : Colors.white70,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              Switch.adaptive(
+                value: _duplicateDebugMode,
+                activeThumbColor: Colors.redAccent,
+                activeTrackColor: const Color(0x66FF1744),
+                onChanged: _setDuplicateDebugMode,
+              ),
+            ],
+          ),
           IconButton(
             icon: Icon(
               _darkBackground ? Icons.light_mode : Icons.dark_mode,
@@ -500,9 +595,12 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
                   child: CustomPaint(
                     painter: _EditCanvasPainter(
                       nodes: _nodes,
+                      hardEdges: _hardEdges,
                       canvasBounds: _canvasBounds,
                       selectedIdA: _selectedIdA,
                       selectedIdB: _selectedIdB,
+                      highlightedDuplicatePartnerId:
+                          _highlightedDuplicatePartnerId,
                       movedIds: _movedNodeIds,
                       dragOverlapTargetId: _dragOverlapTargetId,
                       maskImages: _maskImages,
@@ -512,6 +610,11 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
                   ),
                 ),
               ),
+            ),
+            Positioned(
+              top: 8,
+              left: 8,
+              child: _buildStatusCard(),
             ),
             // Drag overlap floating label
             if (_isDragging && _dragOverlap != null && _dragOverlapTargetId != null)
@@ -528,9 +631,77 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
                 right: 0,
                 child: _buildComparisonPanel(),
               ),
+            if (_comparison == null && _selectedNode != null)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
+                child: _buildSelectedNodePanel(_selectedNode!),
+              ),
           ],
         );
       },
+    );
+  }
+
+  Widget _buildStatusCard() {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 320),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xDD101010),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(
+          color: _duplicateDebugMode ? Colors.redAccent : Colors.white24,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            _duplicateDebugMode
+                ? 'Duplicate debug mode ON'
+                : 'Duplicate debug mode OFF',
+            style: TextStyle(
+              color: _duplicateDebugMode ? Colors.redAccent : Colors.white,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            _duplicateDebugMode
+                ? 'Would-be deleted duplicates stay hidden from the main canvas and appear only in this edit view.'
+                : 'Normal duplicate deletion is active.',
+            style: const TextStyle(color: Colors.white70, fontSize: 11),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Flagged nodes: $_duplicateNodeCount',
+            style: const TextStyle(color: Colors.white, fontSize: 11),
+          ),
+          Text(
+            'Selected: ${_selectedIdA ?? '-'} / ${_selectedIdB ?? '-'}',
+            style: const TextStyle(color: Colors.white54, fontSize: 11),
+          ),
+          if (_duplicateNodeCount > 0) ...[
+            const SizedBox(height: 8),
+            SizedBox(
+              width: double.infinity,
+              child: TextButton.icon(
+                onPressed: _cleanFlaggedNodes,
+                icon: const Icon(Icons.cleaning_services, size: 16),
+                label: const Text('Clean flagged nodes'),
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.redAccent,
+                  side: const BorderSide(color: Color(0x66FF1744)),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 
@@ -568,10 +739,17 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
 
   Widget _buildComparisonPanel() {
     final comp = _comparison!;
-    final passesLiveDuplicate =
-        comp.maskOverlapRatio > _duplicatePosOverlapThreshold ||
-        comp.centroidAlignedOverlapRatio >
-            _duplicateCentroidOverlapThreshold;
+    final reasonText = comp.duplicateReasonLabels.isEmpty
+      ? 'None'
+      : comp.duplicateReasonLabels.join(', ');
+    final contourLabel = comp.usedShapeContext
+        ? 'Contour (Shape Context)'
+        : 'Contour (matchShapes)';
+    final positionalGate = comp.maskOverlapRatio > _duplicatePosOverlapThreshold;
+    final centroidIouGate = comp.centroidAlignedIou > _duplicateCentroidIouThreshold;
+    final bboxIouGate = comp.bboxIou > _duplicateBboxIouThreshold;
+    final shapeGate = !comp.sameCreationFrame &&
+      comp.shapeDistance < _duplicateShapeDifferenceThreshold;
     return Container(
       constraints: const BoxConstraints(maxHeight: 220),
       color: const Color(0xDD1A1A1A),
@@ -602,6 +780,21 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
               ],
             ),
             const SizedBox(height: 4),
+            _metricRow(
+              'Native duplicate verdict',
+              comp.isDuplicate ? 'YES' : 'NO',
+              comp.isDuplicate ? Colors.greenAccent : Colors.redAccent,
+            ),
+            _metricRow(
+              'Triggered reasons',
+              reasonText,
+              comp.isDuplicate ? Colors.greenAccent : Colors.white70,
+            ),
+            _metricRow(
+              'Same creation frame',
+              comp.sameCreationFrame ? 'YES' : 'NO',
+              comp.sameCreationFrame ? Colors.yellowAccent : Colors.white70,
+            ),
             _metricRow('Centroid dist', '${comp.centroidDistance.toStringAsFixed(1)} px',
                 _threshColor(comp.centroidDistance, 40, 80, lowerIsBetter: true)),
             _metricRow('BBox IoU', '${(comp.bboxIou * 100).toStringAsFixed(1)}%',
@@ -611,30 +804,147 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
             _metricRow('Height ratio', '${(comp.heightRatio * 100).toStringAsFixed(1)}%',
                 _threshColor(comp.heightRatio, 0.70, 0.50, lowerIsBetter: false)),
             _metricRow(
-              'Mask overlap (pos > 30%)',
-              '${(comp.maskOverlapRatio * 100).toStringAsFixed(1)}%',
-              _threshColor(
-                comp.maskOverlapRatio,
-                _duplicatePosOverlapThreshold,
-                _duplicatePosOverlapThreshold * 0.5,
-                lowerIsBetter: false)),
+              'Pos overlap gate (> 50%)',
+              '${(comp.maskOverlapRatio * 100).toStringAsFixed(1)}% -> ${positionalGate ? 'YES' : 'NO'}',
+              positionalGate ? Colors.greenAccent : Colors.redAccent,
+            ),
             _metricRow(
-              'Mask overlap (centroid > 80%)',
-              '${(comp.centroidAlignedOverlapRatio * 100).toStringAsFixed(1)}%',
-              _threshColor(
-                comp.centroidAlignedOverlapRatio,
-                _duplicateCentroidOverlapThreshold,
-                _duplicateCentroidOverlapThreshold * 0.5,
-                lowerIsBetter: false)),
+              'Centroid IoU gate (> 70%)',
+              '${(comp.centroidAlignedIou * 100).toStringAsFixed(1)}% -> ${centroidIouGate ? 'YES' : 'NO'}',
+              centroidIouGate ? Colors.greenAccent : Colors.redAccent,
+            ),
             _metricRow(
-              'Live duplicate gate',
-              passesLiveDuplicate ? 'YES' : 'NO',
-              passesLiveDuplicate ? Colors.greenAccent : Colors.redAccent),
-            _metricRow('Shape dist (Hu I2)', comp.shapeDistance.toStringAsFixed(4),
-                _threshColor(comp.shapeDistance, 0.25, 0.50, lowerIsBetter: true)),
+              'BBox IoU gate (> 70%)',
+              '${(comp.bboxIou * 100).toStringAsFixed(1)}% -> ${bboxIouGate ? 'YES' : 'NO'}',
+              bboxIouGate ? Colors.greenAccent : Colors.redAccent,
+            ),
+            _metricRow(
+              'Shape diff gate (< 0.0001)',
+              comp.sameCreationFrame
+                  ? '${comp.shapeDistance.toStringAsFixed(4)} -> BLOCKED same frame'
+                  : '${comp.shapeDistance.toStringAsFixed(4)} -> ${shapeGate ? 'YES' : 'NO'}',
+              comp.sameCreationFrame
+                  ? Colors.yellowAccent
+                  : shapeGate
+                      ? Colors.greenAccent
+                      : Colors.redAccent,
+            ),
+            _metricRow('Total shape diff', comp.shapeDistance.toStringAsFixed(4),
+                _threshColor(comp.shapeDistance, 0.20, 0.45, lowerIsBetter: true)),
+            _metricRow(
+              contourLabel,
+              'raw ${comp.contourRawDistance.toStringAsFixed(4)} | diff ${comp.contourDifference.toStringAsFixed(4)}',
+              _threshColor(comp.contourDifference, 0.20, 0.45, lowerIsBetter: true),
+            ),
+            _metricRow(
+              'Hu moments',
+              'raw ${comp.huRawDistance.toStringAsFixed(4)} | diff ${comp.huDifference.toStringAsFixed(4)}',
+              _threshColor(comp.huDifference, 0.20, 0.45, lowerIsBetter: true),
+            ),
             _metricRow('AND pixels', '${comp.andOverlapPixels.toInt()} px', Colors.white70),
             _metricRow('AND pixels (centroid)', '${comp.centroidAlignedOverlapPixels.toInt()} px', Colors.white70),
             _metricRow('BBox intersect', '${comp.bboxIntersectionArea.toInt()} px\u00B2', Colors.white70),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSelectedNodePanel(GraphNodeInfo node) {
+    final reasonText = node.duplicateReasonLabels.isEmpty
+        ? 'None'
+        : node.duplicateReasonLabels.join(', ');
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 220),
+      color: const Color(0xDD1A1A1A),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                Text(
+                  'Node #${node.id}',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                if (node.isDuplicateDebug)
+                  Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: const Color(0x33FF1744),
+                      borderRadius: BorderRadius.circular(999),
+                      border: Border.all(color: const Color(0xFFFF1744)),
+                    ),
+                    child: const Text(
+                      'FLAGGED DUPLICATE',
+                      style: TextStyle(
+                        color: Color(0xFFFF1744),
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                const Spacer(),
+                InkWell(
+                  onTap: () => setState(() {
+                    _selectedIdA = null;
+                    _selectedIdB = null;
+                    _comparison = null;
+                  }),
+                  child: const Icon(Icons.close, color: Colors.white54, size: 18),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            _metricRow('Area', '${node.area.toStringAsFixed(1)} px²', Colors.white70),
+            _metricRow('Absence score', node.absenceScore.toStringAsFixed(2), Colors.white70),
+            _metricRow('Created frame', '${node.createdFrame}', Colors.white70),
+            _metricRow('Last seen frame', '${node.lastSeenFrame}', Colors.white70),
+            _metricRow('Hard-edge degree', '${node.neighborCount}', Colors.white70),
+            _metricRow('User locked', node.isUserLocked ? 'YES' : 'NO',
+                node.isUserLocked ? Colors.greenAccent : Colors.white70),
+            _metricRow('Duplicate debug', node.isDuplicateDebug ? 'ON' : 'OFF',
+                node.isDuplicateDebug ? Colors.redAccent : Colors.white70),
+            if (node.isDuplicateDebug) ...[
+              _metricRow('Partner node', '#${node.duplicatePartnerId}', Colors.redAccent),
+              _metricRow('Reasons', reasonText, Colors.redAccent),
+              _metricRow(
+                'Pos overlap',
+                '${(node.duplicatePositionalOverlap * 100).toStringAsFixed(1)}%',
+                _threshColor(
+                  node.duplicatePositionalOverlap,
+                  _duplicatePosOverlapThreshold,
+                  _duplicatePosOverlapThreshold * 0.5,
+                  lowerIsBetter: false,
+                ),
+              ),
+              _metricRow(
+                'Centroid IoU',
+                '${(node.duplicateCentroidIou * 100).toStringAsFixed(1)}%',
+                _threshColor(node.duplicateCentroidIou, _duplicateCentroidIouThreshold, 0.35,
+                    lowerIsBetter: false),
+              ),
+              _metricRow(
+                'BBox IoU',
+                '${(node.duplicateBboxIou * 100).toStringAsFixed(1)}%',
+                _threshColor(node.duplicateBboxIou, _duplicateBboxIouThreshold, 0.35,
+                    lowerIsBetter: false),
+              ),
+              _metricRow(
+                'Shape diff',
+                node.duplicateShapeDifference.toStringAsFixed(4),
+                _threshColor(node.duplicateShapeDifference, _duplicateShapeDifferenceThreshold, 0.45,
+                    lowerIsBetter: true),
+              ),
+            ],
           ],
         ),
       ),
@@ -678,9 +988,11 @@ class _EditCanvasScreenState extends State<EditCanvasScreen> {
 class _EditCanvasPainter extends CustomPainter {
   _EditCanvasPainter({
     required this.nodes,
+    required this.hardEdges,
     required this.canvasBounds,
     required this.selectedIdA,
     required this.selectedIdB,
+    this.highlightedDuplicatePartnerId,
     required this.movedIds,
     this.dragOverlapTargetId,
     this.maskImages = const {},
@@ -688,9 +1000,11 @@ class _EditCanvasPainter extends CustomPainter {
   });
 
   final List<GraphNodeInfo> nodes;
+  final List<GraphHardEdge> hardEdges;
   final Rect? canvasBounds;
   final int? selectedIdA;
   final int? selectedIdB;
+  final int? highlightedDuplicatePartnerId;
   final Set<int> movedIds;
   final int? dragOverlapTargetId;
   final Map<int, ui.Image> maskImages;
@@ -706,36 +1020,78 @@ class _EditCanvasPainter extends CustomPainter {
     if (canvasBounds == null || canvasBounds!.isEmpty || nodes.isEmpty) return;
 
     final transform = _CanvasTransform.fromBounds(canvasBounds!, size);
+    final nodeById = {for (final node in nodes) node.id: node};
 
-    final selectedStrokeA = Paint()
-      ..color = const Color(0xFF4488FF)
-      ..strokeWidth = 3.0
-      ..style = PaintingStyle.stroke;
-
-    final selectedStrokeB = Paint()
-      ..color = const Color(0xFFFF8844)
-      ..strokeWidth = 3.0
-      ..style = PaintingStyle.stroke;
-
-    final movedStroke = Paint()
-      ..color = const Color(0xFF88FF88)
+    final hardEdgePaint = Paint()
+      ..color = darkBackground
+          ? const Color(0x6696F0FF)
+          : const Color(0x88427B8A)
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke;
 
-    final overlapTargetStroke = Paint()
-      ..color = const Color(0xFFFF44FF)
+    final selectedHardEdgePaint = Paint()
+      ..color = const Color(0xFF00E5FF)
       ..strokeWidth = 2.5
       ..style = PaintingStyle.stroke;
 
+    final selectedStrokeA = Paint()
+      ..color = const Color(0xA04488FF)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+
+    final selectedStrokeB = Paint()
+      ..color = const Color(0xA0FF8844)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+
+    final movedStroke = Paint()
+      ..color = const Color(0x8088FF88)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final overlapTargetStroke = Paint()
+      ..color = const Color(0xA0FF44FF)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+
+    final duplicateStroke = Paint()
+      ..color = const Color(0xA0FF1744)
+      ..strokeWidth = 1.0
+      ..style = PaintingStyle.stroke;
+
+    final duplicatePartnerStroke = Paint()
+      ..color = const Color(0xA0FFFF00)
+      ..strokeWidth = 1.5
+      ..style = PaintingStyle.stroke;
+
     final centroidPaint = Paint()
-      ..color = const Color(0xFFFF0000)
+      ..color = const Color(0x80FF0000)
       ..style = PaintingStyle.fill;
 
     final centroidSelectedPaint = Paint()
-      ..color = const Color(0xFFFF4444)
+      ..color = const Color(0x80FF4444)
       ..style = PaintingStyle.fill;
 
     final textPainter = TextPainter(textDirection: TextDirection.ltr);
+
+    for (final edge in hardEdges) {
+      final first = nodeById[edge.firstNodeId];
+      final second = nodeById[edge.secondNodeId];
+      if (first == null || second == null) continue;
+
+      final linePaint = first.id == selectedIdA ||
+              first.id == selectedIdB ||
+              second.id == selectedIdA ||
+              second.id == selectedIdB
+          ? selectedHardEdgePaint
+          : hardEdgePaint;
+
+      canvas.drawLine(
+        transform.canvasToScreen(first.centroid),
+        transform.canvasToScreen(second.centroid),
+        linePaint,
+      );
+    }
 
     for (final node in nodes) {
       final screenCentroid = transform.canvasToScreen(node.centroid);
@@ -745,6 +1101,8 @@ class _EditCanvasPainter extends CustomPainter {
       final isSelected = isSelectedA || isSelectedB;
       final isMoved = movedIds.contains(node.id);
       final isOverlapTarget = node.id == dragOverlapTargetId;
+      final isDuplicateDebug = node.isDuplicateDebug;
+      final isDuplicatePartner = node.id == highlightedDuplicatePartnerId;
 
       // Render color image (enhanced color_pixels from C++)
       final maskImage = maskImages[node.id];
@@ -755,6 +1113,14 @@ class _EditCanvasPainter extends CustomPainter {
           maskImage.height.toDouble(),
         );
         canvas.drawImageRect(maskImage, src, screenBbox, Paint());
+      }
+
+      if (isDuplicateDebug) {
+        canvas.drawRect(screenBbox, duplicateStroke);
+      }
+
+      if (isDuplicatePartner) {
+        canvas.drawRect(screenBbox, duplicatePartnerStroke);
       }
 
       // Selection / overlap / moved stroke overlays
@@ -771,7 +1137,7 @@ class _EditCanvasPainter extends CustomPainter {
 
       canvas.drawCircle(
         screenCentroid,
-        isSelected ? 4.5 : 3.0,
+        isSelected ? 2.25 : 1.5,
         isSelected ? centroidSelectedPaint : centroidPaint,
       );
 
@@ -782,6 +1148,8 @@ class _EditCanvasPainter extends CustomPainter {
               ? const Color(0xFF4488FF)
               : isSelectedB
                   ? const Color(0xFFFF8844)
+                : isDuplicateDebug
+                  ? const Color(0xFFFF1744)
                   : darkBackground
                       ? const Color(0xFFFFFF00)
                       : const Color(0xFFCC8800),
@@ -791,15 +1159,32 @@ class _EditCanvasPainter extends CustomPainter {
       );
       textPainter.layout();
       textPainter.paint(canvas, screenCentroid + const Offset(5, -12));
+
+      if (isDuplicateDebug && node.duplicatePartnerId >= 0) {
+        textPainter.text = const TextSpan();
+        textPainter.text = TextSpan(
+          text: 'vs #${node.duplicatePartnerId}',
+          style: const TextStyle(
+            color: Color(0xFFFFFF00),
+            fontSize: 9,
+            fontWeight: FontWeight.w700,
+          ),
+        );
+        textPainter.layout();
+        textPainter.paint(canvas, screenCentroid + const Offset(5, 2));
+      }
     }
   }
 
   @override
   bool shouldRepaint(_EditCanvasPainter oldDelegate) {
     return oldDelegate.nodes != nodes ||
+      oldDelegate.hardEdges != hardEdges ||
         oldDelegate.canvasBounds != canvasBounds ||
         oldDelegate.selectedIdA != selectedIdA ||
         oldDelegate.selectedIdB != selectedIdB ||
+        oldDelegate.highlightedDuplicatePartnerId !=
+          highlightedDuplicatePartnerId ||
         oldDelegate.movedIds != movedIds ||
         oldDelegate.dragOverlapTargetId != dragOverlapTargetId ||
         oldDelegate.maskImages != maskImages ||
