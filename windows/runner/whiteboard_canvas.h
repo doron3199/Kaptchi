@@ -51,7 +51,7 @@ enum class NodeReplacementMode : int {
 // ---------------------------------------------------------------------------
 static constexpr float kAbsenceScoreInitial = 0.0f;
 static constexpr float kAbsenceScoreMax     = 20.0f;
-static constexpr float kAbsenceScoreSeenThreshold = 0.0f;
+static constexpr float kAbsenceScoreSeenThreshold = 1.0f;
 
 struct DrawingNode {
     int id = -1;
@@ -270,7 +270,7 @@ private:
     static constexpr float kMaxMotionFraction            = 0.05f;
     // Once a low-motion frame is accepted, the gate enters a lock state and stays there
     // until a later frame exceeds this motion fraction. The unlocking frame is also skipped.
-    static constexpr float kOpenMotionGateLockFraction   = 0.1f;
+    static constexpr float kOpenMotionGateLockFraction   = 0.09f;
     // Frame is downscaled to this long-edge size before computing motion. Smaller = faster.
     static const int       kMotionLongEdge               = 256;
     // Pixel absolute-difference value above which a pixel is counted as "changed" for motion.
@@ -298,7 +298,7 @@ private:
     static const int       kBinarizeMinBlobArea          = 3;
     // Morphological dilation kernel size (NxN). Larger = wider strokes and more connected blobs.
     // Raise to join nearby strokes into one blob. Lower to keep strokes thin and separate.
-    static const int       kDilationKernelSize           = 3;
+    static const int       kDilationKernelSize           = 11;
 
     // --- Blob extraction ---
     // Connected components smaller than this (px²) are discarded as noise.
@@ -318,7 +318,7 @@ private:
     static constexpr bool  kEnableFrameStrokeRejectFilter = true;
     // Blobs wider than this (px) bypass the frame-stroke reject filter.
     // Large blobs (e.g. full diagram) should not be discarded just because they touch the border.
-    static constexpr int   kFrameStrokeRejectMinWidth     = 100000000;
+    static constexpr int   kFrameStrokeRejectMinWidth     = 300;
 
     // --- Matching (3-step pipeline) ---
     // Radius (px) for shape matching (step 2) after rough offset is applied.
@@ -364,17 +364,29 @@ private:
     // Radius (px, canvas coords) to search for duplicate candidates around each new node's centroid.
     // Raise if near-duplicate nodes from nearby positions are not being caught.
     static constexpr float kMergeSearchRadiusPx          = 60.0f;
-    // Positional overlap ratio (overlap / min_area) above which a new blob is treated as a
-    // duplicate without centroid alignment. Lower = more aggressive deduplication.
+    // Positional overlap ratio (overlap / min_area) above which an overlapping duplicate
+    // may replace the existing node without centroid alignment.
     static constexpr float kDuplicatePosOverlapThreshold = 0.70f;
     // Centroid-aligned mask IoU threshold above which a new blob is treated as a duplicate after
     // aligning centroids. Lower = more aggressive deduplication.
-    static constexpr float kDuplicateCentroidIouThreshold = 0.90f;
+    static constexpr float kDuplicateCentroidIouThreshold = 0.80f;
     // Original-position bbox IoU threshold above which two shapes are treated as duplicates.
-    static constexpr float kDuplicateBboxIouThreshold  = 0.90f;
+    static constexpr float kDuplicateBboxIouThreshold  = 0.70f;
     // Total-shape differentness threshold below which two shapes are treated as duplicates, as
     // long as they were not created in the same frame.
-    static constexpr float kDuplicateMaxShapeDifference = 0.001f;
+    static constexpr float kDuplicateMaxShapeDifference = 0.2f;
+    // Sweep-only merge gate: current black-mask positional overlap over min-area must exceed this
+    // before the expensive sliding-window IoU search runs.
+    static constexpr float kSweepMergePosOverlapThreshold = 0.10f;
+    // Sweep-only merge gate: best sliding-window IoU over thresholded black masks must exceed this
+    // before two nodes are replaced by a fresh merged node. Lower-or-equal matches fall back to
+    // the existing duplicate-delete behavior when positional overlap is high enough.
+    static constexpr float kSweepMergeSlidingIouThreshold = 0.59f;
+    // Wide-node sweep filter: if either node is at least this wide, use overlap over the smaller
+    // node's black-pixel count instead of IoU for the sliding-window merge/delete decision.
+    static const int       kSweepMergeWideNodeWidthThreshold = 300;
+    // Maximum absolute translation (px per axis) scanned by the expensive sweep-only merge search.
+    static const int       kSweepMergeMaxSlidePx        = 120;
     // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
     // that were admitted earlier or drifted together after later updates.
     static const int       kGraphDedupeIntervalFrames   = 1;
@@ -389,7 +401,7 @@ private:
     // A node is only absence-penalised if a matched node exists within this radius (canvas px).
     // This acts as a "visibility proxy": we only penalise what we can actually see.
     // Raise if nodes far from current strokes are decaying too fast.
-    static constexpr float kAbsenceNearbyRadius          = 40.0f;
+    static constexpr float kAbsenceNearbyRadius          = 100.0f;
     // Minimum fraction of a projected node bbox that must overlap the observable region
     // (the inset frame) before the node is considered plausibly visible for absence decay.
     static constexpr float kAbsenceVisibleFractionMin    = 1.0f;

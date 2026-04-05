@@ -32,6 +32,7 @@
 #include <array>
 #include <cmath>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -611,6 +612,27 @@ struct DuplicateCheckResult {
     int reason_mask = 0;
     bool same_creation_frame = false;
     bool is_duplicate = false;
+};
+
+struct SlidingMaskIouResult {
+    bool  valid = false;
+    float best_iou = 0.0f;
+    float best_overlap_over_min = 0.0f;
+    int   best_dx = 0;
+    int   best_dy = 0;
+};
+
+struct SweepMergeCandidate {
+    int   anchor_id = -1;
+    int   partner_id = -1;
+    bool  merge_nodes = false;
+    bool  used_overlap_over_min = false;
+    float decision_score = 0.0f;
+    float best_iou = 0.0f;
+    float positional_overlap = 0.0f;
+    float bbox_iou = 0.0f;
+    int   best_dx = 0;
+    int   best_dy = 0;
 };
 
 static void RemoveHardEdges(WhiteboardGroup& group, int node_id);
@@ -1210,6 +1232,337 @@ static int SelectDuplicateWinnerId(const DrawingNode& first, const DrawingNode& 
     return first.id < second.id ? first.id : second.id;
 }
 
+static cv::Mat BuildThresholdedBlackMask(const DrawingNode& node) {
+    if (node.binary_mask.empty() || node.binary_mask.type() != CV_8UC1) return {};
+    if (node.color_pixels.empty() || node.color_pixels.size() != node.binary_mask.size()) {
+        return node.binary_mask.clone();
+    }
+
+    cv::Mat gray;
+    if (node.color_pixels.type() == CV_8UC1) {
+        gray = node.color_pixels.clone();
+    } else if (node.color_pixels.type() == CV_8UC3) {
+        cv::cvtColor(node.color_pixels, gray, cv::COLOR_BGR2GRAY);
+    } else if (node.color_pixels.type() == CV_8UC4) {
+        cv::cvtColor(node.color_pixels, gray, cv::COLOR_BGRA2GRAY);
+    } else {
+        return node.binary_mask.clone();
+    }
+
+    cv::Mat black_only;
+    cv::threshold(gray, black_only, 128.0, 255.0, cv::THRESH_BINARY_INV);
+    cv::bitwise_and(black_only, node.binary_mask, black_only);
+    return black_only;
+}
+
+static uint64_t BuildNodePairKey(int first_id, int second_id) {
+    if (first_id > second_id) std::swap(first_id, second_id);
+    return ((uint64_t)(uint32_t)first_id << 32) | (uint32_t)second_id;
+}
+
+static bool IsBetterSweepMergeCandidate(const SweepMergeCandidate& candidate,
+                                        const SweepMergeCandidate& current_best) {
+    constexpr float kSweepMergeCompareEpsilon = 1e-6f;
+    if (candidate.decision_score > current_best.decision_score + kSweepMergeCompareEpsilon) {
+        return true;
+    }
+    if (candidate.decision_score + kSweepMergeCompareEpsilon < current_best.decision_score) {
+        return false;
+    }
+    if (candidate.best_iou > current_best.best_iou + kSweepMergeCompareEpsilon) return true;
+    if (candidate.best_iou + kSweepMergeCompareEpsilon < current_best.best_iou) return false;
+    if (candidate.positional_overlap >
+        current_best.positional_overlap + kSweepMergeCompareEpsilon) {
+        return true;
+    }
+    if (candidate.positional_overlap + kSweepMergeCompareEpsilon <
+        current_best.positional_overlap) {
+        return false;
+    }
+    if (candidate.bbox_iou > current_best.bbox_iou + kSweepMergeCompareEpsilon) return true;
+    if (candidate.bbox_iou + kSweepMergeCompareEpsilon < current_best.bbox_iou) return false;
+
+    const int candidate_first = std::min(candidate.anchor_id, candidate.partner_id);
+    const int candidate_second = std::max(candidate.anchor_id, candidate.partner_id);
+    const int best_first = std::min(current_best.anchor_id, current_best.partner_id);
+    const int best_second = std::max(current_best.anchor_id, current_best.partner_id);
+    if (candidate_first != best_first) return candidate_first < best_first;
+    return candidate_second < best_second;
+}
+
+static SlidingMaskIouResult ComputeBestSlidingMaskIou(const cv::Rect& first_bbox,
+                                                      const cv::Mat& first_mask,
+                                                      const cv::Rect& second_bbox,
+                                                      const cv::Mat& second_mask,
+                                                      int max_slide_px) {
+    SlidingMaskIouResult result;
+    if (first_bbox.width <= 0 || first_bbox.height <= 0 ||
+        second_bbox.width <= 0 || second_bbox.height <= 0) {
+        return result;
+    }
+    if (first_mask.empty() || second_mask.empty() ||
+        first_mask.type() != CV_8UC1 || second_mask.type() != CV_8UC1) {
+        return result;
+    }
+    if (first_mask.cols != first_bbox.width || first_mask.rows != first_bbox.height ||
+        second_mask.cols != second_bbox.width || second_mask.rows != second_bbox.height) {
+        return result;
+    }
+
+    const int first_px = cv::countNonZero(first_mask);
+    const int second_px = cv::countNonZero(second_mask);
+    if (first_px <= 0 || second_px <= 0) return result;
+
+    int min_dx = first_bbox.x - second_bbox.x - second_bbox.width + 1;
+    int max_dx = first_bbox.x + first_bbox.width - second_bbox.x - 1;
+    int min_dy = first_bbox.y - second_bbox.y - second_bbox.height + 1;
+    int max_dy = first_bbox.y + first_bbox.height - second_bbox.y - 1;
+
+    min_dx = std::max(min_dx, -max_slide_px);
+    max_dx = std::min(max_dx, max_slide_px);
+    min_dy = std::max(min_dy, -max_slide_px);
+    max_dy = std::min(max_dy, max_slide_px);
+    if (min_dx > max_dx || min_dy > max_dy) return result;
+
+    int best_move_dist2 = std::numeric_limits<int>::max();
+    for (int dy = min_dy; dy <= max_dy; dy++) {
+        for (int dx = min_dx; dx <= max_dx; dx++) {
+            const cv::Rect shifted_second(second_bbox.x + dx,
+                                          second_bbox.y + dy,
+                                          second_bbox.width,
+                                          second_bbox.height);
+            const cv::Rect isect = first_bbox & shifted_second;
+            if (isect.width <= 0 || isect.height <= 0) continue;
+
+            const cv::Rect first_local(isect.x - first_bbox.x,
+                                       isect.y - first_bbox.y,
+                                       isect.width,
+                                       isect.height);
+            const cv::Rect second_local(isect.x - shifted_second.x,
+                                        isect.y - shifted_second.y,
+                                        isect.width,
+                                        isect.height);
+            if (first_local.x < 0 || first_local.y < 0 ||
+                first_local.x + first_local.width > first_mask.cols ||
+                first_local.y + first_local.height > first_mask.rows ||
+                second_local.x < 0 || second_local.y < 0 ||
+                second_local.x + second_local.width > second_mask.cols ||
+                second_local.y + second_local.height > second_mask.rows) {
+                continue;
+            }
+
+            cv::Mat overlap;
+            cv::bitwise_and(first_mask(first_local), second_mask(second_local), overlap);
+            const int overlap_px = cv::countNonZero(overlap);
+            const int union_px = first_px + second_px - overlap_px;
+            const float iou = (float)overlap_px / (float)std::max(1, union_px);
+            const float overlap_over_min =
+                (float)overlap_px / (float)std::max(1, std::min(first_px, second_px));
+            const int move_dist2 = dx * dx + dy * dy;
+
+            const bool better = !result.valid ||
+                iou > result.best_iou + 1e-6f ||
+                (std::abs(iou - result.best_iou) <= 1e-6f &&
+                 overlap_over_min > result.best_overlap_over_min + 1e-6f) ||
+                (std::abs(iou - result.best_iou) <= 1e-6f &&
+                 std::abs(overlap_over_min - result.best_overlap_over_min) <= 1e-6f &&
+                 move_dist2 < best_move_dist2);
+            if (!better) continue;
+
+            result.valid = true;
+            result.best_iou = iou;
+            result.best_overlap_over_min = overlap_over_min;
+            result.best_dx = dx;
+            result.best_dy = dy;
+            best_move_dist2 = move_dist2;
+        }
+    }
+
+    return result;
+}
+
+static void CompositeNodeIntoMergedPatch(cv::Mat& merged_mask,
+                                         cv::Mat& merged_color,
+                                         const cv::Rect& merged_bbox,
+                                         const cv::Rect& node_bbox,
+                                         const cv::Mat& node_mask,
+                                         const cv::Mat& node_color) {
+    if (merged_mask.empty() || merged_color.empty() || node_mask.empty() ||
+        node_mask.type() != CV_8UC1 || node_bbox.width <= 0 || node_bbox.height <= 0 ||
+        node_mask.cols != node_bbox.width || node_mask.rows != node_bbox.height) {
+        return;
+    }
+
+    const bool has_color = !node_color.empty() &&
+                           node_color.type() == CV_8UC3 &&
+                           node_color.size() == node_mask.size();
+    const cv::Rect dst(node_bbox.x - merged_bbox.x,
+                       node_bbox.y - merged_bbox.y,
+                       node_bbox.width,
+                       node_bbox.height);
+    const cv::Rect clip = dst & cv::Rect(0, 0, merged_mask.cols, merged_mask.rows);
+    if (clip.width <= 0 || clip.height <= 0) return;
+
+    const cv::Rect src(clip.x - dst.x, clip.y - dst.y, clip.width, clip.height);
+    cv::Mat dst_mask_roi = merged_mask(clip);
+    for (int y = 0; y < clip.height; y++) {
+        const uint8_t* src_mask_row = node_mask.ptr<uint8_t>(src.y + y) + src.x;
+        uint8_t* dst_mask_row = dst_mask_roi.ptr<uint8_t>(y);
+        cv::Vec3b* dst_color_row = merged_color.ptr<cv::Vec3b>(clip.y + y) + clip.x;
+        const cv::Vec3b* src_color_row = has_color
+            ? node_color.ptr<cv::Vec3b>(src.y + y) + src.x
+            : nullptr;
+        for (int x = 0; x < clip.width; x++) {
+            if (!src_mask_row[x]) continue;
+            const cv::Vec3b src_pixel = src_color_row
+                ? src_color_row[x]
+                : cv::Vec3b(0, 0, 0);
+            if (!dst_mask_row[x]) {
+                dst_color_row[x] = src_pixel;
+            } else {
+                dst_color_row[x][0] = (uint8_t)std::min((int)dst_color_row[x][0], (int)src_pixel[0]);
+                dst_color_row[x][1] = (uint8_t)std::min((int)dst_color_row[x][1], (int)src_pixel[1]);
+                dst_color_row[x][2] = (uint8_t)std::min((int)dst_color_row[x][2], (int)src_pixel[2]);
+            }
+            dst_mask_row[x] = 255;
+        }
+    }
+}
+
+static bool BuildMergedBlobFromNodes(const DrawingNode& first,
+                                     const DrawingNode& second,
+                                     int second_dx,
+                                     int second_dy,
+                                     FrameBlob& merged_blob) {
+    if (first.binary_mask.empty() || second.binary_mask.empty()) return false;
+    if (first.binary_mask.cols != first.bbox_canvas.width ||
+        first.binary_mask.rows != first.bbox_canvas.height ||
+        second.binary_mask.cols != second.bbox_canvas.width ||
+        second.binary_mask.rows != second.bbox_canvas.height) {
+        return false;
+    }
+
+    const cv::Rect shifted_second(second.bbox_canvas.x + second_dx,
+                                  second.bbox_canvas.y + second_dy,
+                                  second.bbox_canvas.width,
+                                  second.bbox_canvas.height);
+    const cv::Rect merged_bbox = first.bbox_canvas | shifted_second;
+    if (merged_bbox.width <= 0 || merged_bbox.height <= 0) return false;
+
+    cv::Mat merged_mask = cv::Mat::zeros(merged_bbox.size(), CV_8UC1);
+    cv::Mat merged_color(merged_bbox.size(), CV_8UC3, cv::Scalar(255, 255, 255));
+    CompositeNodeIntoMergedPatch(
+        merged_mask, merged_color, merged_bbox,
+        first.bbox_canvas, first.binary_mask, first.color_pixels);
+    CompositeNodeIntoMergedPatch(
+        merged_mask, merged_color, merged_bbox,
+        shifted_second, second.binary_mask, second.color_pixels);
+
+    if (cv::countNonZero(merged_mask) <= 0) return false;
+
+    merged_blob = FrameBlob{};
+    merged_blob.bbox = merged_bbox;
+    merged_blob.binary_mask = merged_mask;
+    merged_blob.color_pixels = merged_color;
+    merged_blob.contour = ExtractLargestContour(merged_mask);
+    const cv::Point2f local_centroid = ComputeGravityCenter(merged_mask);
+    merged_blob.centroid = local_centroid +
+                           cv::Point2f((float)merged_bbox.x, (float)merged_bbox.y);
+    merged_blob.area = merged_blob.contour.size() >= 3
+        ? std::abs(cv::contourArea(merged_blob.contour))
+        : (double)cv::countNonZero(merged_mask);
+
+    if (!ComputeHuFromMask(merged_mask, merged_blob.hu) && merged_blob.contour.size() >= 3) {
+        const cv::Moments moments = cv::moments(merged_blob.contour);
+        if (std::abs(moments.m00) > 1e-6) {
+            cv::HuMoments(moments, merged_blob.hu);
+        }
+    }
+    return true;
+}
+
+static void InheritHardEdgesForMergedNode(WhiteboardGroup& group,
+                                          int merged_id,
+                                          int first_id,
+                                          int second_id) {
+    for (int parent_id : {first_id, second_id}) {
+        auto it = group.hard_edges.find(parent_id);
+        if (it == group.hard_edges.end()) continue;
+        for (int neighbor_id : it->second) {
+            if (neighbor_id == merged_id || neighbor_id == first_id || neighbor_id == second_id) {
+                continue;
+            }
+            AddHardEdge(group, merged_id, neighbor_id);
+        }
+    }
+}
+
+static DuplicateCheckResult BuildSweepMergeDebugCheck(const DrawingNode& first,
+                                                      const DrawingNode& second,
+                                                      const SweepMergeCandidate& candidate) {
+    DuplicateCheckResult result;
+    result.positional_overlap = candidate.positional_overlap;
+    result.centroid_iou = candidate.best_iou;
+    result.bbox_iou = candidate.bbox_iou;
+    result.same_creation_frame = first.created_frame == second.created_frame;
+    result.reason_mask = 0;
+    if (candidate.positional_overlap > 0.0f) {
+        result.reason_mask |= kDuplicateReasonPositionalOverlap;
+    }
+    if (candidate.best_iou > 0.0f) {
+        result.reason_mask |= kDuplicateReasonCentroidIou;
+    }
+    result.is_duplicate = result.reason_mask != 0;
+    return result;
+}
+
+static bool MergeNodePairIntoFreshNode(WhiteboardGroup& group,
+                                       int first_id,
+                                       int second_id,
+                                       int second_dx,
+                                       int second_dy,
+                                       int current_frame) {
+    auto first_it = group.nodes.find(first_id);
+    auto second_it = group.nodes.find(second_id);
+    if (first_it == group.nodes.end() || second_it == group.nodes.end()) return false;
+
+    DrawingNode& first = *first_it->second;
+    DrawingNode& second = *second_it->second;
+    if (IsGhostNode(first) || IsGhostNode(second)) return false;
+
+    FrameBlob merged_blob;
+    if (!BuildMergedBlobFromNodes(first, second, second_dx, second_dy, merged_blob)) {
+        return false;
+    }
+
+    DrawingNode* merged_node = AddNodeFromBlob(
+        group,
+        merged_blob,
+        merged_blob.centroid,
+        merged_blob.bbox,
+        current_frame);
+    if (!merged_node) return false;
+
+    merged_node->user_locked = first.user_locked || second.user_locked;
+    merged_node->absence_score = std::max(first.absence_score, second.absence_score);
+    merged_node->has_crossed_absence_seen_threshold =
+        first.has_crossed_absence_seen_threshold ||
+        second.has_crossed_absence_seen_threshold;
+    merged_node->last_seen_frame = std::max(first.last_seen_frame, second.last_seen_frame);
+    merged_node->created_frame = std::min(first.created_frame, second.created_frame);
+    merged_node->match_count = std::max(first.match_count, second.match_count);
+    ClearDuplicateDebugInfo(*merged_node);
+
+    InheritHardEdgesForMergedNode(group, merged_node->id, first_id, second_id);
+    RemoveHardEdges(group, first_id);
+    RemoveHardEdges(group, second_id);
+    group.spatial_index.Remove(first_id, first.centroid_canvas);
+    group.spatial_index.Remove(second_id, second.centroid_canvas);
+    group.nodes.erase(first_id);
+    group.nodes.erase(second_id);
+    return true;
+}
+
 static bool SweepGraphDuplicates(WhiteboardGroup& group,
                                  int current_frame,
                                  int dedupe_interval_frames,
@@ -1218,7 +1571,15 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
                                  float duplicate_pos_overlap_threshold,
                                  float duplicate_centroid_iou_threshold,
                                  float duplicate_bbox_iou_threshold,
-                                 float duplicate_max_shape_difference) {
+                                 float duplicate_max_shape_difference,
+                                 float sweep_merge_pos_overlap_threshold,
+                                 float sweep_merge_sliding_iou_threshold,
+                                 int sweep_merge_wide_node_width_threshold,
+                                 int sweep_merge_max_slide_px) {
+    (void)duplicate_pos_overlap_threshold;
+    (void)duplicate_centroid_iou_threshold;
+    (void)duplicate_bbox_iou_threshold;
+    (void)duplicate_max_shape_difference;
     if (dedupe_interval_frames <= 0 || ((current_frame + 1) % dedupe_interval_frames) != 0) {
         return false;
     }
@@ -1231,73 +1592,167 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
     }
     std::sort(node_ids.begin(), node_ids.end());
 
-    std::unordered_set<int> removed_ids;
-    bool changed = false;
-
+    std::unordered_map<int, cv::Mat> black_masks;
+    black_masks.reserve(node_ids.size());
     for (int nid : node_ids) {
-        if (removed_ids.count(nid) || group.user_deleted_ids.count(nid)) continue;
+        auto it = group.nodes.find(nid);
+        if (it == group.nodes.end()) continue;
+        black_masks.emplace(nid, BuildThresholdedBlackMask(*it->second));
+    }
+
+    std::unordered_map<uint64_t, SweepMergeCandidate> pair_candidates;
+    for (int nid : node_ids) {
+        if (group.user_deleted_ids.count(nid)) continue;
         auto it = group.nodes.find(nid);
         if (it == group.nodes.end()) continue;
 
         const DrawingNode& node = *it->second;
         if (IsGhostNode(node)) continue;
+        const auto mask_it = black_masks.find(nid);
+        if (mask_it == black_masks.end() || mask_it->second.empty()) continue;
+
         const float search_r = std::max({(float)node.bbox_canvas.width,
                                          (float)node.bbox_canvas.height,
                                          merge_search_radius_px});
         const auto nearby = group.spatial_index.QueryRadius(node.centroid_canvas, search_r);
 
+        bool has_best_for_node = false;
+        SweepMergeCandidate best_for_node;
         for (int other_id : nearby) {
-            if (other_id == nid || other_id < nid) continue;
-            if (removed_ids.count(other_id) || group.user_deleted_ids.count(other_id)) continue;
-
+            if (other_id == nid || group.user_deleted_ids.count(other_id)) continue;
             auto other_it = group.nodes.find(other_id);
             if (other_it == group.nodes.end()) continue;
 
             const DrawingNode& other = *other_it->second;
-            if (IsGhostNode(other)) continue;
-            const DuplicateCandidateView node_candidate{
-                node.bbox_canvas, &node.binary_mask, &node.contour, node.centroid_canvas, node.hu,
-                node.created_frame};
-            const DuplicateCandidateView other_candidate{
-                other.bbox_canvas, &other.binary_mask, &other.contour, other.centroid_canvas, other.hu,
-                other.created_frame};
-            const DuplicateCheckResult duplicate_check = EvaluateDuplicateCandidate(
-                node_candidate,
-                other_candidate,
-                duplicate_pos_overlap_threshold,
-                duplicate_centroid_iou_threshold,
-                duplicate_bbox_iou_threshold,
-                duplicate_max_shape_difference);
-            const DuplicateCheckResult filtered_duplicate_check =
-                SuppressDuplicateForHardEdge(group, nid, other_id, duplicate_check);
-            if (!filtered_duplicate_check.is_duplicate) {
+            if (IsGhostNode(other) || HasHardEdgeBetween(group, nid, other_id)) continue;
+
+            const auto other_mask_it = black_masks.find(other_id);
+            if (other_mask_it == black_masks.end() || other_mask_it->second.empty()) continue;
+
+            const MaskRelation positional_relation = ComputeMaskRelation(
+                node.bbox_canvas, mask_it->second, node.centroid_canvas,
+                other.bbox_canvas, other_mask_it->second, other.centroid_canvas);
+            if (!positional_relation.valid ||
+                positional_relation.overlap_over_min <= sweep_merge_pos_overlap_threshold) {
                 continue;
             }
 
-            const int keep_id = SelectDuplicateWinnerId(node, other);
-            const int remove_id = keep_id == nid ? other_id : nid;
-            if (duplicate_debug_mode) {
-                auto remove_it = group.nodes.find(remove_id);
-                if (remove_it != group.nodes.end()) {
-                    changed = ConvertNodeToGhost(
-                        group, *remove_it->second, keep_id, filtered_duplicate_check) || changed;
-                }
-                if (remove_id == nid) break;
+            const SlidingMaskIouResult sliding = ComputeBestSlidingMaskIou(
+                node.bbox_canvas,
+                mask_it->second,
+                other.bbox_canvas,
+                other_mask_it->second,
+                sweep_merge_max_slide_px);
+            if (!sliding.valid) {
                 continue;
             }
-            TransferHardEdges(group, keep_id, remove_id);
-            removed_ids.insert(remove_id);
-            changed = true;
-            if (remove_id == nid) break;
+
+            const bool use_overlap_over_min =
+                node.bbox_canvas.width >= sweep_merge_wide_node_width_threshold ||
+                other.bbox_canvas.width >= sweep_merge_wide_node_width_threshold;
+            const float decision_score = use_overlap_over_min
+                ? sliding.best_overlap_over_min
+                : sliding.best_iou;
+
+            SweepMergeCandidate candidate;
+            candidate.anchor_id = nid;
+            candidate.partner_id = other_id;
+            candidate.merge_nodes = decision_score > sweep_merge_sliding_iou_threshold;
+            candidate.used_overlap_over_min = use_overlap_over_min;
+            candidate.decision_score = decision_score;
+            candidate.best_iou = sliding.best_iou;
+            candidate.positional_overlap = positional_relation.overlap_over_min;
+            candidate.bbox_iou = ComputeBboxIou(node.bbox_canvas, other.bbox_canvas);
+            candidate.best_dx = sliding.best_dx;
+            candidate.best_dy = sliding.best_dy;
+            if (!has_best_for_node || IsBetterSweepMergeCandidate(candidate, best_for_node)) {
+                best_for_node = candidate;
+                has_best_for_node = true;
+            }
+        }
+
+        if (!has_best_for_node) continue;
+        const uint64_t pair_key = BuildNodePairKey(best_for_node.anchor_id, best_for_node.partner_id);
+        auto pair_it = pair_candidates.find(pair_key);
+        if (pair_it == pair_candidates.end() ||
+            IsBetterSweepMergeCandidate(best_for_node, pair_it->second)) {
+            pair_candidates[pair_key] = best_for_node;
         }
     }
 
-    for (int remove_id : removed_ids) {
-        RemoveHardEdges(group, remove_id);
-        auto remove_it = group.nodes.find(remove_id);
-        if (remove_it == group.nodes.end()) continue;
-        group.spatial_index.Remove(remove_id, remove_it->second->centroid_canvas);
-        group.nodes.erase(remove_it);
+    if (pair_candidates.empty()) return false;
+
+    std::vector<SweepMergeCandidate> ordered_candidates;
+    ordered_candidates.reserve(pair_candidates.size());
+    for (const auto& [pair_key, candidate] : pair_candidates) {
+        (void)pair_key;
+        ordered_candidates.push_back(candidate);
+    }
+    std::sort(ordered_candidates.begin(), ordered_candidates.end(),
+              [](const SweepMergeCandidate& first, const SweepMergeCandidate& second) {
+                  return IsBetterSweepMergeCandidate(first, second);
+              });
+
+    std::unordered_set<int> consumed_ids;
+    bool changed = false;
+
+    for (const SweepMergeCandidate& candidate : ordered_candidates) {
+        if (consumed_ids.count(candidate.anchor_id) || consumed_ids.count(candidate.partner_id)) {
+            continue;
+        }
+        auto first_it = group.nodes.find(candidate.anchor_id);
+        auto second_it = group.nodes.find(candidate.partner_id);
+        if (first_it == group.nodes.end() || second_it == group.nodes.end()) continue;
+
+        const DrawingNode& first = *first_it->second;
+        const DrawingNode& second = *second_it->second;
+        if (IsGhostNode(first) || IsGhostNode(second) ||
+            HasHardEdgeBetween(group, candidate.anchor_id, candidate.partner_id)) {
+            continue;
+        }
+
+        if (duplicate_debug_mode) {
+            const int keep_id = SelectDuplicateWinnerId(first, second);
+            const int remove_id = keep_id == candidate.anchor_id
+                ? candidate.partner_id
+                : candidate.anchor_id;
+            auto remove_it = group.nodes.find(remove_id);
+            if (remove_it != group.nodes.end()) {
+                const DuplicateCheckResult debug_check =
+                    BuildSweepMergeDebugCheck(first, second, candidate);
+                changed = ConvertNodeToGhost(
+                    group, *remove_it->second, keep_id, debug_check) || changed;
+                consumed_ids.insert(candidate.anchor_id);
+                consumed_ids.insert(candidate.partner_id);
+            }
+            continue;
+        }
+
+        if (candidate.merge_nodes) {
+            if (!MergeNodePairIntoFreshNode(group,
+                                            candidate.anchor_id,
+                                            candidate.partner_id,
+                                            candidate.best_dx,
+                                            candidate.best_dy,
+                                            current_frame)) {
+                continue;
+            }
+        } else {
+            const int keep_id = SelectDuplicateWinnerId(first, second);
+            const int remove_id = keep_id == candidate.anchor_id
+                ? candidate.partner_id
+                : candidate.anchor_id;
+            TransferHardEdges(group, keep_id, remove_id);
+            RemoveHardEdges(group, remove_id);
+            auto remove_it = group.nodes.find(remove_id);
+            if (remove_it == group.nodes.end()) continue;
+            group.spatial_index.Remove(remove_id, remove_it->second->centroid_canvas);
+            group.nodes.erase(remove_it);
+        }
+
+        consumed_ids.insert(candidate.anchor_id);
+        consumed_ids.insert(candidate.partner_id);
+        changed = true;
     }
     return changed;
 }
@@ -2337,9 +2792,14 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                     new_node_ids.push_back(id_before);
             }
         }
-        // Create hard edges between new nodes from this frame within distance threshold
-        if (new_node_ids.size() >= 2 &&
-            CreateHardEdgesForFrame(group, new_node_ids,
+        // Extend same-frame hard-edge creation to include matched existing nodes
+        // and brand-new inserted nodes from this update.
+        std::vector<int> same_frame_node_ids = seen_node_list;
+        same_frame_node_ids.insert(same_frame_node_ids.end(),
+                                   new_node_ids.begin(),
+                                   new_node_ids.end());
+        if (same_frame_node_ids.size() >= 2 &&
+            CreateHardEdgesForFrame(group, same_frame_node_ids,
                                     kHardEdgeMaxCentroidDist)) {
             graph_changed = true;
         }
@@ -2352,7 +2812,11 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                              kDuplicatePosOverlapThreshold,
                              kDuplicateCentroidIouThreshold,
                              kDuplicateBboxIouThreshold,
-                             kDuplicateMaxShapeDifference)) {
+                             kDuplicateMaxShapeDifference,
+                             kSweepMergePosOverlapThreshold,
+                             kSweepMergeSlidingIouThreshold,
+                             kSweepMergeWideNodeWidthThreshold,
+                             kSweepMergeMaxSlidePx)) {
         graph_changed = true;
     }
 
