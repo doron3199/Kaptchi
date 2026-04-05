@@ -290,7 +290,7 @@ private:
     // --- Binarization ---
     // Adaptive Gaussian threshold block size (must be odd). Larger = smoother, more tolerant of
     // uneven lighting. Smaller = sharper boundary but more noise.
-    static const int       kBinarizeBlockSize            = 25;
+    static const int       kBinarizeBlockSize            = 51;
     // Constant subtracted from the adaptive threshold mean. Higher = only high-contrast marks
     // are binarized. Lower = thicker strokes captured (more sensitive).
     static const int       kBinarizeOffset               = 4;
