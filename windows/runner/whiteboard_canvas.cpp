@@ -50,6 +50,7 @@ namespace {
 using SteadyClock = std::chrono::steady_clock;
 
 static constexpr int kEnhancePadding = 10;
+static constexpr float kWhiteboardSideCropFraction = 0.03f;
 
 static void EnhanceFrameBlobs(std::vector<FrameBlob>& blobs,
                                const cv::Mat& frame_bgr, float threshold) {
@@ -184,13 +185,16 @@ static bool GetRenderBoundsForMode(const WhiteboardGroup& g, CanvasRenderMode m,
     return mxx > mnx && mxy > mny;
 }
 
-static cv::Rect ComputeProcessingRoi(const cv::Size& sz) {
+static cv::Rect BuildHorizontalCropRect(const cv::Size& sz) {
     if (sz.width <= 0 || sz.height <= 0) return {};
-    int top   = sz.height / 20;
-    int left  = sz.width  / 20;
-    int bot   = std::max(top + 1, sz.height - top);
-    int right = std::max(left + 1, sz.width  - left);
-    return cv::Rect(left, top, right - left, bot - top);
+    const int side_crop = std::max(0, (int)std::lround(sz.width * kWhiteboardSideCropFraction));
+    const int left = std::min(side_crop, std::max(0, sz.width - 1));
+    const int right = std::max(left + 1, sz.width - side_crop);
+    return cv::Rect(left, 0, right - left, sz.height);
+}
+
+static cv::Rect ComputeProcessingRoi(const cv::Size& sz) {
+    return BuildHorizontalCropRect(sz);
 }
 
 static cv::Mat CropPersonMaskForProcessing(const cv::Mat& mask, const cv::Rect& roi) {
@@ -217,9 +221,7 @@ static cv::Rect ComputeMaskBoundingRect(const cv::Mat& mask) {
 }
 
 static cv::Rect BuildCroppedFrameRect(int fw, int fh) {
-    int ct = (int)(fh * 0.15), cb = fh - (int)(fh * 0.95);
-    int cl = (int)(fw * 0.05), cr = fw - (int)(fw * 0.95);
-    return cv::Rect(cl, ct, std::max(1, fw - cl - cr), std::max(1, fh - ct - cb));
+    return BuildHorizontalCropRect(cv::Size(fw, fh));
 }
 
 static cv::Rect ExpandRectWithinFrame(const cv::Rect& r, const cv::Size& fs, int px, int py) {

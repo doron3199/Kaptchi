@@ -298,7 +298,7 @@ private:
     static constexpr bool  kEnableFrameStrokeRejectFilter = true;
     // Blobs wider than this (px) bypass the frame-stroke reject filter.
     // Large blobs (e.g. full diagram) should not be discarded just because they touch the border.
-    static constexpr int   kFrameStrokeRejectMinWidth     = 300;
+    static constexpr int   kFrameStrokeRejectMinWidth     = 30000;
 
     // --- Matching (3-step pipeline) ---
     // Radius (px) for shape matching (step 2) after rough offset is applied.
