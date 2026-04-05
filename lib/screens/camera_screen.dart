@@ -107,6 +107,7 @@ class _CameraScreenState extends State<CameraScreen>
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
+  bool _isHighWhiteboardSensitivity = false;
   double? _canvasAspectRatio; // null = use default 16:9
   Timer? _canvasPollTimer;
   // Notifier for canvas navigation state — updated by the poll timer without
@@ -182,6 +183,16 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasNavNotifier.value = (count: 0, active: 0);
   }
 
+  void _toggleWhiteboardSensitivity() {
+    final newHighSensitivity = !_isHighWhiteboardSensitivity;
+    NativeCameraService().setAbsenceScoreSeenThreshold(
+      newHighSensitivity ? 0.0 : 1.0,
+    );
+    setState(() {
+      _isHighWhiteboardSensitivity = newHighSensitivity;
+    });
+  }
+
   Future<void> _loadPdfPath() async {
     final initialPath = await DocumentService.instance.getInitialPdfPath();
 
@@ -210,6 +221,8 @@ class _CameraScreenState extends State<CameraScreen>
     // Enable digital zoom override by default for native cameras (Windows)
     if (Platform.isWindows) {
       _isDigitalZoomOverride = true;
+      _isHighWhiteboardSensitivity =
+          NativeCameraService().getAbsenceScoreSeenThreshold() <= 0.5;
     }
 
     // Setup Raw Socket Listener (Android)
@@ -1421,6 +1434,19 @@ class _CameraScreenState extends State<CameraScreen>
                 onPressed: () {
                   _setCanvasViewMode(!_isCanvasViewMode);
                 },
+              ),
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  _isHighWhiteboardSensitivity
+                      ? Icons.sensors
+                      : Icons.sensors_outlined,
+                  color: _isHighWhiteboardSensitivity ? Colors.orange : null,
+                ),
+                tooltip: _isHighWhiteboardSensitivity
+                    ? 'Sensitivity: High'
+                    : 'Sensitivity: Normal',
+                onPressed: _toggleWhiteboardSensitivity,
               ),
             // Edit Canvas (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)

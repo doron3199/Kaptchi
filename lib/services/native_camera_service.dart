@@ -103,6 +103,12 @@ typedef GetDuplicateDebugMode = bool Function();
 typedef SetCanvasEnhanceThresholdFunc = Void Function(Float threshold);
 typedef SetCanvasEnhanceThreshold = void Function(double threshold);
 
+typedef SetAbsenceScoreSeenThresholdFunc = Void Function(Float threshold);
+typedef SetAbsenceScoreSeenThreshold = void Function(double threshold);
+
+typedef GetAbsenceScoreSeenThresholdFunc = Float Function();
+typedef GetAbsenceScoreSeenThreshold = double Function();
+
 // Sub-canvas navigation FFI types
 typedef GetSubCanvasCountFunc = Int32 Function();
 typedef GetSubCanvasCount = int Function();
@@ -276,6 +282,8 @@ class NativeCameraService {
   late SetDuplicateDebugMode _setDuplicateDebugMode;
   late GetDuplicateDebugMode _getDuplicateDebugMode;
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
+  late SetAbsenceScoreSeenThreshold _setAbsenceScoreSeenThreshold;
+  late GetAbsenceScoreSeenThreshold _getAbsenceScoreSeenThreshold;
   // Sub-canvas navigation bindings
   late GetSubCanvasCount _getSubCanvasCount;
   late GetActiveSubCanvasIndex _getActiveSubCanvasIndex;
@@ -389,6 +397,16 @@ class NativeCameraService {
     _setCanvasEnhanceThreshold = _nativeLib
         .lookup<NativeFunction<SetCanvasEnhanceThresholdFunc>>(
           'SetCanvasEnhanceThreshold',
+        )
+        .asFunction();
+    _setAbsenceScoreSeenThreshold = _nativeLib
+        .lookup<NativeFunction<SetAbsenceScoreSeenThresholdFunc>>(
+          'SetAbsenceScoreSeenThreshold',
+        )
+        .asFunction();
+    _getAbsenceScoreSeenThreshold = _nativeLib
+        .lookup<NativeFunction<GetAbsenceScoreSeenThresholdFunc>>(
+          'GetAbsenceScoreSeenThreshold',
         )
         .asFunction();
 
@@ -627,6 +645,16 @@ class NativeCameraService {
   void setCanvasEnhanceThreshold(double threshold) {
     initialize();
     _setCanvasEnhanceThreshold(threshold);
+  }
+
+  void setAbsenceScoreSeenThreshold(double threshold) {
+    initialize();
+    _setAbsenceScoreSeenThreshold(threshold);
+  }
+
+  double getAbsenceScoreSeenThreshold() {
+    initialize();
+    return _getAbsenceScoreSeenThreshold();
   }
 
   // --- Sub-canvas Navigation Methods ---

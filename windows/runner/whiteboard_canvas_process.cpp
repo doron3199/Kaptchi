@@ -68,6 +68,7 @@ struct SharedState {
     float pan_x = 0.5f;
     float pan_y = 0.5f;
     float zoom = 1.0f;
+    float absence_score_seen_threshold = kAbsenceScoreSeenThreshold;
     float enhance_threshold = 5.0f;
     float yolo_fps = 2.0f;
     LONG viewport_req_width = 0;
@@ -144,6 +145,7 @@ struct HelperStateSnapshot {
     float pan_x = 0.5f;
     float pan_y = 0.5f;
     float zoom = 1.0f;
+    float absence_score_seen_threshold = kAbsenceScoreSeenThreshold;
     float enhance_threshold = 5.0f;
     float yolo_fps = 2.0f;
     cv::Size viewport_size;
@@ -278,8 +280,14 @@ public:
 
             g_whiteboard_debug.store(snapshot.debug_enabled);
             g_duplicate_debug_mode.store(snapshot.duplicate_debug_enabled);
+            const float previous_seen_threshold = g_absence_score_seen_threshold.load();
+            g_absence_score_seen_threshold.store(snapshot.absence_score_seen_threshold);
             g_canvas_enhance_threshold.store(snapshot.enhance_threshold);
             g_yolo_fps.store(snapshot.yolo_fps);
+
+            if (std::abs(previous_seen_threshold - snapshot.absence_score_seen_threshold) > 1e-6f) {
+                canvas.RefreshSeenThresholdVisibility();
+            }
 
             canvas.SetCanvasViewMode(snapshot.canvas_view_mode);
             canvas.SetRenderMode(snapshot.render_mode);
@@ -474,6 +482,7 @@ private:
         snapshot.pan_x = shared_->pan_x;
         snapshot.pan_y = shared_->pan_y;
         snapshot.zoom = shared_->zoom;
+        snapshot.absence_score_seen_threshold = shared_->absence_score_seen_threshold;
         snapshot.enhance_threshold = shared_->enhance_threshold;
         snapshot.yolo_fps = shared_->yolo_fps;
         snapshot.viewport_size = cv::Size(shared_->viewport_req_width, shared_->viewport_req_height);
@@ -1107,12 +1116,14 @@ int WhiteboardCanvasHelperClient::GetSortedPosition(int idx) const {
 
 void WhiteboardCanvasHelperClient::SyncSettings(bool debug_enabled,
                                                 bool duplicate_debug_enabled,
+                                                float absence_score_seen_threshold,
                                                 float enhance_threshold,
                                                 float yolo_fps) {
     if (!IsReady()) return;
     impl_->WithLock(20, [&]() {
         impl_->shared->whiteboard_debug = debug_enabled ? 1 : 0;
         impl_->shared->duplicate_debug_mode = duplicate_debug_enabled ? 1 : 0;
+        impl_->shared->absence_score_seen_threshold = absence_score_seen_threshold;
         impl_->shared->enhance_threshold = enhance_threshold;
         impl_->shared->yolo_fps = yolo_fps;
         impl_->RefreshCachedStateUnsafe();

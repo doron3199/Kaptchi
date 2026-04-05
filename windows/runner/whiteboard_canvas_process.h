@@ -34,6 +34,7 @@ public:
     int GetSortedPosition(int idx) const;
     void SyncSettings(bool debug_enabled,
                       bool duplicate_debug_enabled,
+                      float absence_score_seen_threshold,
                       float enhance_threshold,
                       float yolo_fps);
 

@@ -51,7 +51,7 @@ enum class NodeReplacementMode : int {
 // ---------------------------------------------------------------------------
 static constexpr float kAbsenceScoreInitial = 0.0f;
 static constexpr float kAbsenceScoreMax     = 20.0f;
-static constexpr float kAbsenceScoreSeenThreshold = 1.0f;
+static constexpr float kAbsenceScoreSeenThreshold = 0.0f;
 
 struct DrawingNode {
     int id = -1;
@@ -218,6 +218,7 @@ public:
     uint64_t GetCanvasVersion() const {
         return canvas_version_.load(std::memory_order_relaxed);
     }
+    void RefreshSeenThresholdVisibility();
     void SyncRuntimeSettings();
     void InvalidateRenderCaches();
     void RecordRgbaCopyProfile(double /*duration_ms*/) {}  // no-op
@@ -366,7 +367,7 @@ private:
     static constexpr float kMergeSearchRadiusPx          = 60.0f;
     // Positional overlap ratio (overlap / min_area) above which an overlapping duplicate
     // may replace the existing node without centroid alignment.
-    static constexpr float kDuplicatePosOverlapThreshold = 0.70f;
+    static constexpr float kDuplicatePosOverlapThreshold = 0.40f;
     // Centroid-aligned mask IoU threshold above which a new blob is treated as a duplicate after
     // aligning centroids. Lower = more aggressive deduplication.
     static constexpr float kDuplicateCentroidIouThreshold = 0.80f;
@@ -378,15 +379,19 @@ private:
     // Sweep-only merge gate: current black-mask positional overlap over min-area must exceed this
     // before the expensive sliding-window IoU search runs.
     static constexpr float kSweepMergePosOverlapThreshold = 0.10f;
-    // Sweep-only merge gate: best sliding-window IoU over thresholded black masks must exceed this
-    // before two nodes are replaced by a fresh merged node. Lower-or-equal matches fall back to
-    // the existing duplicate-delete behavior when positional overlap is high enough.
-    static constexpr float kSweepMergeSlidingIouThreshold = 0.59f;
+    // Sweep-only merge gate for non-wide nodes: best sliding-window IoU over thresholded black
+    // masks must exceed this before two nodes are replaced by a fresh merged node. Lower-or-equal
+    // matches fall back to the existing duplicate-delete behavior when positional overlap is high
+    // enough.
+    static constexpr float kSweepMergeSlidingIouThreshold = 0.85f;
+    // Sweep-only merge gate for wide nodes: if either node is at least the width threshold below,
+    // compare overlap pixels over the smaller black-pixel count against this value instead of IoU.
+    static constexpr float kSweepMergeWideNodeOverlapThreshold = 0.85f;
     // Wide-node sweep filter: if either node is at least this wide, use overlap over the smaller
     // node's black-pixel count instead of IoU for the sliding-window merge/delete decision.
-    static const int       kSweepMergeWideNodeWidthThreshold = 300;
+    static const int       kSweepMergeWideNodeWidthThreshold = 1;
     // Maximum absolute translation (px per axis) scanned by the expensive sweep-only merge search.
-    static const int       kSweepMergeMaxSlidePx        = 120;
+    static const int       kSweepMergeMaxSlidePx        = 200;
     // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
     // that were admitted earlier or drifted together after later updates.
     static const int       kGraphDedupeIntervalFrames   = 1;
@@ -510,6 +515,7 @@ extern std::atomic<bool>  g_whiteboard_debug;
 extern std::atomic<bool>  g_duplicate_debug_mode;
 extern std::atomic<float> g_yolo_fps;
 extern std::atomic<float> g_canvas_enhance_threshold;
+extern std::atomic<float> g_absence_score_seen_threshold;
 
 // ---------------------------------------------------------------------------
 // FFI exports
@@ -539,6 +545,8 @@ extern "C" {
     __declspec(dllexport) void    SetDuplicateDebugMode(bool enabled);
     __declspec(dllexport) bool    GetDuplicateDebugMode();
     __declspec(dllexport) void    SetCanvasEnhanceThreshold(float threshold);
+    __declspec(dllexport) void    SetAbsenceScoreSeenThreshold(float threshold);
+    __declspec(dllexport) float   GetAbsenceScoreSeenThreshold();
 
     // Graph node access
     __declspec(dllexport) int     GetGraphNodeCount();

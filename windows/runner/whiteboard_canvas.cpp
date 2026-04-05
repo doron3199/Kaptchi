@@ -50,6 +50,7 @@ std::atomic<bool>  g_whiteboard_debug{false};
 std::atomic<bool>  g_duplicate_debug_mode{false};
 std::atomic<float> g_yolo_fps{2.0f};
 std::atomic<float> g_canvas_enhance_threshold{4.0f};
+std::atomic<float> g_absence_score_seen_threshold{kAbsenceScoreSeenThreshold};
 
 // ============================================================================
 //  SECTION 2: Static helpers
@@ -647,7 +648,7 @@ static bool IsNodeVisibleInMainCanvas(const DrawingNode& node) {
 
 static bool UpdateMainCanvasVisibilityFromAbsence(DrawingNode& node) {
     if (node.has_crossed_absence_seen_threshold) return false;
-    if (node.absence_score < kAbsenceScoreSeenThreshold) return false;
+    if (node.absence_score < g_absence_score_seen_threshold.load()) return false;
     node.has_crossed_absence_seen_threshold = true;
     return true;
 }
@@ -729,7 +730,7 @@ static DrawingNode* AddNodeFromBlob(WhiteboardGroup& group,
     node->area = blob.area;
     node->absence_score = kAbsenceScoreInitial;
     node->has_crossed_absence_seen_threshold =
-        node->absence_score >= kAbsenceScoreSeenThreshold;
+        node->absence_score >= g_absence_score_seen_threshold.load();
     node->last_seen_frame = current_frame;
     node->created_frame = current_frame;
     ClearDuplicateDebugInfo(*node);
@@ -1574,6 +1575,7 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
                                  float duplicate_max_shape_difference,
                                  float sweep_merge_pos_overlap_threshold,
                                  float sweep_merge_sliding_iou_threshold,
+                                 float sweep_merge_wide_node_overlap_threshold,
                                  int sweep_merge_wide_node_width_threshold,
                                  int sweep_merge_max_slide_px) {
     (void)duplicate_pos_overlap_threshold;
@@ -1653,11 +1655,14 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
             const float decision_score = use_overlap_over_min
                 ? sliding.best_overlap_over_min
                 : sliding.best_iou;
+            const float decision_threshold = use_overlap_over_min
+                ? sweep_merge_wide_node_overlap_threshold
+                : sweep_merge_sliding_iou_threshold;
 
             SweepMergeCandidate candidate;
             candidate.anchor_id = nid;
             candidate.partner_id = other_id;
-            candidate.merge_nodes = decision_score > sweep_merge_sliding_iou_threshold;
+            candidate.merge_nodes = decision_score > decision_threshold;
             candidate.used_overlap_over_min = use_overlap_over_min;
             candidate.decision_score = decision_score;
             candidate.best_iou = sliding.best_iou;
@@ -1845,8 +1850,39 @@ void WhiteboardCanvas::SyncRuntimeSettings() {
     if (remote_process_ && helper_client_) {
         helper_client_->SyncSettings(g_whiteboard_debug.load(),
                                      g_duplicate_debug_mode.load(),
+                                     g_absence_score_seen_threshold.load(),
                                      g_canvas_enhance_threshold.load(),
                                      g_yolo_fps.load());
+    }
+}
+
+void WhiteboardCanvas::RefreshSeenThresholdVisibility() {
+    if (remote_process_ && helper_client_) {
+        SyncRuntimeSettings();
+        return;
+    }
+
+    const float threshold = g_absence_score_seen_threshold.load();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    bool changed = false;
+    for (auto& group : groups_) {
+        if (!group) continue;
+        bool group_changed = false;
+        for (auto& [node_id, node_ptr] : group->nodes) {
+            (void)node_id;
+            if (!node_ptr || IsGhostNode(*node_ptr)) continue;
+            const bool visible = node_ptr->absence_score >= threshold;
+            if (node_ptr->has_crossed_absence_seen_threshold == visible) continue;
+            node_ptr->has_crossed_absence_seen_threshold = visible;
+            group_changed = true;
+        }
+        if (!group_changed) continue;
+        group->stroke_cache_dirty = true;
+        group->raw_cache_dirty = true;
+        changed = true;
+    }
+    if (changed) {
+        BumpCanvasVersion();
     }
 }
 
@@ -2815,6 +2851,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                              kDuplicateMaxShapeDifference,
                              kSweepMergePosOverlapThreshold,
                              kSweepMergeSlidingIouThreshold,
+                             kSweepMergeWideNodeOverlapThreshold,
                              kSweepMergeWideNodeWidthThreshold,
                              kSweepMergeMaxSlidePx)) {
         graph_changed = true;
@@ -3463,6 +3500,15 @@ bool GetDuplicateDebugMode() {
 void SetCanvasEnhanceThreshold(float threshold) {
     g_canvas_enhance_threshold.store(threshold);
     if (g_whiteboard_canvas) g_whiteboard_canvas->SyncRuntimeSettings();
+}
+
+void SetAbsenceScoreSeenThreshold(float threshold) {
+    g_absence_score_seen_threshold.store(threshold);
+    if (g_whiteboard_canvas) g_whiteboard_canvas->RefreshSeenThresholdVisibility();
+}
+
+float GetAbsenceScoreSeenThreshold() {
+    return g_absence_score_seen_threshold.load();
 }
 
 int GetSubCanvasCount() {
