@@ -54,6 +54,12 @@ struct DrawingNode {
     cv::Point2f centroid_canvas;
     std::vector<cv::Point> contour;    // relative to bbox origin
     double hu[7] = {};
+    // Pre-computed from BuildShapeCompareMask — used by TotalShapeCompare (avoids
+    // recomputing GaussianBlur+threshold+moments on every comparison).
+    double hu_smooth[7] = {};
+    bool   hu_smooth_valid = false;
+    // log10-space hu_smooth features for fast O(7) pre-filtering before full shape compare.
+    float  hu_log[7] = {};
     double area = 0.0;
     float  absence_score = kAbsenceScoreInitial;
     bool   has_crossed_absence_seen_threshold = false;
@@ -80,6 +86,9 @@ struct FrameBlob {
     cv::Mat      color_pixels;   // CV_8UC3
     std::vector<cv::Point> contour;
     double       hu[7] = {};
+    double       hu_smooth[7] = {};   // Hu from BuildShapeCompareMask; cached for TotalShapeCompare
+    bool         hu_smooth_valid = false;
+    float        hu_log[7] = {};      // log-space hu_smooth for fast pre-filtering
     double       area  = 0.0;
     int          matched_node_id = -1;
     cv::Point2f  matched_offset{0, 0};
@@ -252,7 +261,7 @@ private:
     static constexpr float kMaxMotionFraction            = 0.05f;
     // Once a low-motion frame is accepted, the gate enters a lock state and stays there
     // until a later frame exceeds this motion fraction. The unlocking frame is also skipped.
-    static constexpr float kOpenMotionGateLockFraction   = 0.09f;
+    static constexpr float kOpenMotionGateLockFraction   = 0.11f;
     // Frame is downscaled to this long-edge size before computing motion. Smaller = faster.
     static const int       kMotionLongEdge               = 256;
     // Pixel absolute-difference value above which a pixel is counted as "changed" for motion.
@@ -300,7 +309,7 @@ private:
     static constexpr bool  kEnableFrameStrokeRejectFilter = true;
     // Blobs wider than this (px) bypass the frame-stroke reject filter.
     // Large blobs (e.g. full diagram) should not be discarded just because they touch the border.
-    static constexpr int   kFrameStrokeRejectMinWidth     = 300;
+    static constexpr int   kFrameStrokeRejectMinWidth     = 450;
 
     // --- Matching (3-step pipeline) ---
     // Radius (px) for shape matching (step 2) after rough offset is applied.
@@ -329,6 +338,11 @@ private:
     static constexpr float kFinalShapeMatchMinScore      = 0.70f;
     // Minimum number of inlier matches required before new strokes are added to the graph.
     static const int       kMinMatchesForNewNode         = 5;
+    // Fast Hu pre-filter: skip TotalShapeCompare if log-space Hu L2 distance exceeds this.
+    // Only applied when BOTH sides have a valid hu_smooth (same smoothing basis).
+    // Use a generous value — Hu distances for the same mark from different viewpoints
+    // can reach 5–7; only reject shapes that are clearly incompatible (different families).
+    static constexpr float kHuPreFilterThreshold         = 8.0f;
 
     // --- Replacement ---
     // Blend factor for centroid smoothing on each match. 0=keep old position, 1=snap to new.
@@ -362,7 +376,7 @@ private:
     static const int       kSweepMergeMaxSlidePx        = 200;
     // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
     // that were admitted earlier or drifted together after later updates.
-    static const int       kGraphDedupeIntervalFrames   = 1;
+    static const int       kGraphDedupeEveryProcessedFrames = 20;
 
     // --- Absence (natural erasure) ---
     // Score subtracted per frame when a node is in the visible area but not matched.

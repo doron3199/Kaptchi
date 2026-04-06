@@ -1570,9 +1570,10 @@ class NativeCameraService {
       int offset = 0;
       while (offset + 12 <= written) {
         // Read header: node_id(4), width(4), height(4)
-        final idBytes = buffer.cast<Int32>().elementAt(offset ~/ 4).value;
-        final wBytes = buffer.cast<Int32>().elementAt(offset ~/ 4 + 1).value;
-        final hBytes = buffer.cast<Int32>().elementAt(offset ~/ 4 + 2).value;
+        final header = buffer.cast<Int32>() + (offset ~/ 4);
+        final idBytes = header.value;
+        final wBytes = (header + 1).value;
+        final hBytes = (header + 2).value;
         offset += 12;
 
         final pixelBytes = wBytes * hBytes * 4;
@@ -1582,7 +1583,7 @@ class NativeCameraService {
         // Copy RGBA bytes
         final rgba = Uint8List(pixelBytes);
         for (int i = 0; i < pixelBytes; i++) {
-          rgba[i] = buffer.elementAt(offset + i).value;
+          rgba[i] = (buffer + offset + i).value;
         }
         offset += pixelBytes;
 

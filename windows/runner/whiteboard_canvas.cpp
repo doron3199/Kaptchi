@@ -76,6 +76,7 @@ static constexpr float kShapeCompareStrongDifferenceThreshold = 0.2f;
 static constexpr int kShapeCompareBlurKernelSize = 5;
 static constexpr double kShapeCompareBlurSigma = 1.2;
 
+
 enum DuplicateDebugReason : int {
     kDuplicateReasonPositionalOverlap = 1 << 0,
     kDuplicateReasonCentroidIou = 1 << 1,
@@ -140,6 +141,13 @@ static float ComputeHuDistance(const double first[7], const double second[7]) {
     return std::sqrt(hu_dist);
 }
 
+// Fast variant: takes pre-computed log-space features (avoids 14 log10 calls).
+static float ComputeHuDistanceLog(const float a[7], const float b[7]) {
+    float d = 0.0f;
+    for (int i = 0; i < 7; ++i) { const float diff = a[i] - b[i]; d += diff * diff; }
+    return std::sqrt(d);
+}
+
 static float ComputeDimensionRatio(int first, int second) {
     const float high = (float)std::max(first, second);
     const float low = (float)std::min(first, second);
@@ -180,6 +188,19 @@ static bool ComputeHuFromMask(const cv::Mat& mask, double hu[7]) {
     if (std::abs(moments.m00) <= 1e-6) return false;
     cv::HuMoments(moments, hu);
     return true;
+}
+
+// Compute and cache hu_smooth (Hu from BuildShapeCompareMask) and hu_log (log-space features).
+// Call once after setting binary_mask and raw hu on a blob or node.
+static void PopulateHuCache(const cv::Mat& binary_mask,
+                             const double hu_raw[7],
+                             double hu_smooth_out[7],
+                             bool& hu_smooth_valid_out,
+                             float hu_log_out[7]) {
+    hu_smooth_valid_out = ComputeHuFromMask(binary_mask, hu_smooth_out);
+    const double* src = hu_smooth_valid_out ? hu_smooth_out : hu_raw;
+    const auto log_features = ComputeLogHuFeatures(src);
+    std::copy(log_features.begin(), log_features.end(), hu_log_out);
 }
 
 static std::vector<cv::Point> ExtractLargestContour(const cv::Mat& mask) {
@@ -598,6 +619,7 @@ struct DuplicateCandidateView {
     const std::vector<cv::Point>* contour = nullptr;
     cv::Point2f centroid;
     const double* hu = nullptr;
+    const double* hu_smooth = nullptr;  // nullable; avoids BuildShapeCompareMask in TotalShapeCompare
     int created_frame = 0;
 };
 
@@ -722,6 +744,9 @@ static DrawingNode* AddNodeFromBlob(WhiteboardGroup& group,
     node->centroid_canvas = canvas_centroid;
     node->contour = blob.contour;
     std::copy(blob.hu, blob.hu + 7, node->hu);
+    std::copy(blob.hu_smooth, blob.hu_smooth + 7, node->hu_smooth);
+    node->hu_smooth_valid = blob.hu_smooth_valid;
+    std::copy(blob.hu_log, blob.hu_log + 7, node->hu_log);
     node->area = blob.area;
     node->absence_score = kAbsenceScoreInitial;
     node->has_crossed_absence_seen_threshold =
@@ -778,10 +803,12 @@ static float ComputeBboxIou(const cv::Rect& first, const cv::Rect& second) {
 static TotalShapeCompareResult TotalShapeCompare(const cv::Rect& first_bbox,
                                                  const cv::Mat* first_mask,
                                                  const double* first_hu,
+                                                 const double* first_hu_smooth,
                                                  const std::vector<cv::Point>* first_contour,
                                                  const cv::Rect& second_bbox,
                                                  const cv::Mat* second_mask,
                                                  const double* second_hu,
+                                                 const double* second_hu_smooth,
                                                  const std::vector<cv::Point>* second_contour) {
     TotalShapeCompareResult result;
     if (first_bbox.width <= 0 || first_bbox.height <= 0 ||
@@ -826,16 +853,9 @@ static TotalShapeCompareResult TotalShapeCompare(const cv::Rect& first_bbox,
             result.shape_context_difference <= kShapeCompareStrongDifferenceThreshold;
     }
 
-    double first_mask_hu[7] = {};
-    double second_mask_hu[7] = {};
-    const double* first_hu_for_compare = first_hu;
-    const double* second_hu_for_compare = second_hu;
-    if (first_mask && second_mask &&
-        ComputeHuFromMask(*first_mask, first_mask_hu) &&
-        ComputeHuFromMask(*second_mask, second_mask_hu)) {
-        first_hu_for_compare = first_mask_hu;
-        second_hu_for_compare = second_mask_hu;
-    }
+    // Use pre-computed smooth-mask Hu when available (avoids BuildShapeCompareMask per call).
+    const double* first_hu_for_compare  = first_hu_smooth  ? first_hu_smooth  : first_hu;
+    const double* second_hu_for_compare = second_hu_smooth ? second_hu_smooth : second_hu;
 
     if (first_hu_for_compare && second_hu_for_compare) {
         result.hu_distance = ComputeHuDistance(first_hu_for_compare, second_hu_for_compare);
@@ -915,14 +935,9 @@ static DuplicateCheckResult EvaluateDuplicateCandidate(
         : 0.0f;
     result.same_creation_frame = first.created_frame == second.created_frame;
     result.shape_difference = TotalShapeCompare(
-        first.bbox,
-        first.mask,
-        first.hu,
-        first.contour,
+        first.bbox,  first.mask,  first.hu,  first.hu_smooth,  first.contour,
         centroid_aligned_bbox,
-        second.mask,
-        second.hu,
-        second.contour).difference;
+        second.mask, second.hu, second.hu_smooth, second.contour).difference;
     if (result.positional_overlap > duplicate_pos_overlap_threshold)
         result.reason_mask |= kDuplicateReasonPositionalOverlap;
     if (result.centroid_iou > duplicate_centroid_iou_threshold)
@@ -948,6 +963,9 @@ static void RefreshNodeFromBlob(WhiteboardGroup& group, DrawingNode& node,
     if (!blob.color_pixels.empty()) node.color_pixels = blob.color_pixels.clone();
     node.contour = blob.contour;
     std::copy(blob.hu, blob.hu + 7, node.hu);
+    std::copy(blob.hu_smooth, blob.hu_smooth + 7, node.hu_smooth);
+    node.hu_smooth_valid = blob.hu_smooth_valid;
+    std::copy(blob.hu_log, blob.hu_log + 7, node.hu_log);
     node.area = blob.area;
     ClearDuplicateDebugInfo(node);
     group.spatial_index.Insert(node.id, canvas_centroid);
@@ -971,19 +989,23 @@ static bool InsertOrMergeBlobNode(WhiteboardGroup& group,
                                          merge_search_radius_px});
         const auto nearby = group.spatial_index.QueryRadius(canvas_centroid, search_r);
         const DuplicateCandidateView blob_candidate{
-            canvas_bbox, &blob.binary_mask, &blob.contour, canvas_centroid, blob.hu, current_frame};
+            canvas_bbox, &blob.binary_mask, &blob.contour, canvas_centroid,
+            blob.hu, blob.hu_smooth_valid ? blob.hu_smooth : nullptr, current_frame};
         for (int nid : nearby) {
             if (group.user_deleted_ids.count(nid)) continue;
             auto nit = group.nodes.find(nid);
             if (nit == group.nodes.end()) continue;
 
             auto& existing = *nit->second;
+            // If this node was already updated by a blob from the current frame
+            // (either just created or refreshed in section 4a), skip it.  Any
+            // remaining unmatched blob is a distinct CC from the same binary image
+            // and cannot be a duplicate of it.
+            if (existing.last_seen_frame == current_frame) continue;
             const DuplicateCandidateView existing_candidate{
-                existing.bbox_canvas,
-                &existing.binary_mask,
-                &existing.contour,
+                existing.bbox_canvas, &existing.binary_mask, &existing.contour,
                 existing.centroid_canvas,
-                existing.hu,
+                existing.hu, existing.hu_smooth_valid ? existing.hu_smooth : nullptr,
                 existing.created_frame};
             const DuplicateCheckResult duplicate_check = EvaluateDuplicateCandidate(
                 existing_candidate,
@@ -1474,6 +1496,8 @@ static bool BuildMergedBlobFromNodes(const DrawingNode& first,
             cv::HuMoments(moments, merged_blob.hu);
         }
     }
+    PopulateHuCache(merged_mask, merged_blob.hu,
+                    merged_blob.hu_smooth, merged_blob.hu_smooth_valid, merged_blob.hu_log);
     return true;
 }
 
@@ -1561,13 +1585,14 @@ static bool MergeNodePairIntoFreshNode(WhiteboardGroup& group,
 
 static bool SweepGraphDuplicates(WhiteboardGroup& group,
                                  int current_frame,
-                                 int dedupe_interval_frames,
+                                 int graph_dedupe_every_processed_frames,
                                  bool duplicate_debug_mode,
                                  float merge_search_radius_px,
                                  float sweep_merge_pos_overlap_threshold,
                                  float sweep_merge_overlap_threshold,
                                  int sweep_merge_max_slide_px) {
-    if (dedupe_interval_frames <= 0 || ((current_frame + 1) % dedupe_interval_frames) != 0) {
+    if (graph_dedupe_every_processed_frames <= 0 ||
+        ((current_frame + 1) % graph_dedupe_every_processed_frames) != 0) {
         return false;
     }
     if (group.nodes.size() < 2) return false;
@@ -2315,6 +2340,8 @@ std::vector<FrameBlob> WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary
         blob.area = component.area;
         cv::Moments m = cv::moments(blob.contour);
         cv::HuMoments(m, blob.hu);
+        PopulateHuCache(blob.binary_mask, blob.hu,
+                        blob.hu_smooth, blob.hu_smooth_valid, blob.hu_log);
         if (!frame_bgr.empty()) blob.color_pixels = frame_bgr(g_bbox).clone();
         result.push_back(std::move(blob));
     }
@@ -2350,17 +2377,18 @@ cv::Point2f WhiteboardCanvas::GlobalShapePass(WhiteboardGroup& group,
                 if (ratio < kAreaRatioMin || ratio > (1.0f / kAreaRatioMin)) continue;
             }
 
+            // Fast Hu pre-filter (both sides must have smooth Hu for a fair comparison).
+            if (blob.hu_smooth_valid && node.hu_smooth_valid &&
+                ComputeHuDistanceLog(blob.hu_log, node.hu_log) > kHuPreFilterThreshold) continue;
+
             const cv::Rect aligned_node_bbox = AlignRectToCentroid(
                 node.bbox_canvas, node.centroid_canvas, blob.centroid);
             const TotalShapeCompareResult shape_compare = TotalShapeCompare(
-                blob.bbox,
-                &blob.binary_mask,
-                blob.hu,
-                &blob.contour,
+                blob.bbox,  &blob.binary_mask,  blob.hu,
+                blob.hu_smooth_valid  ? blob.hu_smooth  : nullptr, &blob.contour,
                 aligned_node_bbox,
-                &node.binary_mask,
-                node.hu,
-                &node.contour);
+                &node.binary_mask, node.hu,
+                node.hu_smooth_valid  ? node.hu_smooth  : nullptr, &node.contour);
             if (!shape_compare.valid) continue;
 
             if (shape_compare.difference < best_difference) {
@@ -2433,18 +2461,19 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
                 if (ratio < kAreaRatioMin || ratio > (1.0f / kAreaRatioMin)) continue;
             }
 
+            // Fast Hu pre-filter (both sides must have smooth Hu for a fair comparison).
+            if (blob.hu_smooth_valid && node.hu_smooth_valid &&
+                ComputeHuDistanceLog(blob.hu_log, node.hu_log) > kHuPreFilterThreshold) continue;
+
             const cv::Rect aligned_node_bbox = AlignRectToCentroid(
                 node.bbox_canvas, node.centroid_canvas, canvas_centroid);
 
             const TotalShapeCompareResult shape_compare = TotalShapeCompare(
-                canvas_bbox,
-                &blob.binary_mask,
-                blob.hu,
-                &blob.contour,
+                canvas_bbox, &blob.binary_mask, blob.hu,
+                blob.hu_smooth_valid ? blob.hu_smooth : nullptr, &blob.contour,
                 aligned_node_bbox,
-                &node.binary_mask,
-                node.hu,
-                &node.contour);
+                &node.binary_mask, node.hu,
+                node.hu_smooth_valid ? node.hu_smooth : nullptr, &node.contour);
             if (!shape_compare.valid) continue;
 
             const float similarity = 1.0f - shape_compare.difference;
@@ -2690,15 +2719,31 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
     }
 
     // --- 4b. Absence tracking ---
-    // Penalise unseen nodes only when they still project into the current cropped frame,
-    // are not materially hidden by the lecturer, and are near a matched node.
+    // Penalise unseen nodes that are near at least one seen node, project into the current
+    // cropped frame, and are not hidden by the lecturer.
+    //
+    // Previously: O(N×M) — for each unseen node, scan all M seen nodes for proximity.
+    // Now: O(M×K) — for each seen node, query the spatial index for nearby unseen nodes.
+    // That candidate set is then checked for visibility and lecturer occlusion.
     {
+        // Build set of unseen nodes within kAbsenceNearbyRadius of any matched node.
+        std::unordered_set<int> absence_candidates;
+        for (int sid : seen_node_ids) {
+            auto sit = group.nodes.find(sid);
+            if (sit == group.nodes.end()) continue;
+            const auto nearby = group.spatial_index.QueryRadius(
+                sit->second->centroid_canvas, kAbsenceNearbyRadius);
+            for (int nid : nearby) {
+                if (!seen_node_ids.count(nid)) absence_candidates.insert(nid);
+            }
+        }
+
         std::vector<int> to_remove;
-        for (auto& pair : group.nodes) {
-            int nid = pair.first;
-            auto& node = *pair.second;
+        for (int nid : absence_candidates) {
+            auto it = group.nodes.find(nid);
+            if (it == group.nodes.end()) continue;
+            auto& node = *it->second;
             if (IsGhostNode(node)) continue;
-            if (seen_node_ids.count(nid)) continue;
 
             if (!IsNodePlausiblyVisibleForAbsence(node, frame_offset, cropped_frame, frame_size,
                                                  absence_frame_inset_px))
@@ -2708,18 +2753,8 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                                                   absence_lecturer_overlap_min))
                 continue;
 
-            bool near_match = false;
-            for (int sid : seen_node_ids) {
-                auto sit = group.nodes.find(sid);
-                if (sit == group.nodes.end()) continue;
-                if ((float)cv::norm(node.centroid_canvas - sit->second->centroid_canvas)
-                        < kAbsenceNearbyRadius) { near_match = true; break; }
-            }
-            if (!near_match) continue;
-
             node.absence_score -= kAbsenceDecrement;
-            if (node.absence_score < 0.0f &&
-                !node.user_locked)
+            if (node.absence_score < 0.0f && !node.user_locked)
                 to_remove.push_back(nid);
         }
         for (int nid : to_remove) { RemoveNodeFromGraph(group, nid); graph_changed = true; }
@@ -2759,6 +2794,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                     new_node_ids.push_back(id_before);
             }
         }
+
         // Extend same-frame hard-edge creation to include matched existing nodes
         // and brand-new inserted nodes from this update.
         std::vector<int> same_frame_node_ids = seen_node_list;
@@ -2773,7 +2809,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
     }
 
     if (SweepGraphDuplicates(group, current_frame,
-                             kGraphDedupeIntervalFrames,
+                             kGraphDedupeEveryProcessedFrames,
                              duplicate_debug_mode_,
                              kMergeSearchRadiusPx,
                              kSweepMergePosOverlapThreshold,
@@ -3025,9 +3061,11 @@ bool WhiteboardCanvas::CompareGraphNodes(int id_a, int id_b, float* result) cons
     const DrawingNode& b = *itB->second;
 
     const DuplicateCandidateView first_candidate{
-        a.bbox_canvas, &a.binary_mask, &a.contour, a.centroid_canvas, a.hu, a.created_frame};
+        a.bbox_canvas, &a.binary_mask, &a.contour, a.centroid_canvas,
+        a.hu, a.hu_smooth_valid ? a.hu_smooth : nullptr, a.created_frame};
     const DuplicateCandidateView second_candidate{
-        b.bbox_canvas, &b.binary_mask, &b.contour, b.centroid_canvas, b.hu, b.created_frame};
+        b.bbox_canvas, &b.binary_mask, &b.contour, b.centroid_canvas,
+        b.hu, b.hu_smooth_valid ? b.hu_smooth : nullptr, b.created_frame};
     const DuplicateCheckResult duplicate_check = EvaluateDuplicateCandidate(
         first_candidate,
         second_candidate,
@@ -3041,14 +3079,11 @@ bool WhiteboardCanvas::CompareGraphNodes(int id_a, int id_b, float* result) cons
     const cv::Rect aligned_b = AlignRectToCentroid(
         b.bbox_canvas, b.centroid_canvas, a.centroid_canvas);
     const TotalShapeCompareResult shape_compare = TotalShapeCompare(
-        a.bbox_canvas,
-        &a.binary_mask,
-        a.hu,
-        &a.contour,
+        a.bbox_canvas, &a.binary_mask, a.hu,
+        a.hu_smooth_valid ? a.hu_smooth : nullptr, &a.contour,
         aligned_b,
-        &b.binary_mask,
-        b.hu,
-        &b.contour);
+        &b.binary_mask, b.hu,
+        b.hu_smooth_valid ? b.hu_smooth : nullptr, &b.contour);
     result[0] = shape_compare.difference;
 
     cv::Point2f diff = a.centroid_canvas - b.centroid_canvas;
