@@ -1588,6 +1588,7 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
                                  int graph_dedupe_every_processed_frames,
                                  bool duplicate_debug_mode,
                                  float merge_search_radius_px,
+                                 float duplicate_pos_overlap_threshold,
                                  float sweep_merge_pos_overlap_threshold,
                                  float sweep_merge_overlap_threshold,
                                  int sweep_merge_max_slide_px) {
@@ -1641,36 +1642,64 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
             const auto other_mask_it = black_masks.find(other_id);
             if (other_mask_it == black_masks.end() || other_mask_it->second.empty()) continue;
 
-            const MaskRelation positional_relation = ComputeMaskRelation(
+            const MaskRelation black_positional_relation = ComputeMaskRelation(
                 node.bbox_canvas, mask_it->second, node.centroid_canvas,
                 other.bbox_canvas, other_mask_it->second, other.centroid_canvas);
-            if (!positional_relation.valid ||
-                positional_relation.overlap_over_min <= sweep_merge_pos_overlap_threshold) {
+
+            const MaskRelation binary_positional_relation = ComputeMaskRelation(
+                node.bbox_canvas, node.binary_mask, node.centroid_canvas,
+                other.bbox_canvas, other.binary_mask, other.centroid_canvas);
+
+            const bool has_positional_relation =
+                black_positional_relation.valid || binary_positional_relation.valid;
+            const float effective_positional_overlap = std::max(
+                black_positional_relation.valid ? black_positional_relation.overlap_over_min : 0.0f,
+                binary_positional_relation.valid ? binary_positional_relation.overlap_over_min : 0.0f);
+            const float effective_positional_iou = std::max(
+                black_positional_relation.valid ? black_positional_relation.iou : 0.0f,
+                binary_positional_relation.valid ? binary_positional_relation.iou : 0.0f);
+
+            if (!has_positional_relation ||
+                effective_positional_overlap <= sweep_merge_pos_overlap_threshold) {
                 continue;
             }
 
-            const SlidingMaskIouResult sliding = ComputeBestSlidingMaskIou(
-                node.bbox_canvas,
-                mask_it->second,
-                other.bbox_canvas,
-                other_mask_it->second,
-                sweep_merge_max_slide_px);
-            if (!sliding.valid) {
-                continue;
-            }
-
-            const float decision_score = sliding.best_overlap_over_min;
+            const bool strong_positional_duplicate =
+                effective_positional_overlap > duplicate_pos_overlap_threshold;
 
             SweepMergeCandidate candidate;
             candidate.anchor_id = nid;
             candidate.partner_id = other_id;
-            candidate.merge_nodes = decision_score > sweep_merge_overlap_threshold;
-            candidate.decision_score = decision_score;
-            candidate.best_iou = sliding.best_iou;
-            candidate.positional_overlap = positional_relation.overlap_over_min;
+            candidate.positional_overlap = effective_positional_overlap;
             candidate.bbox_iou = ComputeBboxIou(node.bbox_canvas, other.bbox_canvas);
-            candidate.best_dx = sliding.best_dx;
-            candidate.best_dy = sliding.best_dy;
+            candidate.best_dx = 0;
+            candidate.best_dy = 0;
+
+            if (strong_positional_duplicate) {
+                // Keep a deterministic delete path for strongly overlapping pairs,
+                // even when sliding-window alignment is weak or unstable.
+                candidate.merge_nodes = false;
+                candidate.decision_score = candidate.positional_overlap;
+                candidate.best_iou = effective_positional_iou;
+            } else {
+                const SlidingMaskIouResult sliding = ComputeBestSlidingMaskIou(
+                    node.bbox_canvas,
+                    mask_it->second,
+                    other.bbox_canvas,
+                    other_mask_it->second,
+                    sweep_merge_max_slide_px);
+                if (!sliding.valid) {
+                    continue;
+                }
+
+                const float decision_score = sliding.best_overlap_over_min;
+                candidate.merge_nodes = decision_score > sweep_merge_overlap_threshold;
+                candidate.decision_score = decision_score;
+                candidate.best_iou = sliding.best_iou;
+                candidate.best_dx = sliding.best_dx;
+                candidate.best_dy = sliding.best_dy;
+            }
+
             if (!has_best_for_node || IsBetterSweepMergeCandidate(candidate, best_for_node)) {
                 best_for_node = candidate;
                 has_best_for_node = true;
@@ -2812,6 +2841,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                              kGraphDedupeEveryProcessedFrames,
                              duplicate_debug_mode_,
                              kMergeSearchRadiusPx,
+                             kDuplicatePosOverlapThreshold,
                              kSweepMergePosOverlapThreshold,
                              kSweepMergeOverlapThreshold,
                              kSweepMergeMaxSlidePx)) {
