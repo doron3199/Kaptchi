@@ -93,7 +93,7 @@ static void EnhanceFrameBlobs(std::vector<FrameBlob>& blobs,
         int px1 = std::min(frame_bgr.cols, blob.bbox.x + blob.bbox.width  + kEnhancePadding);
         int py1 = std::min(frame_bgr.rows, blob.bbox.y + blob.bbox.height + kEnhancePadding);
         cv::Rect padded(px0, py0, px1 - px0, py1 - py0);
-        cv::Mat enhanced = WhiteboardEnhance(frame_bgr(padded).clone(), threshold);
+        cv::Mat enhanced = WhiteboardEnhance(frame_bgr(padded), threshold);
         int cx = blob.bbox.x - px0;
         int cy = blob.bbox.y - py0;
         blob.color_pixels =
@@ -104,11 +104,9 @@ static void EnhanceFrameBlobs(std::vector<FrameBlob>& blobs,
 
 static cv::Point2f ComputeGravityCenter(const cv::Mat& mask) {
     if (mask.empty()) return {};
-    int sx = 0, sy = 0, cnt = 0;
-    for (int y = 0; y < mask.rows; ++y)
-        for (int x = 0; x < mask.cols; ++x)
-            if (mask.at<uchar>(y, x)) { sx += x; sy += y; ++cnt; }
-    return cnt > 0 ? cv::Point2f((float)sx/cnt, (float)sy/cnt) : cv::Point2f{};
+    const auto m = cv::moments(mask, true);
+    return m.m00 > 0.0 ? cv::Point2f((float)(m.m10 / m.m00), (float)(m.m01 / m.m00))
+                       : cv::Point2f{};
 }
 
 static float ComputeScaleForLongEdge(const cv::Size& size, int max_long_edge) {
@@ -511,8 +509,7 @@ static bool IsNodePlausiblyVisibleForAbsence(const DrawingNode& node,
                                              const cv::Point2f& frame_offset,
                                              const cv::Rect& cropped_frame,
                                              const cv::Size& frame_size,
-                                             int frame_inset_px,
-                                             float visible_fraction_min) {
+                                             int frame_inset_px) {
     if (cropped_frame.width <= 0 || cropped_frame.height <= 0 ||
         frame_size.width <= 0 || frame_size.height <= 0) {
         return false;
@@ -538,8 +535,7 @@ static bool IsNodePlausiblyVisibleForAbsence(const DrawingNode& node,
     if (ow <= 0 || oh <= 0) return false;
     const cv::Rect observable_frame(ox, oy, ow, oh);
 
-    return ComputeRectOverlapFraction(node_frame_bbox, observable_frame)
-               >= visible_fraction_min;
+    return (node_frame_bbox & observable_frame).area() > 0;
 }
 
 static bool IsNodeOccludedByLecturerForAbsence(const DrawingNode& node,
@@ -627,7 +623,6 @@ struct SweepMergeCandidate {
     int   anchor_id = -1;
     int   partner_id = -1;
     bool  merge_nodes = false;
-    bool  used_overlap_over_min = false;
     float decision_score = 0.0f;
     float best_iou = 0.0f;
     float positional_overlap = 0.0f;
@@ -1569,19 +1564,9 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
                                  int dedupe_interval_frames,
                                  bool duplicate_debug_mode,
                                  float merge_search_radius_px,
-                                 float duplicate_pos_overlap_threshold,
-                                 float duplicate_centroid_iou_threshold,
-                                 float duplicate_bbox_iou_threshold,
-                                 float duplicate_max_shape_difference,
                                  float sweep_merge_pos_overlap_threshold,
-                                 float sweep_merge_sliding_iou_threshold,
-                                 float sweep_merge_wide_node_overlap_threshold,
-                                 int sweep_merge_wide_node_width_threshold,
+                                 float sweep_merge_overlap_threshold,
                                  int sweep_merge_max_slide_px) {
-    (void)duplicate_pos_overlap_threshold;
-    (void)duplicate_centroid_iou_threshold;
-    (void)duplicate_bbox_iou_threshold;
-    (void)duplicate_max_shape_difference;
     if (dedupe_interval_frames <= 0 || ((current_frame + 1) % dedupe_interval_frames) != 0) {
         return false;
     }
@@ -1649,21 +1634,12 @@ static bool SweepGraphDuplicates(WhiteboardGroup& group,
                 continue;
             }
 
-            const bool use_overlap_over_min =
-                node.bbox_canvas.width >= sweep_merge_wide_node_width_threshold ||
-                other.bbox_canvas.width >= sweep_merge_wide_node_width_threshold;
-            const float decision_score = use_overlap_over_min
-                ? sliding.best_overlap_over_min
-                : sliding.best_iou;
-            const float decision_threshold = use_overlap_over_min
-                ? sweep_merge_wide_node_overlap_threshold
-                : sweep_merge_sliding_iou_threshold;
+            const float decision_score = sliding.best_overlap_over_min;
 
             SweepMergeCandidate candidate;
             candidate.anchor_id = nid;
             candidate.partner_id = other_id;
-            candidate.merge_nodes = decision_score > decision_threshold;
-            candidate.used_overlap_over_min = use_overlap_over_min;
+            candidate.merge_nodes = decision_score > sweep_merge_overlap_threshold;
             candidate.decision_score = decision_score;
             candidate.best_iou = sliding.best_iou;
             candidate.positional_overlap = positional_relation.overlap_over_min;
@@ -2602,7 +2578,6 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
     const cv::Size frame_size(frame_w_, frame_h_);
     const int absence_frame_inset_px = kAbsenceFrameInsetPx;
     const int absence_lecturer_expansion_px = kAbsenceLecturerExpansionPx;
-    const float absence_visible_fraction_min = kAbsenceVisibleFractionMin;
     const float absence_lecturer_overlap_min = kAbsenceLecturerOverlapMin;
 
     // --- 4a. Process matched nodes using replacement mode ---
@@ -2635,63 +2610,20 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
         const cv::Point2f old_centroid = node.centroid_canvas;
 
         if (!node.user_locked) {
-            switch (kReplacementMode) {
-            case NodeReplacementMode::kAlwaysReplace: {
-                cv::Point2f blended_centroid(
-                    node.centroid_canvas.x * (1.0f - kLocationAverageAlpha) +
-                        canvas_centroid.x * kLocationAverageAlpha,
-                    node.centroid_canvas.y * (1.0f - kLocationAverageAlpha) +
-                        canvas_centroid.y * kLocationAverageAlpha);
-                int dx = (int)std::round(blended_centroid.x - canvas_centroid.x);
-                int dy = (int)std::round(blended_centroid.y - canvas_centroid.y);
-                cv::Rect blended_bbox(
-                    canvas_bbox.x + dx,
-                    canvas_bbox.y + dy,
-                    canvas_bbox.width,
-                    canvas_bbox.height);
-                RefreshNodeFromBlob(group, node, blob, blended_centroid, blended_bbox);
-                graph_changed = true;
-                break;
-            }
-
-            case NodeReplacementMode::kIouThreshold: {
-                const MaskRelation rel = ComputeMaskRelation(
-                    canvas_bbox, blob.binary_mask, canvas_centroid,
-                    node.bbox_canvas, node.binary_mask, node.centroid_canvas);
-                if (!rel.valid || rel.iou < kIouReplaceThreshold) {
-                    RefreshNodeFromBlob(group, node, blob, canvas_centroid, canvas_bbox);
-                    graph_changed = true;
-                }
-                break;
-            }
-
-            case NodeReplacementMode::kPeriodicReplace:
-                if (node.match_count % kPeriodicReplaceInterval == 0) {
-                    RefreshNodeFromBlob(group, node, blob, canvas_centroid, canvas_bbox);
-                    graph_changed = true;
-                }
-                break;
-
-            case NodeReplacementMode::kLocationAverage: {
-                // Blend centroid positions, keep existing content
-                cv::Point2f new_centroid(
-                    node.centroid_canvas.x * (1.0f - kLocationAverageAlpha) +
-                        canvas_centroid.x * kLocationAverageAlpha,
-                    node.centroid_canvas.y * (1.0f - kLocationAverageAlpha) +
-                        canvas_centroid.y * kLocationAverageAlpha);
-                int dx = (int)std::round(new_centroid.x - node.centroid_canvas.x);
-                int dy = (int)std::round(new_centroid.y - node.centroid_canvas.y);
-                if (dx != 0 || dy != 0) {
-                    group.spatial_index.Remove(node.id, node.centroid_canvas);
-                    node.centroid_canvas = new_centroid;
-                    node.bbox_canvas.x += dx;
-                    node.bbox_canvas.y += dy;
-                    group.spatial_index.Insert(node.id, new_centroid);
-                    graph_changed = true;
-                }
-                break;
-            }
-            }
+            cv::Point2f blended_centroid(
+                node.centroid_canvas.x * (1.0f - kLocationAverageAlpha) +
+                    canvas_centroid.x * kLocationAverageAlpha,
+                node.centroid_canvas.y * (1.0f - kLocationAverageAlpha) +
+                    canvas_centroid.y * kLocationAverageAlpha);
+            int dx = (int)std::round(blended_centroid.x - canvas_centroid.x);
+            int dy = (int)std::round(blended_centroid.y - canvas_centroid.y);
+            cv::Rect blended_bbox(
+                canvas_bbox.x + dx,
+                canvas_bbox.y + dy,
+                canvas_bbox.width,
+                canvas_bbox.height);
+            RefreshNodeFromBlob(group, node, blob, blended_centroid, blended_bbox);
+            graph_changed = true;
         }
 
         // Track movement delta for hard-edge propagation
@@ -2769,8 +2701,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
             if (seen_node_ids.count(nid)) continue;
 
             if (!IsNodePlausiblyVisibleForAbsence(node, frame_offset, cropped_frame, frame_size,
-                                                 absence_frame_inset_px,
-                                                 absence_visible_fraction_min))
+                                                 absence_frame_inset_px))
                 continue;
             if (IsNodeOccludedByLecturerForAbsence(node, lecturer_canvas_rect, frame_size,
                                                   absence_lecturer_expansion_px,
@@ -2845,14 +2776,8 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                              kGraphDedupeIntervalFrames,
                              duplicate_debug_mode_,
                              kMergeSearchRadiusPx,
-                             kDuplicatePosOverlapThreshold,
-                             kDuplicateCentroidIouThreshold,
-                             kDuplicateBboxIouThreshold,
-                             kDuplicateMaxShapeDifference,
                              kSweepMergePosOverlapThreshold,
-                             kSweepMergeSlidingIouThreshold,
-                             kSweepMergeWideNodeOverlapThreshold,
-                             kSweepMergeWideNodeWidthThreshold,
+                             kSweepMergeOverlapThreshold,
                              kSweepMergeMaxSlidePx)) {
         graph_changed = true;
     }

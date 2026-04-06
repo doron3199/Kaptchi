@@ -39,13 +39,6 @@ enum class AlignmentScoreMode : int {
     kLargestBlob = 2,
 };
 
-enum class NodeReplacementMode : int {
-    kAlwaysReplace   = 0,  // Always replace matched canvas node with frame blob
-    kIouThreshold    = 1,  // Replace only if mask IoU < 50%
-    kPeriodicReplace = 2,  // Replace every N-th time a node is matched
-    kLocationAverage = 3,  // Don't replace content, average centroid positions
-};
-
 // ---------------------------------------------------------------------------
 // DrawingNode -- A single drawing entity on the canvas
 // ---------------------------------------------------------------------------
@@ -221,7 +214,6 @@ public:
     void RefreshSeenThresholdVisibility();
     void SyncRuntimeSettings();
     void InvalidateRenderCaches();
-    void RecordRgbaCopyProfile(double /*duration_ms*/) {}  // no-op
 
     // --- Sub-canvas navigation ---
     int  GetSubCanvasCount() const;
@@ -246,17 +238,6 @@ public:
     int  LockAllGraphNodes();
     bool GetGraphCanvasBounds(int* bounds) const;
     int  GetGraphNodeContours(float* buffer, int max_floats) const;
-
-    // --- Debug snapshots (stubs — kept for FFI compatibility) ---
-    bool CaptureGraphDebugSnapshot(int /*slot*/, const cv::Mat& /*frame*/,
-                                   const cv::Mat& /*person_mask*/) { return false; }
-    int  GetGraphSnapshotNodeCount(int /*slot*/) const { return 0; }
-    int  GetGraphSnapshotNodes(int /*slot*/, float* /*buf*/, int /*max*/) const { return 0; }
-    bool GetGraphSnapshotCanvasBounds(int /*slot*/, int* /*bounds*/) const { return false; }
-    int  GetGraphSnapshotNodeContours(int /*slot*/, float* /*buf*/, int /*max*/) const { return 0; }
-    bool CompareGraphSnapshotNodes(int, int, int, int, float*) const { return false; }
-    bool CombineGraphDebugSnapshots(int, int, int, int) { return false; }
-    bool CopyGraphDebugSnapshot(int, int) { return false; }
 
 private:
     // -----------------------------------------------------------------------
@@ -349,13 +330,8 @@ private:
     // Minimum number of inlier matches required before new strokes are added to the graph.
     static const int       kMinMatchesForNewNode         = 5;
 
-    // --- Replacement mode ---
-    static constexpr NodeReplacementMode kReplacementMode = NodeReplacementMode::kAlwaysReplace;
-    // IoU below which replacement happens (for kIouThreshold mode).
-    static constexpr float kIouReplaceThreshold          = 0.50f;
-    // Replace every N-th match (for kPeriodicReplace mode).
-    static const int       kPeriodicReplaceInterval      = 5;
-    // Blend factor for location averaging (for kLocationAverage mode). 0=keep old, 1=use new.
+    // --- Replacement ---
+    // Blend factor for centroid smoothing on each match. 0=keep old position, 1=snap to new.
     static constexpr float kLocationAverageAlpha         = 0.5f;
 
     // --- Merge (duplicate insertion check) ---
@@ -377,20 +353,12 @@ private:
     // long as they were not created in the same frame.
     static constexpr float kDuplicateMaxShapeDifference = 0.2f;
     // Sweep-only merge gate: current black-mask positional overlap over min-area must exceed this
-    // before the expensive sliding-window IoU search runs.
+    // before the expensive sliding-window search runs.
     static constexpr float kSweepMergePosOverlapThreshold = 0.10f;
-    // Sweep-only merge gate for non-wide nodes: best sliding-window IoU over thresholded black
-    // masks must exceed this before two nodes are replaced by a fresh merged node. Lower-or-equal
-    // matches fall back to the existing duplicate-delete behavior when positional overlap is high
-    // enough.
-    static constexpr float kSweepMergeSlidingIouThreshold = 0.85f;
-    // Sweep-only merge gate for wide nodes: if either node is at least the width threshold below,
-    // compare overlap pixels over the smaller black-pixel count against this value instead of IoU.
-    static constexpr float kSweepMergeWideNodeOverlapThreshold = 0.85f;
-    // Wide-node sweep filter: if either node is at least this wide, use overlap over the smaller
-    // node's black-pixel count instead of IoU for the sliding-window merge/delete decision.
-    static const int       kSweepMergeWideNodeWidthThreshold = 1;
-    // Maximum absolute translation (px per axis) scanned by the expensive sweep-only merge search.
+    // Sweep-only merge gate: best sliding-window overlap-over-min-pixels must exceed this before
+    // two nodes are merged or deleted.
+    static constexpr float kSweepMergeOverlapThreshold  = 0.85f;
+    // Maximum absolute translation (px per axis) scanned by the sweep-only merge search.
     static const int       kSweepMergeMaxSlidePx        = 200;
     // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
     // that were admitted earlier or drifted together after later updates.
@@ -407,9 +375,6 @@ private:
     // This acts as a "visibility proxy": we only penalise what we can actually see.
     // Raise if nodes far from current strokes are decaying too fast.
     static constexpr float kAbsenceNearbyRadius          = 100.0f;
-    // Minimum fraction of a projected node bbox that must overlap the observable region
-    // (the inset frame) before the node is considered plausibly visible for absence decay.
-    static constexpr float kAbsenceVisibleFractionMin    = 1.0f;
     // Inward margin shrunk from the cropped frame edges to define the "observable region."
     // When -1, uses max(1, frame_dim/50) (~2%), which exceeds the reject-mask edge strips (~1%).
     // Nodes outside this region are protected from absence decay.
