@@ -3,7 +3,13 @@ import '../services/native_camera_service.dart';
 
 class NativeCameraView extends StatefulWidget {
   final double? overrideAspectRatio;
-  const NativeCameraView({super.key, this.overrideAspectRatio});
+  final TransformationController? transformationController;
+
+  const NativeCameraView({
+    super.key,
+    this.overrideAspectRatio,
+    this.transformationController,
+  });
 
   @override
   State<NativeCameraView> createState() => _NativeCameraViewState();
@@ -67,6 +73,7 @@ class _NativeCameraViewState extends State<NativeCameraView> {
           final h = constraints.maxHeight;
           final w = h * ar;
           return InteractiveViewer(
+            transformationController: widget.transformationController,
             constrained: false,
             minScale: 0.5,
             maxScale: 10.0,

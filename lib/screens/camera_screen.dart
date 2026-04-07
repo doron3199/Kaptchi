@@ -53,6 +53,7 @@ class CameraScreen extends StatefulWidget {
 class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver, SingleTickerProviderStateMixin {
   final _transformationController = TransformationController();
+  final _canvasTransformationController = TransformationController();
 
   c.CameraController? _controller;
   List<c.CameraDescription> _cameras = [];
@@ -102,7 +103,8 @@ class _CameraScreenState extends State<CameraScreen>
 
   // Virtual Display Capture Mode State
   bool _isVddCaptureMode = false;
-  bool _vddScrollForwardsToDisplay = false; // false = zoom (default), true = forward scroll
+  bool _vddScrollForwardsToDisplay =
+      false; // false = zoom (default), true = forward scroll
 
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
@@ -139,9 +141,7 @@ class _CameraScreenState extends State<CameraScreen>
       final count = svc.getSubCanvasCount();
       final activeVec = svc.getActiveSubCanvasIndex();
       // Convert raw vector index to spatial sorted position
-      final sortedPos = activeVec < 0
-          ? 0
-          : svc.getSortedPosition(activeVec);
+      final sortedPos = activeVec < 0 ? 0 : svc.getSortedPosition(activeVec);
       final activeIdx = sortedPos < 0 ? 0 : sortedPos;
       final cur = _canvasNavNotifier.value;
       if (count != cur.count || activeIdx != cur.active) {
@@ -725,10 +725,12 @@ class _CameraScreenState extends State<CameraScreen>
     int clickType,
   ) {
     // Compute the visual scale (digital zoom portion beyond the phone/optical limit)
-    final double limit =
-        _isDigitalZoomOverride ? _lockedPhoneZoom : _phoneMaxZoom;
-    final double visualScale =
-        _currentZoom > limit ? _currentZoom / limit : 1.0;
+    final double limit = _isDigitalZoomOverride
+        ? _lockedPhoneZoom
+        : _phoneMaxZoom;
+    final double visualScale = _currentZoom > limit
+        ? _currentZoom / limit
+        : 1.0;
 
     // Reverse the transform: screen position → content position
     // The ZoomableStreamView applies: translate(_viewOffset) then scale(visualScale)
@@ -764,10 +766,12 @@ class _CameraScreenState extends State<CameraScreen>
     Size viewportSize,
     double scrollDeltaY,
   ) {
-    final double limit =
-        _isDigitalZoomOverride ? _lockedPhoneZoom : _phoneMaxZoom;
-    final double visualScale =
-        _currentZoom > limit ? _currentZoom / limit : 1.0;
+    final double limit = _isDigitalZoomOverride
+        ? _lockedPhoneZoom
+        : _phoneMaxZoom;
+    final double visualScale = _currentZoom > limit
+        ? _currentZoom / limit
+        : 1.0;
 
     final double contentX = (scrollPos.dx - _viewOffset.dx) / visualScale;
     final double contentY = (scrollPos.dy - _viewOffset.dy) / visualScale;
@@ -848,6 +852,7 @@ class _CameraScreenState extends State<CameraScreen>
     _controller?.dispose();
     unawaited(_stopMobileRtmpStreaming(fromDispose: true));
     _transformationController.dispose();
+    _canvasTransformationController.dispose();
     _clearActiveStreamTracking();
 
     _mediaServerSubscription?.cancel();
@@ -1017,18 +1022,19 @@ class _CameraScreenState extends State<CameraScreen>
 
       // Convert RGBA to PNG
       final image = await ui.ImmutableBuffer.fromUint8List(result.bytes)
-          .then((buffer) => ui.ImageDescriptor.raw(
-                buffer,
-                width: result.width,
-                height: result.height,
-                pixelFormat: ui.PixelFormat.rgba8888,
-              ))
+          .then(
+            (buffer) => ui.ImageDescriptor.raw(
+              buffer,
+              width: result.width,
+              height: result.height,
+              pixelFormat: ui.PixelFormat.rgba8888,
+            ),
+          )
           .then((descriptor) => descriptor.instantiateCodec())
           .then((codec) => codec.getNextFrame())
           .then((frame) => frame.image);
 
-      final byteData =
-          await image.toByteData(format: ui.ImageByteFormat.png);
+      final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
       if (!mounted || byteData == null) return;
 
       final pngBytes = byteData.buffer.asUint8List();
@@ -1036,9 +1042,9 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (e) {
       debugPrint('Error capturing full canvas: $e');
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error capturing canvas: $e')),
-      );
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Error capturing canvas: $e')));
     }
   }
 
@@ -1375,20 +1381,15 @@ class _CameraScreenState extends State<CameraScreen>
             if (_isVddCaptureMode)
               IconButton(
                 icon: Icon(
-                  _vddScrollForwardsToDisplay
-                      ? Icons.mouse
-                      : Icons.zoom_in,
-                  color: _vddScrollForwardsToDisplay
-                      ? Colors.deepPurple
-                      : null,
+                  _vddScrollForwardsToDisplay ? Icons.mouse : Icons.zoom_in,
+                  color: _vddScrollForwardsToDisplay ? Colors.deepPurple : null,
                 ),
                 tooltip: _vddScrollForwardsToDisplay
                     ? 'Scroll: forwarding to display (click to switch to zoom)'
                     : 'Scroll: zooming (click to switch to forward)',
                 onPressed: () {
                   setState(() {
-                    _vddScrollForwardsToDisplay =
-                        !_vddScrollForwardsToDisplay;
+                    _vddScrollForwardsToDisplay = !_vddScrollForwardsToDisplay;
                   });
                 },
               ),
@@ -1423,7 +1424,6 @@ class _CameraScreenState extends State<CameraScreen>
                   NativeCameraService().setPanoramaEnabled(enableWhiteboard);
                 },
               ),
-            // Canvas View Toggle (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(
                 icon: Icon(
@@ -1456,9 +1456,7 @@ class _CameraScreenState extends State<CameraScreen>
                 onPressed: () {
                   Navigator.push(
                     context,
-                    MaterialPageRoute(
-                      builder: (_) => const EditCanvasScreen(),
-                    ),
+                    MaterialPageRoute(builder: (_) => const EditCanvasScreen()),
                   );
                 },
               ),
@@ -1564,10 +1562,13 @@ class _CameraScreenState extends State<CameraScreen>
                                         ],
                                       )
                                     : NativeCameraView(
-                                        overrideAspectRatio:
+                                        transformationController:
                                             _isCanvasViewMode
-                                                ? _canvasAspectRatio
-                                                : null,
+                                            ? _canvasTransformationController
+                                            : null,
+                                        overrideAspectRatio: _isCanvasViewMode
+                                            ? _canvasAspectRatio
+                                            : null,
                                       );
 
                                 final videoStack = Stack(
@@ -1578,7 +1579,9 @@ class _CameraScreenState extends State<CameraScreen>
                                     else
                                       ZoomableStreamView(
                                         enabled: true,
-                                        disableScrollZoom: _isVddCaptureMode && _vddScrollForwardsToDisplay,
+                                        disableScrollZoom:
+                                            _isVddCaptureMode &&
+                                            _vddScrollForwardsToDisplay,
                                         currentZoom: _currentZoom,
                                         viewOffset: _viewOffset,
                                         isDigitalZoomOverride:
@@ -1606,17 +1609,16 @@ class _CameraScreenState extends State<CameraScreen>
                                     return Listener(
                                       onPointerSignal:
                                           _vddScrollForwardsToDisplay
-                                              ? (event) {
-                                                  if (event
-                                                      is PointerScrollEvent) {
-                                                    _forwardScrollToVirtualDisplay(
-                                                      event.localPosition,
-                                                      constraints.biggest,
-                                                      event.scrollDelta.dy,
-                                                    );
-                                                  }
-                                                }
-                                              : null,
+                                          ? (event) {
+                                              if (event is PointerScrollEvent) {
+                                                _forwardScrollToVirtualDisplay(
+                                                  event.localPosition,
+                                                  constraints.biggest,
+                                                  event.scrollDelta.dy,
+                                                );
+                                              }
+                                            }
+                                          : null,
                                       child: GestureDetector(
                                         behavior: HitTestBehavior.translucent,
                                         onTapUp: (details) {
@@ -1873,8 +1875,7 @@ class _CameraScreenState extends State<CameraScreen>
                               final vecIdx = NativeCameraService()
                                   .getSortedSubCanvasIndex(nextSorted);
                               if (vecIdx < 0) return;
-                              NativeCameraService()
-                                  .setActiveSubCanvas(vecIdx);
+                              NativeCameraService().setActiveSubCanvas(vecIdx);
                               _canvasNavNotifier.value = (
                                 count: nav.count,
                                 active: nextSorted,
@@ -1907,8 +1908,7 @@ class _CameraScreenState extends State<CameraScreen>
                               final vecIdx = NativeCameraService()
                                   .getSortedSubCanvasIndex(nextSorted);
                               if (vecIdx < 0) return;
-                              NativeCameraService()
-                                  .setActiveSubCanvas(vecIdx);
+                              NativeCameraService().setActiveSubCanvas(vecIdx);
                               _canvasNavNotifier.value = (
                                 count: nav.count,
                                 active: nextSorted,
