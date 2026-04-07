@@ -511,6 +511,36 @@ static cv::Rect TranslateCanvasRectToFrame(const cv::Rect& r, const cv::Point2f&
                     r.width, r.height);
 }
 
+static int AdvanceValueTowardsTarget(int current,
+                                     int target,
+                                     float alpha,
+                                     int max_step) {
+    if (current == target) return target;
+
+    const int delta = target - current;
+    int step = (int)std::lround((float)delta * alpha);
+    if (step == 0) step = delta > 0 ? 1 : -1;
+
+    const int clamped_max_step = std::max(1, max_step);
+    step = std::clamp(step, -clamped_max_step, clamped_max_step);
+    if ((delta > 0 && step > delta) || (delta < 0 && step < delta)) {
+        return target;
+    }
+    return current + step;
+}
+
+static cv::Rect AdvanceRectTowardsTarget(const cv::Rect& current,
+                                         const cv::Rect& target,
+                                         float alpha,
+                                         int max_step) {
+    if (current == target) return target;
+    return cv::Rect(
+        AdvanceValueTowardsTarget(current.x, target.x, alpha, max_step),
+        AdvanceValueTowardsTarget(current.y, target.y, alpha, max_step),
+        std::max(1, AdvanceValueTowardsTarget(current.width, target.width, alpha, max_step)),
+        std::max(1, AdvanceValueTowardsTarget(current.height, target.height, alpha, max_step)));
+}
+
 static cv::Rect ExpandRectByPixels(const cv::Rect& r, int px, int py) {
     if (r.width <= 0 || r.height <= 0) return {};
     int ex = std::max(0, px);
@@ -1817,6 +1847,10 @@ static bool CopyBgrFrameToRgbaBuffer(const cv::Mat& bgr, uint8_t* buf, int w, in
 
 } // namespace
 
+cv::Rect GetWhiteboardCanvasProcessingRoi(const cv::Size& size) {
+    return ComputeProcessingRoi(size);
+}
+
 cv::Mat WhiteboardCanvas::BuildBinaryMask(const cv::Mat& gray, const cv::Mat& no_update_mask,
                                            int& stroke_pixel_count) {
     cv::Mat small_gray;
@@ -1958,6 +1992,136 @@ bool WhiteboardCanvas::EnsureRenderCacheReady(WhiteboardGroup& group,
     return !GetRenderCacheForMode(group, mode).empty();
 }
 
+void WhiteboardCanvas::ClearCameraWindowOverlay() {
+    camera_window_overlay_.valid = false;
+    camera_window_overlay_.group_index = -1;
+    camera_window_overlay_.canvas_rect = cv::Rect();
+    camera_window_overlay_.target_canvas_rect = cv::Rect();
+    last_camera_window_map_frame_ = -kCameraWindowRemapEveryProcessedFrames;
+}
+
+void WhiteboardCanvas::UpdateCameraWindowOverlay(const cv::Mat& frame_bgr, int current_frame) {
+    if (!camera_window_enabled_.load(std::memory_order_relaxed)) {
+        ClearCameraWindowOverlay();
+        return;
+    }
+    if (frame_bgr.empty()) return;
+    if (active_group_idx_ < 0 || active_group_idx_ >= (int)groups_.size()) {
+        ClearCameraWindowOverlay();
+        return;
+    }
+
+    auto& group = *groups_[active_group_idx_];
+    if (group.nodes.empty()) {
+        ClearCameraWindowOverlay();
+        return;
+    }
+
+    if (camera_window_overlay_.valid &&
+        camera_window_overlay_.group_index == active_group_idx_ &&
+        camera_window_overlay_.target_canvas_rect.width > 0 &&
+        camera_window_overlay_.target_canvas_rect.height > 0) {
+        camera_window_overlay_.canvas_rect = AdvanceRectTowardsTarget(
+            camera_window_overlay_.canvas_rect,
+            camera_window_overlay_.target_canvas_rect,
+            kCameraWindowRectSmoothingAlpha,
+            kCameraWindowRectMaxStepPx);
+    }
+
+    if (camera_window_overlay_.valid &&
+        camera_window_overlay_.group_index == active_group_idx_ &&
+        current_frame - last_camera_window_map_frame_ <
+            kCameraWindowRemapEveryProcessedFrames) {
+        return;
+    }
+
+    cv::Mat gray;
+    cv::cvtColor(frame_bgr, gray, cv::COLOR_BGR2GRAY);
+
+    int stroke_px = 0;
+    cv::Mat no_update_mask = cv::Mat::zeros(gray.size(), CV_8UC1);
+    cv::Mat binary = BuildBinaryMask(gray, no_update_mask, stroke_px);
+    std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame_bgr);
+    if (blobs.empty()) return;
+
+    int match_count = 0;
+    const cv::Point2f frame_offset = GlobalShapePass(group, blobs, &match_count);
+    if (match_count <= 0) return;
+
+    const cv::Rect mapped_canvas_rect = TranslateFrameRectToCanvas(
+        cv::Rect(0, 0, frame_bgr.cols, frame_bgr.rows), frame_offset);
+    const bool had_overlay_for_group =
+        camera_window_overlay_.valid &&
+        camera_window_overlay_.group_index == active_group_idx_ &&
+        camera_window_overlay_.canvas_rect.width > 0 &&
+        camera_window_overlay_.canvas_rect.height > 0;
+
+    camera_window_overlay_.valid = true;
+    camera_window_overlay_.group_index = active_group_idx_;
+    if (!had_overlay_for_group) {
+        camera_window_overlay_.canvas_rect = mapped_canvas_rect;
+    } else {
+        camera_window_overlay_.canvas_rect = AdvanceRectTowardsTarget(
+            camera_window_overlay_.canvas_rect,
+            mapped_canvas_rect,
+            kCameraWindowRectSmoothingAlpha,
+            kCameraWindowRectMaxStepPx);
+    }
+    camera_window_overlay_.target_canvas_rect = mapped_canvas_rect;
+    last_camera_window_map_frame_ = current_frame;
+}
+
+bool WhiteboardCanvas::BuildRenderWithCameraWindow(int group_idx,
+                                                   WhiteboardGroup& group,
+                                                   CanvasRenderMode mode,
+                                                   cv::Mat& out_frame,
+                                                   int& out_origin_x,
+                                                   int& out_origin_y) {
+    out_frame.release();
+    out_origin_x = 0;
+    out_origin_y = 0;
+
+    EnsureRenderCacheReady(group, mode);
+    const cv::Mat& cache = GetRenderCacheForMode(group, mode);
+
+    int mnx = 0, mny = 0, mxx = 0, mxy = 0;
+    const bool has_bounds = GetRenderBoundsForMode(group, mode, mnx, mny, mxx, mxy);
+    const bool has_cache = has_bounds && !cache.empty();
+
+    const bool use_overlay = camera_window_enabled_.load(std::memory_order_relaxed) &&
+        camera_window_overlay_.valid &&
+        camera_window_overlay_.group_index == group_idx &&
+        camera_window_overlay_.canvas_rect.width > 0 &&
+        camera_window_overlay_.canvas_rect.height > 0;
+
+    if (!has_cache && !use_overlay) return false;
+
+    cv::Rect union_rect;
+    if (has_cache) {
+        union_rect = cv::Rect(mnx, mny, mxx - mnx, mxy - mny);
+    }
+    if (use_overlay) {
+        union_rect = union_rect.empty()
+            ? camera_window_overlay_.canvas_rect
+            : (union_rect | camera_window_overlay_.canvas_rect);
+    }
+    if (union_rect.empty()) return false;
+
+    cv::Mat composed(union_rect.height, union_rect.width, CV_8UC3, cv::Scalar(255, 255, 255));
+    if (has_cache) {
+        const cv::Rect cache_dst(mnx - union_rect.x,
+                                 mny - union_rect.y,
+                                 cache.cols,
+                                 cache.rows);
+        cache.copyTo(composed(cache_dst));
+    }
+
+    out_origin_x = union_rect.x;
+    out_origin_y = union_rect.y;
+    out_frame = std::move(composed);
+    return true;
+}
+
 // ============================================================================
 //  SECTION 4: Public API
 // ============================================================================
@@ -1993,10 +2157,14 @@ bool WhiteboardCanvas::GetViewport(float panX, float panY, float zoom,
     if (idx < 0 || idx >= (int)groups_.size()) return false;
     auto& group = *groups_[idx];
     const CanvasRenderMode mode = GetRenderMode();
-    if (!EnsureRenderCacheReady(group, mode)) return false;
-    const cv::Mat& cache = GetRenderCacheForMode(group, mode);
+    cv::Mat render_frame;
+    int origin_x = 0;
+    int origin_y = 0;
+    if (!BuildRenderWithCameraWindow(idx, group, mode, render_frame, origin_x, origin_y)) {
+        return false;
+    }
     zoom = std::max(1.0f, zoom);
-    int cw = cache.cols, ch = cache.rows;
+    int cw = render_frame.cols, ch = render_frame.rows;
     float va = (float)viewSize.width / (float)viewSize.height;
     float rh = (float)ch / zoom, rw = rh * va;
     if (rw > cw) { rw = (float)cw; rh = rw / va; }
@@ -2007,7 +2175,7 @@ bool WhiteboardCanvas::GetViewport(float panX, float panY, float zoom,
     cv::Rect roi((int)cx, (int)cy, (int)rw, (int)rh);
     if (roi.x + roi.width  > cw) roi.width  = cw - roi.x;
     if (roi.y + roi.height > ch) roi.height = ch - roi.y;
-    cv::resize(cache(roi), out_frame, viewSize, 0, 0, cv::INTER_LINEAR);
+    cv::resize(render_frame(roi), out_frame, viewSize, 0, 0, cv::INTER_LINEAR);
     return true;
 }
 
@@ -2019,8 +2187,13 @@ bool WhiteboardCanvas::GetOverview(cv::Size viewSize, cv::Mat& out_frame) {
     if (idx < 0 || idx >= (int)groups_.size()) return false;
     auto& group = *groups_[idx];
     const CanvasRenderMode mode = GetRenderMode();
-    if (!EnsureRenderCacheReady(group, mode)) return false;
-    return RenderOverviewToFrame(GetRenderCacheForMode(group, mode), viewSize, out_frame);
+    cv::Mat render_frame;
+    int origin_x = 0;
+    int origin_y = 0;
+    if (!BuildRenderWithCameraWindow(idx, group, mode, render_frame, origin_x, origin_y)) {
+        return false;
+    }
+    return RenderOverviewToFrame(render_frame, viewSize, out_frame);
 }
 
 bool WhiteboardCanvas::GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame) {
@@ -2032,8 +2205,13 @@ bool WhiteboardCanvas::GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame
     if (idx < 0 || idx >= (int)groups_.size()) return false;
     auto& group = *groups_[idx];
     const CanvasRenderMode mode = GetRenderMode();
-    if (!EnsureRenderCacheReady(group, mode)) return false;
-    return RenderOverviewToFrame(GetRenderCacheForMode(group, mode), viewSize, out_frame);
+    cv::Mat render_frame;
+    int origin_x = 0;
+    int origin_y = 0;
+    if (!BuildRenderWithCameraWindow(idx, group, mode, render_frame, origin_x, origin_y)) {
+        return false;
+    }
+    return RenderOverviewToFrame(render_frame, viewSize, out_frame);
 }
 
 void WhiteboardCanvas::Reset() {
@@ -2050,6 +2228,7 @@ void WhiteboardCanvas::Reset() {
     groups_.clear();
     active_group_idx_ = -1;
     view_group_idx_   = -1;
+    ClearCameraWindowOverlay();
     prev_gray_ = cv::Mat();
     has_content_ = false;
     BumpCanvasVersion();
@@ -2083,6 +2262,81 @@ void WhiteboardCanvas::SetRenderMode(CanvasRenderMode mode) {
     if (remote_process_ && helper_client_) helper_client_->SetRenderMode(mode);
 }
 
+void WhiteboardCanvas::SetCameraWindowEnabled(bool enabled) {
+    if (remote_process_ && helper_client_) {
+        helper_client_->SetCameraWindowEnabled(enabled);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!enabled) {
+        camera_window_enabled_.store(false, std::memory_order_relaxed);
+        ClearCameraWindowOverlay();
+        return;
+    }
+
+    const bool has_active_group =
+        active_group_idx_ >= 0 && active_group_idx_ < (int)groups_.size();
+    if (!has_active_group) {
+        camera_window_enabled_.store(false, std::memory_order_relaxed);
+        ClearCameraWindowOverlay();
+        return;
+    }
+
+    int node_count = 0;
+    for (const auto& [node_id, node_ptr] : groups_[active_group_idx_]->nodes) {
+        (void)node_id;
+        if (!node_ptr || IsGhostNode(*node_ptr)) continue;
+        node_count++;
+    }
+    if (node_count < kStableGraphNodeThreshold) {
+        camera_window_enabled_.store(false, std::memory_order_relaxed);
+        ClearCameraWindowOverlay();
+        return;
+    }
+
+    camera_window_enabled_.store(true, std::memory_order_relaxed);
+}
+
+bool WhiteboardCanvas::IsCameraWindowEnabled() const {
+    if (remote_process_ && helper_client_) return helper_client_->IsCameraWindowEnabled();
+    return camera_window_enabled_.load(std::memory_order_relaxed);
+}
+
+bool WhiteboardCanvas::GetCameraWindowRenderRect(cv::Rect& out_rect) const {
+    out_rect = cv::Rect();
+    if (remote_process_ && helper_client_) {
+        return helper_client_->GetCameraWindowRenderRect(out_rect);
+    }
+    if (!camera_window_enabled_.load(std::memory_order_relaxed)) return false;
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (idx < 0 || idx >= (int)groups_.size()) return false;
+    if (!camera_window_overlay_.valid || camera_window_overlay_.group_index != idx) return false;
+
+    const auto& group = *groups_[idx];
+    int mnx = 0;
+    int mny = 0;
+    int mxx = 0;
+    int mxy = 0;
+    cv::Rect union_rect;
+    const bool has_bounds = GetRenderBoundsForMode(group, GetRenderMode(), mnx, mny, mxx, mxy);
+    if (has_bounds) {
+        union_rect = cv::Rect(mnx, mny, mxx - mnx, mxy - mny);
+    }
+    union_rect = union_rect.empty()
+        ? camera_window_overlay_.canvas_rect
+        : (union_rect | camera_window_overlay_.canvas_rect);
+    if (union_rect.empty()) return false;
+
+    out_rect = cv::Rect(
+        camera_window_overlay_.canvas_rect.x - union_rect.x,
+        camera_window_overlay_.canvas_rect.y - union_rect.y,
+        camera_window_overlay_.canvas_rect.width,
+        camera_window_overlay_.canvas_rect.height);
+    return out_rect.width > 0 && out_rect.height > 0;
+}
+
 CanvasRenderMode WhiteboardCanvas::GetRenderMode() const {
     return render_mode_.load(std::memory_order_relaxed) ==
                static_cast<int>(CanvasRenderMode::kRaw)
@@ -2099,11 +2353,19 @@ cv::Size WhiteboardCanvas::GetCanvasSize() const {
     int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
     if (idx >= 0 && idx < (int)groups_.size()) {
         const auto& g = *groups_[idx];
-        const auto& cache = GetRenderCacheForMode(g, GetRenderMode());
-        if (!cache.empty()) return cv::Size(cache.cols, cache.rows);
         int mnx, mny, mxx, mxy;
-        GetRenderBoundsForMode(g, GetRenderMode(), mnx, mny, mxx, mxy);
-        return cv::Size(std::max(1, mxx - mnx), std::max(1, mxy - mny));
+        bool has_bounds = GetRenderBoundsForMode(g, GetRenderMode(), mnx, mny, mxx, mxy);
+        cv::Rect union_rect = has_bounds ? cv::Rect(mnx, mny, mxx - mnx, mxy - mny) : cv::Rect();
+        if (camera_window_enabled_.load(std::memory_order_relaxed) &&
+            camera_window_overlay_.valid &&
+            camera_window_overlay_.group_index == idx) {
+            union_rect = union_rect.empty()
+                ? camera_window_overlay_.canvas_rect
+                : (union_rect | camera_window_overlay_.canvas_rect);
+        }
+        if (!union_rect.empty()) {
+            return union_rect.size();
+        }
     }
     return cv::Size(frame_w_ > 0 ? frame_w_ : kDefaultCanvasWidth,
                     frame_h_ > 0 ? frame_h_ : kDefaultCanvasHeight);
@@ -2235,7 +2497,16 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
 
     // [1] Motion gate
     float mf = 0.0f; bool mth = false;
-    if (ApplyMotionGate(gray, mf, mth)) return;
+    const bool skip_graph_update = ApplyMotionGate(gray, mf, mth);
+
+    if (skip_graph_update) {
+        if (camera_window_enabled_.load(std::memory_order_relaxed)) {
+            std::lock_guard<std::mutex> state_lock(state_mutex_);
+            if (frame_w_ == 0) { frame_w_ = frame.cols; frame_h_ = frame.rows; }
+            UpdateCameraWindowOverlay(frame, current_frame);
+        }
+        return;
+    }
 
     // [2] Binarize
     int stroke_px = 0;
@@ -2298,6 +2569,8 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
         CreateSubCanvas(frame, binary, blobs, current_frame);
         recompute_has_content();
     }
+
+    UpdateCameraWindowOverlay(frame, current_frame);
 }
 
 // ============================================================================
@@ -2385,7 +2658,9 @@ std::vector<FrameBlob> WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary
 // Step 1: Global shape pass — rough offset via total-shape matching + median vote
 // ---------------------------------------------------------------------------
 cv::Point2f WhiteboardCanvas::GlobalShapePass(WhiteboardGroup& group,
-                                               const std::vector<FrameBlob>& blobs) {
+                                               const std::vector<FrameBlob>& blobs,
+                                               int* match_count) {
+    if (match_count) *match_count = 0;
     struct ShapeCandidate { cv::Point2f offset; float difference; };
     std::vector<ShapeCandidate> offset_vectors;
 
@@ -2432,6 +2707,7 @@ cv::Point2f WhiteboardCanvas::GlobalShapePass(WhiteboardGroup& group,
         }
     }
 
+    if (match_count) *match_count = (int)offset_vectors.size();
     if (offset_vectors.empty()) return {};
 
     // Median vote for rough offset
@@ -3451,6 +3727,15 @@ void SetCanvasRenderMode(int mode) {
                 ? CanvasRenderMode::kRaw : CanvasRenderMode::kStroke);
     }
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+}
+
+void SetCanvasCameraWindowEnabled(bool enabled) {
+    if (g_whiteboard_canvas) g_whiteboard_canvas->SetCameraWindowEnabled(enabled);
+    if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+}
+
+bool IsCanvasCameraWindowEnabled() {
+    return g_whiteboard_canvas && g_whiteboard_canvas->IsCameraWindowEnabled();
 }
 
 int64_t GetCanvasTextureId() {

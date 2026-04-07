@@ -26,6 +26,9 @@ public:
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
     CanvasRenderMode GetRenderMode() const;
+    void SetCameraWindowEnabled(bool enabled);
+    bool IsCameraWindowEnabled() const;
+    bool GetCameraWindowRenderRect(cv::Rect& out_rect) const;
     cv::Size GetCanvasSize() const;
     int GetSubCanvasCount() const;
     int GetActiveSubCanvasIndex() const;

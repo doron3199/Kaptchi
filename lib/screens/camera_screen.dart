@@ -107,6 +107,8 @@ class _CameraScreenState extends State<CameraScreen>
   // Whiteboard Canvas Mode State
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
+  bool _isCanvasCameraWindowEnabled = false;
+  bool _isCanvasCameraWindowReady = false;
   bool _isHighWhiteboardSensitivity = false;
   double? _canvasAspectRatio; // null = use default 16:9
   Timer? _canvasPollTimer;
@@ -137,6 +139,8 @@ class _CameraScreenState extends State<CameraScreen>
       if (!mounted || !Platform.isWindows) return;
       final svc = NativeCameraService();
       final count = svc.getSubCanvasCount();
+      final graphNodeCount = _isWhiteboardMode ? svc.getGraphNodeCount() : 0;
+      final cameraWindowReady = graphNodeCount >= 5;
       final activeVec = svc.getActiveSubCanvasIndex();
       // Convert raw vector index to spatial sorted position
       final sortedPos = activeVec < 0
@@ -146,6 +150,17 @@ class _CameraScreenState extends State<CameraScreen>
       final cur = _canvasNavNotifier.value;
       if (count != cur.count || activeIdx != cur.active) {
         _canvasNavNotifier.value = (count: count, active: activeIdx);
+      }
+      if (cameraWindowReady != _isCanvasCameraWindowReady) {
+        setState(() {
+          _isCanvasCameraWindowReady = cameraWindowReady;
+        });
+      }
+      if (!cameraWindowReady && _isCanvasCameraWindowEnabled) {
+        setState(() {
+          _isCanvasCameraWindowEnabled = false;
+        });
+        svc.setCanvasCameraWindowEnabled(false);
       }
       // Update canvas aspect ratio for texture sizing
       if (_isCanvasViewMode) {
@@ -167,6 +182,7 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasPollTimer?.cancel();
     _canvasPollTimer = null;
     _canvasNavNotifier.value = (count: 0, active: 0);
+    _isCanvasCameraWindowReady = false;
   }
 
   void _setCanvasViewMode(bool enabled) {
@@ -1418,6 +1434,9 @@ class _CameraScreenState extends State<CameraScreen>
                     if (_isCanvasViewMode) {
                       _setCanvasViewMode(false);
                     }
+                    _isCanvasCameraWindowEnabled = false;
+                    _isCanvasCameraWindowReady = false;
+                    NativeCameraService().setCanvasCameraWindowEnabled(false);
                   }
 
                   NativeCameraService().setPanoramaEnabled(enableWhiteboard);
@@ -1434,6 +1453,29 @@ class _CameraScreenState extends State<CameraScreen>
                 onPressed: () {
                   _setCanvasViewMode(!_isCanvasViewMode);
                 },
+              ),
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  _isCanvasCameraWindowEnabled
+                      ? Icons.person
+                      : Icons.person_outline,
+                  color: _isCanvasCameraWindowEnabled
+                      ? Colors.teal
+                      : (_isCanvasCameraWindowReady ? null : Colors.grey),
+                ),
+                tooltip: _isCanvasCameraWindowReady
+                    ? 'Toggle mapped camera window'
+                    : 'Mapped camera window becomes available after enough whiteboard mapping',
+                onPressed: _isCanvasCameraWindowReady
+                    ? () {
+                  final enabled = !_isCanvasCameraWindowEnabled;
+                  setState(() {
+                    _isCanvasCameraWindowEnabled = enabled;
+                  });
+                  NativeCameraService().setCanvasCameraWindowEnabled(enabled);
+                }
+                    : null,
               ),
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(

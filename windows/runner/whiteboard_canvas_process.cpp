@@ -60,6 +60,7 @@ struct SharedState {
     LONG helper_alive = 0;
     LONG whiteboard_enabled = 0;
     LONG canvas_view_mode = 0;
+    LONG camera_window_enabled = 0;
     LONG render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
     LONG whiteboard_debug = 0;
     LONG duplicate_debug_mode = 0;
@@ -78,6 +79,11 @@ struct SharedState {
     LONG has_content = 0;
     LONG canvas_width = kDefaultCanvasWidth;
     LONG canvas_height = kDefaultCanvasHeight;
+    LONG camera_window_rect_valid = 0;
+    LONG camera_window_rect_x = 0;
+    LONG camera_window_rect_y = 0;
+    LONG camera_window_rect_w = 0;
+    LONG camera_window_rect_h = 0;
     LONG subcanvas_count = 0;
     LONG active_subcanvas = -1;
     LONG frame_available = 0;
@@ -137,6 +143,7 @@ struct HelperStateSnapshot {
     bool shutdown = false;
     bool enabled = false;
     bool canvas_view_mode = false;
+    bool camera_window_enabled = false;
     CanvasRenderMode render_mode = CanvasRenderMode::kStroke;
     bool debug_enabled = false;
     bool duplicate_debug_enabled = false;
@@ -290,6 +297,7 @@ public:
             }
 
             canvas.SetCanvasViewMode(snapshot.canvas_view_mode);
+            canvas.SetCameraWindowEnabled(snapshot.camera_window_enabled);
             canvas.SetRenderMode(snapshot.render_mode);
             canvas.SetDuplicateDebugMode(snapshot.duplicate_debug_enabled);
 
@@ -472,6 +480,7 @@ private:
         snapshot.shutdown = shared_->shutdown != 0;
         snapshot.enabled = shared_->whiteboard_enabled != 0;
         snapshot.canvas_view_mode = shared_->canvas_view_mode != 0;
+        snapshot.camera_window_enabled = shared_->camera_window_enabled != 0;
         snapshot.render_mode = shared_->render_mode == static_cast<LONG>(CanvasRenderMode::kRaw)
             ? CanvasRenderMode::kRaw
             : CanvasRenderMode::kStroke;
@@ -555,6 +564,9 @@ private:
         // client from timing out on every read attempt.
         const bool has_content = canvas.HasContent();
         const cv::Size canvas_size = has_content ? canvas.GetCanvasSize() : cv::Size(0, 0);
+        cv::Rect camera_window_rect;
+        const bool has_camera_window_rect = has_content &&
+            canvas.GetCameraWindowRenderRect(camera_window_rect);
         const int subcanvas_count = has_content ? canvas.GetSubCanvasCount() : 0;
         const int active_subcanvas = has_content ? canvas.GetActiveSubCanvasIndex() : -1;
 
@@ -587,6 +599,11 @@ private:
         shared_->has_content = has_content ? 1 : 0;
         shared_->canvas_width = canvas_size.width;
         shared_->canvas_height = canvas_size.height;
+        shared_->camera_window_rect_valid = has_camera_window_rect ? 1 : 0;
+        shared_->camera_window_rect_x = camera_window_rect.x;
+        shared_->camera_window_rect_y = camera_window_rect.y;
+        shared_->camera_window_rect_w = camera_window_rect.width;
+        shared_->camera_window_rect_h = camera_window_rect.height;
         shared_->subcanvas_count = subcanvas_count;
         shared_->active_subcanvas = active_subcanvas;
         shared_->graph_compare_result_ready = graph_compare_result_ready ? 1 : 0;
@@ -603,6 +620,7 @@ private:
             shared_->viewport_height = 0;
             shared_->overview_width = 0;
             shared_->overview_height = 0;
+            shared_->camera_window_rect_valid = 0;
             shared_->graph_node_count = 0;
             shared_->graph_node_floats_written = 0;
             shared_->graph_edge_count = 0;
@@ -688,6 +706,7 @@ struct WhiteboardCanvasHelperClient::Impl {
     bool ready = false;
     std::atomic<bool> cached_has_content{false};
     std::atomic<bool> cached_canvas_view_mode{false};
+    std::atomic<bool> cached_camera_window_enabled{false};
     std::atomic<int> cached_render_mode{static_cast<int>(CanvasRenderMode::kStroke)};
     std::atomic<int> cached_canvas_width{kDefaultCanvasWidth};
     std::atomic<int> cached_canvas_height{kDefaultCanvasHeight};
@@ -709,6 +728,8 @@ struct WhiteboardCanvasHelperClient::Impl {
         cached_has_content.store(shared->has_content != 0, std::memory_order_relaxed);
         cached_canvas_view_mode.store(shared->canvas_view_mode != 0,
                                       std::memory_order_relaxed);
+        cached_camera_window_enabled.store(shared->camera_window_enabled != 0,
+                           std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(shared->render_mode),
                                  std::memory_order_relaxed);
         cached_canvas_width.store(std::max(1L, shared->canvas_width),
@@ -724,6 +745,7 @@ struct WhiteboardCanvasHelperClient::Impl {
     void ResetCachedState() {
         cached_has_content.store(false, std::memory_order_relaxed);
         cached_canvas_view_mode.store(false, std::memory_order_relaxed);
+        cached_camera_window_enabled.store(false, std::memory_order_relaxed);
         cached_render_mode.store(static_cast<int>(CanvasRenderMode::kStroke),
                                  std::memory_order_relaxed);
         cached_canvas_width.store(kDefaultCanvasWidth, std::memory_order_relaxed);
@@ -798,6 +820,7 @@ bool WhiteboardCanvasHelperClient::Start() {
     impl_->shared->pan_x = 0.5f;
     impl_->shared->pan_y = 0.5f;
     impl_->shared->zoom = 1.0f;
+    impl_->shared->camera_window_enabled = 0;
     impl_->shared->duplicate_debug_mode = 0;
     impl_->shared->enhance_threshold = 5.0f;
     impl_->shared->yolo_fps = 2.0f;
@@ -1062,6 +1085,39 @@ void WhiteboardCanvasHelperClient::SetRenderMode(CanvasRenderMode mode) {
         impl_->RefreshCachedStateUnsafe();
     });
     impl_->SignalHelper();
+}
+
+void WhiteboardCanvasHelperClient::SetCameraWindowEnabled(bool enabled) {
+    if (!IsReady()) return;
+    impl_->cached_camera_window_enabled.store(enabled, std::memory_order_relaxed);
+    impl_->WithLock(20, [&]() {
+        impl_->shared->camera_window_enabled = enabled ? 1 : 0;
+        impl_->RefreshCachedStateUnsafe();
+    });
+    impl_->SignalHelper();
+}
+
+bool WhiteboardCanvasHelperClient::IsCameraWindowEnabled() const {
+    if (!IsReady()) return false;
+    return impl_->cached_camera_window_enabled.load(std::memory_order_relaxed);
+}
+
+bool WhiteboardCanvasHelperClient::GetCameraWindowRenderRect(cv::Rect& out_rect) const {
+    out_rect = cv::Rect();
+    if (!IsReady()) return false;
+
+    bool valid = false;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        valid = impl_->shared->camera_window_rect_valid != 0;
+        if (valid) {
+            out_rect = cv::Rect(
+                static_cast<int>(impl_->shared->camera_window_rect_x),
+                static_cast<int>(impl_->shared->camera_window_rect_y),
+                static_cast<int>(impl_->shared->camera_window_rect_w),
+                static_cast<int>(impl_->shared->camera_window_rect_h));
+        }
+    });
+    return valid && out_rect.width > 0 && out_rect.height > 0;
 }
 
 CanvasRenderMode WhiteboardCanvasHelperClient::GetRenderMode() const {

@@ -27,6 +27,7 @@
 #include <unordered_set>
 
 class WhiteboardCanvasHelperClient;
+cv::Rect GetWhiteboardCanvasProcessingRoi(const cv::Size& size);
 
 enum class CanvasRenderMode : int {
     kStroke = 0,
@@ -213,6 +214,9 @@ public:
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
     CanvasRenderMode GetRenderMode() const;
+    void SetCameraWindowEnabled(bool enabled);
+    bool IsCameraWindowEnabled() const;
+    bool GetCameraWindowRenderRect(cv::Rect& out_rect) const;
     void SetDuplicateDebugMode(bool enabled);
     bool IsDuplicateDebugMode() const;
     bool IsRemoteProcess() const;
@@ -377,6 +381,14 @@ private:
     // Run a whole-graph duplicate sweep every N processed frames to collapse pre-existing duplicates
     // that were admitted earlier or drifted together after later updates.
     static const int       kGraphDedupeEveryProcessedFrames = 20;
+    // Re-run the camera-window global mapping only every N processed frames.
+    static const int       kCameraWindowRemapEveryProcessedFrames = 1;
+    // Blend the displayed camera-window rect toward each newly mapped target.
+    // Lower = smoother/slower movement. Higher = snappier but more jitter.
+    static constexpr float kCameraWindowRectSmoothingAlpha = 0.2f;
+    // Cap how far the displayed camera-window rect can move per update.
+    // This limits sudden jumps when mapping briefly shifts.
+    static const int       kCameraWindowRectMaxStepPx = 24;
 
     // --- Absence (natural erasure) ---
     // Score subtracted per frame when a node is in the visible area but not matched.
@@ -464,7 +476,8 @@ private:
     std::vector<FrameBlob> ExtractFrameBlobs(const cv::Mat& binary,
                                               const cv::Mat& frame_bgr) const;
     cv::Point2f GlobalShapePass(WhiteboardGroup& group,
-                                const std::vector<FrameBlob>& blobs);
+                                const std::vector<FrameBlob>& blobs,
+                                int* match_count = nullptr);
     cv::Point2f MatchBlobsToGraph(WhiteboardGroup& group,
                                    std::vector<FrameBlob>& blobs);
     bool UpdateGraph(WhiteboardGroup& group, std::vector<FrameBlob>& blobs,
@@ -474,12 +487,28 @@ private:
     static void RemoveNodeFromGraph(WhiteboardGroup& group, int node_id);
     void RebuildStrokeRenderCache(WhiteboardGroup& group);
     void RebuildRawRenderCache(WhiteboardGroup& group);
+    void ClearCameraWindowOverlay();
+    void UpdateCameraWindowOverlay(const cv::Mat& frame_bgr, int current_frame);
+    bool BuildRenderWithCameraWindow(int group_idx, WhiteboardGroup& group,
+                                     CanvasRenderMode mode, cv::Mat& out_frame,
+                                     int& out_origin_x, int& out_origin_y);
     void CreateSubCanvas(const cv::Mat& frame_bgr, const cv::Mat& binary,
                          std::vector<FrameBlob>& blobs, int current_frame);
     void SeedGroupFromFrameBlobs(WhiteboardGroup& group,
                                  const std::vector<FrameBlob>& blobs,
                                  int current_frame);
     void UpdateGroupBounds(WhiteboardGroup& group);
+
+    struct CameraWindowOverlay {
+        bool valid = false;
+        int group_index = -1;
+        cv::Rect canvas_rect;
+        cv::Rect target_canvas_rect;
+    };
+
+    std::atomic<bool>     camera_window_enabled_{false};
+    CameraWindowOverlay   camera_window_overlay_;
+    int                   last_camera_window_map_frame_ = -30;
 };
 
 // ---------------------------------------------------------------------------
@@ -509,6 +538,8 @@ extern "C" {
     __declspec(dllexport) void    SetCanvasViewMode(bool mode);
     __declspec(dllexport) bool    IsCanvasViewMode();
     __declspec(dllexport) void    SetCanvasRenderMode(int mode);
+    __declspec(dllexport) void    SetCanvasCameraWindowEnabled(bool enabled);
+    __declspec(dllexport) bool    IsCanvasCameraWindowEnabled();
     __declspec(dllexport) int64_t GetCanvasTextureId();
     __declspec(dllexport) bool    GetCanvasOverviewRgba(uint8_t* buffer, int width, int height);
     __declspec(dllexport) bool    GetCanvasViewportRgba(uint8_t* buffer, int width, int height,

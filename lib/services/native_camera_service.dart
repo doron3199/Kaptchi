@@ -77,6 +77,12 @@ typedef IsCanvasViewMode = bool Function();
 typedef SetCanvasRenderModeFunc = Void Function(Int32 mode);
 typedef SetCanvasRenderMode = void Function(int mode);
 
+typedef SetCanvasCameraWindowEnabledFunc = Void Function(Bool enabled);
+typedef SetCanvasCameraWindowEnabled = void Function(bool enabled);
+
+typedef IsCanvasCameraWindowEnabledFunc = Bool Function();
+typedef IsCanvasCameraWindowEnabled = bool Function();
+
 typedef GetCanvasTextureIdFunc = Int64 Function();
 typedef GetCanvasTextureId = int Function();
 
@@ -276,6 +282,8 @@ class NativeCameraService {
   late SetCanvasViewMode _setCanvasViewMode;
   late IsCanvasViewMode _isCanvasViewMode;
   late SetCanvasRenderMode _setCanvasRenderMode;
+  late SetCanvasCameraWindowEnabled _setCanvasCameraWindowEnabled;
+  late IsCanvasCameraWindowEnabled _isCanvasCameraWindowEnabled;
   late GetCanvasTextureId _getCanvasTextureId;
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
   late SetWhiteboardDebug _setWhiteboardDebug;
@@ -372,6 +380,16 @@ class NativeCameraService {
         .asFunction();
     _setCanvasRenderMode = _nativeLib
       .lookup<NativeFunction<SetCanvasRenderModeFunc>>('SetCanvasRenderMode')
+      .asFunction();
+    _setCanvasCameraWindowEnabled = _nativeLib
+      .lookup<NativeFunction<SetCanvasCameraWindowEnabledFunc>>(
+        'SetCanvasCameraWindowEnabled',
+      )
+      .asFunction();
+    _isCanvasCameraWindowEnabled = _nativeLib
+      .lookup<NativeFunction<IsCanvasCameraWindowEnabledFunc>>(
+        'IsCanvasCameraWindowEnabled',
+      )
       .asFunction();
     _getCanvasTextureId = _nativeLib
         .lookup<NativeFunction<GetCanvasTextureIdFunc>>('GetCanvasTextureId')
@@ -601,6 +619,16 @@ class NativeCameraService {
   void setCanvasRenderMode(int mode) {
     initialize();
     _setCanvasRenderMode(mode);
+  }
+
+  void setCanvasCameraWindowEnabled(bool enabled) {
+    initialize();
+    _setCanvasCameraWindowEnabled(enabled);
+  }
+
+  bool isCanvasCameraWindowEnabled() {
+    initialize();
+    return _isCanvasCameraWindowEnabled();
   }
 
   /// Returns the Flutter texture ID for the canvas (Phase 2; -1 = not available)

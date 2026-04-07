@@ -109,6 +109,137 @@ static void MaybePrintWhiteboardBridgePerfLog(bool remote_process,
     (void)remote_process; (void)canvas_view_mode; (void)has_content;
 }
 
+static cv::Rect ScaleRectToCanvasSize(const cv::Rect& rect,
+                                      const cv::Size& source_size,
+                                      const cv::Size& target_size) {
+    if (rect.width <= 0 || rect.height <= 0 ||
+        source_size.width <= 0 || source_size.height <= 0 ||
+        target_size.width <= 0 || target_size.height <= 0) {
+        return {};
+    }
+
+    const double scale_x = static_cast<double>(target_size.width) / source_size.width;
+    const double scale_y = static_cast<double>(target_size.height) / source_size.height;
+    cv::Rect scaled(
+        static_cast<int>(std::lround(rect.x * scale_x)),
+        static_cast<int>(std::lround(rect.y * scale_y)),
+        std::max(1, static_cast<int>(std::lround(rect.width * scale_x))),
+        std::max(1, static_cast<int>(std::lround(rect.height * scale_y))));
+    return scaled & cv::Rect(0, 0, target_size.width, target_size.height);
+}
+
+static bool CropWhiteboardInputFrame(const cv::Mat& source_bgr, cv::Mat& cropped_bgr) {
+    cropped_bgr.release();
+    if (source_bgr.empty()) {
+        return false;
+    }
+
+    const cv::Rect roi = GetWhiteboardCanvasProcessingRoi(source_bgr.size()) &
+        cv::Rect(0, 0, source_bgr.cols, source_bgr.rows);
+    if (roi.width <= 0 || roi.height <= 0) {
+        return false;
+    }
+
+    cropped_bgr = source_bgr(roi).clone();
+    return !cropped_bgr.empty();
+}
+
+static void CoverResizeIntoRect(const cv::Mat& source_bgr,
+                                const cv::Rect& target_rect,
+                                cv::Mat& canvas_bgr) {
+    if (source_bgr.empty() || target_rect.width <= 0 || target_rect.height <= 0 ||
+        canvas_bgr.empty()) {
+        return;
+    }
+
+    const cv::Rect canvas_bounds(0, 0, canvas_bgr.cols, canvas_bgr.rows);
+    const cv::Rect clipped_target = target_rect & canvas_bounds;
+    if (clipped_target.width <= 0 || clipped_target.height <= 0) {
+        return;
+    }
+
+    const double scale_x = static_cast<double>(target_rect.width) / source_bgr.cols;
+    const double scale_y = static_cast<double>(target_rect.height) / source_bgr.rows;
+    const double scale = std::max(scale_x, scale_y);
+    const cv::Size scaled_size(
+        std::max(1, static_cast<int>(std::lround(source_bgr.cols * scale))),
+        std::max(1, static_cast<int>(std::lround(source_bgr.rows * scale))));
+    const int interpolation = scale < 1.0 ? cv::INTER_AREA : cv::INTER_CUBIC;
+
+    cv::Mat scaled_bgr;
+    cv::resize(source_bgr, scaled_bgr, scaled_size, 0, 0, interpolation);
+
+    const int crop_x = std::max(0, (scaled_bgr.cols - target_rect.width) / 2);
+    const int crop_y = std::max(0, (scaled_bgr.rows - target_rect.height) / 2);
+    const cv::Rect crop_rect(
+        crop_x,
+        crop_y,
+        std::min(target_rect.width, scaled_bgr.cols - crop_x),
+        std::min(target_rect.height, scaled_bgr.rows - crop_y));
+    if (crop_rect.width <= 0 || crop_rect.height <= 0) {
+        return;
+    }
+
+    cv::Mat source_roi = scaled_bgr(crop_rect);
+    cv::Mat fitted_target;
+    if (source_roi.size() != target_rect.size()) {
+        cv::resize(source_roi, fitted_target, target_rect.size(), 0, 0, cv::INTER_LINEAR);
+    } else {
+        fitted_target = source_roi;
+    }
+
+    const cv::Rect fitted_roi(
+        clipped_target.x - target_rect.x,
+        clipped_target.y - target_rect.y,
+        clipped_target.width,
+        clipped_target.height);
+    if (fitted_roi.x < 0 || fitted_roi.y < 0 ||
+        fitted_roi.x + fitted_roi.width > fitted_target.cols ||
+        fitted_roi.y + fitted_roi.height > fitted_target.rows) {
+        return;
+    }
+
+    fitted_target(fitted_roi).copyTo(canvas_bgr(clipped_target));
+}
+
+static bool CompositeLatestCameraWindowIntoCanvas(NativeCamera& camera,
+                                                  cv::Mat& canvas_bgr,
+                                                  const cv::Size& source_canvas_size,
+                                                  const cv::Mat* preferred_source_bgr = nullptr) {
+    if (!g_whiteboard_canvas || canvas_bgr.empty() || !g_whiteboard_canvas->IsCameraWindowEnabled()) {
+        return false;
+    }
+
+    cv::Rect render_rect;
+    if (!g_whiteboard_canvas->GetCameraWindowRenderRect(render_rect)) {
+        return false;
+    }
+
+    cv::Rect target_rect = render_rect;
+    if (canvas_bgr.size() != source_canvas_size) {
+        target_rect = ScaleRectToCanvasSize(render_rect, source_canvas_size, canvas_bgr.size());
+    }
+    target_rect &= cv::Rect(0, 0, canvas_bgr.cols, canvas_bgr.rows);
+    if (target_rect.width <= 0 || target_rect.height <= 0) {
+        return false;
+    }
+
+    cv::Mat cropped_frame;
+    if (preferred_source_bgr != nullptr && CropWhiteboardInputFrame(*preferred_source_bgr, cropped_frame)) {
+        CoverResizeIntoRect(cropped_frame, target_rect, canvas_bgr);
+        return true;
+    }
+
+    cv::Mat latest_frame;
+    cv::Mat latest_mask;
+    if (!camera.CopyLatestWhiteboardInput(latest_frame, latest_mask) || latest_frame.empty()) {
+        return false;
+    }
+
+    CoverResizeIntoRect(latest_frame, target_rect, canvas_bgr);
+    return true;
+}
+
 } // namespace
 
 // --- Filter Parameters ---
@@ -362,6 +493,20 @@ bool NativeCamera::CopyLatestWhiteboardInput(cv::Mat& frame_bgr, cv::Mat& person
         cached_mask = GetWhiteboardPersonMask(cached_frame);
     }
 
+    const cv::Rect roi = GetWhiteboardCanvasProcessingRoi(cached_frame.size());
+    if (roi.width <= 0 || roi.height <= 0) {
+        return false;
+    }
+
+    cached_frame = cached_frame(roi).clone();
+    if (!cached_mask.empty() &&
+        cached_mask.cols >= roi.x + roi.width &&
+        cached_mask.rows >= roi.y + roi.height) {
+        cached_mask = cached_mask(roi).clone();
+    } else if (!cached_frame.empty()) {
+        cached_mask = GetWhiteboardPersonMask(cached_frame);
+    }
+
     cached_frame.copyTo(frame_bgr);
     cached_mask.copyTo(person_mask);
     return !frame_bgr.empty() && !person_mask.empty();
@@ -547,7 +692,8 @@ void NativeCamera::RefreshDisplayFrame() {
         const bool has_canvas_content = g_whiteboard_canvas->HasContent();
         if (has_canvas_content) {
             // Use canvas size so Flutter gets full-res image
-            cv::Size overview_size = g_whiteboard_canvas->GetCanvasSize();
+            const cv::Size canvas_size = g_whiteboard_canvas->GetCanvasSize();
+            cv::Size overview_size = canvas_size;
             const int kMaxDim = 4096;
             if (overview_size.width > kMaxDim || overview_size.height > kMaxDim) {
                 const float scale = static_cast<float>(kMaxDim) /
@@ -560,13 +706,17 @@ void NativeCamera::RefreshDisplayFrame() {
             if (g_whiteboard_canvas->GetOverview(
                     overview_size,
                     canvas_out)) {
-                display_bgr = canvas_out;
                 canvas_out.copyTo(last_canvas_frame);
+                display_bgr = canvas_out.clone();
+                CompositeLatestCameraWindowIntoCanvas(
+                    *this, display_bgr, canvas_size, &source_bgr);
                 canvas_hold_frame.release();
                 showing_canvas = true;
                 overview_success = true;
             } else if (!last_canvas_frame.empty()) {
                 last_canvas_frame.copyTo(display_bgr);
+                CompositeLatestCameraWindowIntoCanvas(
+                    *this, display_bgr, canvas_size, &source_bgr);
                 showing_canvas = true;
                 used_fallback_frame = true;
             }
@@ -633,6 +783,8 @@ void NativeCamera::ProcessingThreadLoop() {
             has_new_frame_ = false;
         }
 
+        cv::Mat live_source_frame = frame.clone();
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             frame.copyTo(last_source_frame_bgr_);
@@ -679,7 +831,8 @@ void NativeCamera::ProcessingThreadLoop() {
                 const bool has_canvas_content = g_whiteboard_canvas->HasContent();
                 if (has_canvas_content) {
                     // Use canvas size so Flutter gets full-res image
-                    cv::Size overview_size = g_whiteboard_canvas->GetCanvasSize();
+                    const cv::Size canvas_size = g_whiteboard_canvas->GetCanvasSize();
+                    cv::Size overview_size = canvas_size;
                     // Cap to 4096 to avoid absurd texture sizes
                     const int kMaxDim = 4096;
                     if (overview_size.width > kMaxDim || overview_size.height > kMaxDim) {
@@ -696,8 +849,10 @@ void NativeCamera::ProcessingThreadLoop() {
                             canvas_out);
 
                     if (got_lock) {
-                        canvas_out.copyTo(frame);
-                        frame.copyTo(last_canvas_frame);
+                        canvas_out.copyTo(last_canvas_frame);
+                        frame = canvas_out.clone();
+                        CompositeLatestCameraWindowIntoCanvas(
+                            *this, frame, canvas_size, &live_source_frame);
                         canvas_hold_frame.release();
                         g_whiteboard_bridge_perf_stats.canvas_frames++;
                         showing_canvas = true;
@@ -705,6 +860,8 @@ void NativeCamera::ProcessingThreadLoop() {
                     } else if (!last_canvas_frame.empty()) {
                         // Keep showing the last canvas frame (may differ in size from camera frame).
                         last_canvas_frame.copyTo(frame);
+                        CompositeLatestCameraWindowIntoCanvas(
+                            *this, frame, canvas_size, &live_source_frame);
                         g_whiteboard_bridge_perf_stats.canvas_misses++;
                         showing_canvas = true;
                         used_fallback_frame = true;
