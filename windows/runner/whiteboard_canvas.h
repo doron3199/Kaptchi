@@ -320,10 +320,6 @@ private:
     static constexpr float kGlobalShapeMaxDifference     = 0.50f;
     // Area ratio gate for coarse candidate filtering before shape comparison.
     static constexpr float kAreaRatioMin                 = 0.9f;
-    // Minimum combined similarity to accept a shape match in step 2.
-    // Rejects weak matches even if they're the "best" nearby candidate.
-    // Live matching uses the same centroid-aligned shape geometry as duplicate detection.
-    static constexpr float kShapeMatchMinScore           = 0.30f;
     // Max distance (px) of a match vector from the global mean before it is rejected.
     static constexpr float kOutlierVectorThreshold       = 5.0f;
     // Max distance (px) of a match vector from its width-third mean before it is rejected.
@@ -333,9 +329,6 @@ private:
     // Radius (px) for the final shape-matching refinement pass (step 3).
     // This reuses the step-2 matcher with a tighter search window after offset refinement.
     static constexpr float kFinalShapeMatchSearchRadius  = 30.0f;
-    // Minimum combined similarity to accept a shape match in step 3.
-    // Keep this separate from step 2 so the final refinement gate can be tuned independently.
-    static constexpr float kFinalShapeMatchMinScore      = 0.70f;
     // Minimum number of inlier matches required before new strokes are added to the graph.
     static const int       kMinMatchesForNewNode         = 5;
     // Fast Hu pre-filter: skip TotalShapeCompare if log-space Hu L2 distance exceeds this.

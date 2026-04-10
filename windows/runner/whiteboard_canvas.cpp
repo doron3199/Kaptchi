@@ -2459,13 +2459,11 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
     struct ShapeMatchCandidate {
         int node_id = -1;
         cv::Point2f delta_vec;
-        float score = -1.0f;
     };
 
     auto find_best_shape_match = [&](const FrameBlob& blob,
                                      const cv::Point2f& offset,
                                      float search_radius,
-                                     float min_score,
                                      const std::unordered_set<int>& excluded_nodes) {
         ShapeMatchCandidate best_match;
         float best_distance = search_radius;
@@ -2494,28 +2492,11 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
             if (blob.hu_smooth_valid && node.hu_smooth_valid &&
                 ComputeHuDistanceLog(blob.hu_log, node.hu_log) > kHuPreFilterThreshold) continue;
 
-            const cv::Rect aligned_node_bbox = AlignRectToCentroid(
-                node.bbox_canvas, node.centroid_canvas, canvas_centroid);
-
-            const TotalShapeCompareResult shape_compare = TotalShapeCompare(
-                canvas_bbox, &blob.binary_mask, blob.hu,
-                blob.hu_smooth_valid ? blob.hu_smooth : nullptr, &blob.contour,
-                aligned_node_bbox,
-                &node.binary_mask, node.hu,
-                node.hu_smooth_valid ? node.hu_smooth : nullptr, &node.contour);
-            if (!shape_compare.valid) continue;
-
-            const float similarity = 1.0f - shape_compare.difference;
-            if (similarity < min_score) continue;
-
             const float centroid_distance =
                 (float)cv::norm(canvas_centroid - node.centroid_canvas);
-            if (similarity > best_match.score ||
-                (std::abs(similarity - best_match.score) < 1e-6f &&
-                 centroid_distance < best_distance)) {
+            if (centroid_distance < best_distance) {
                 best_match.node_id = nid;
                 best_match.delta_vec = node.centroid_canvas - canvas_centroid;
-                best_match.score = similarity;
                 best_distance = centroid_distance;
             }
         }
@@ -2536,7 +2517,6 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
         int blob_idx;
         int node_id;
         cv::Point2f delta_vec;
-        float score;
         int partition_idx;
     };
     std::vector<ShapeMatch> shape_matches;
@@ -2548,12 +2528,12 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
             blob.centroid.x, frame_w_, kHorizontalMatchPartitions);
 
         const ShapeMatchCandidate best_match = find_best_shape_match(
-            blob, rough_offset, kShapeMatchSearchRadius, kShapeMatchMinScore,
+            blob, rough_offset, kShapeMatchSearchRadius,
             matched_nodes_step2);
 
         if (best_match.node_id >= 0) {
             shape_matches.push_back(
-                {i, best_match.node_id, best_match.delta_vec, best_match.score, partition_idx});
+                {i, best_match.node_id, best_match.delta_vec, partition_idx});
             matched_nodes_step2.insert(best_match.node_id);
         }
     }
@@ -2605,7 +2585,7 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
         auto& blob = blobs[i];
         const ShapeMatchCandidate best_match = find_best_shape_match(
             blob, blob.matched_offset, kFinalShapeMatchSearchRadius,
-            kFinalShapeMatchMinScore, claimed_nodes);
+            claimed_nodes);
         if (best_match.node_id >= 0) {
             blob.matched_node_id = best_match.node_id;
             claimed_nodes.insert(best_match.node_id);
