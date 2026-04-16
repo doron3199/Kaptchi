@@ -61,6 +61,7 @@ app.*.map.json
 /android/app/release
 .claude/
 images/
+!kaptchi_web/public/images/
 
 # IDE / local config
 devtools_options.yaml
