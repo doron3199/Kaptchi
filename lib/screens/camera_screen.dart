@@ -1263,9 +1263,9 @@ class _CameraScreenState extends State<CameraScreen>
     }
 
     final String boardId = (100000 + Random().nextInt(900000)).toString(); 
-    final String host = 'localhost:3000'; 
-    final String wsUrl = 'ws://$host/api/ws?id=$boardId&role=host';
-    final String webUrl = 'http://$host/share?id=$boardId';
+    final String host = 'kaptchi.com'; 
+    final String wsUrl = 'wss://$host/api/ws?id=$boardId&role=host';
+    final String webUrl = 'https://$host/share?id=$boardId';
 
     showDialog(
       context: context,
