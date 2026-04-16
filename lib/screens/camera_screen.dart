@@ -21,6 +21,7 @@ import '../services/media_server_service.dart';
 import '../services/image_processing_service.dart';
 import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
+import '../services/live_share_service.dart';
 import '../services/rtmp_service.dart';
 import '../services/raw_socket_service.dart';
 import '../widgets/camera_sidebars.dart';
@@ -1253,6 +1254,61 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
+  void _showLiveShareDialog() {
+    if (LiveShareService().isBroadcasting) {
+      LiveShareService().stopBroadcasting();
+      setState(() {});
+      return;
+    }
+
+    final String boardId = 'code'; 
+    final String host = 'localhost:3000'; 
+    final String wsUrl = 'ws://$host/api/ws?id=$boardId';
+    final String webUrl = 'http://$host/share?id=$boardId';
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Live Share Canvas'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Share your live canvas to the web viewer:'),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: BoxDecoration(
+                  color: Colors.grey.withAlpha(50),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.grey.withAlpha(50)),
+                ),
+                child: SelectableText(webUrl, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+              ),
+              const SizedBox(height: 16),
+              const Text('Anyone with this link can view the canvas live.'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                LiveShareService().startBroadcasting(wsUrl, boardId);
+                Navigator.pop(context);
+                setState(() {});
+              },
+              child: const Text('Start Sharing'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     if (widget.connectionUrl != null) {
@@ -1434,6 +1490,19 @@ class _CameraScreenState extends State<CameraScreen>
                 onPressed: () {
                   _setCanvasViewMode(!_isCanvasViewMode);
                 },
+              ),
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  LiveShareService().isBroadcasting
+                      ? Icons.cast_connected
+                      : Icons.cast,
+                  color: LiveShareService().isBroadcasting ? Colors.orange : Colors.greenAccent,
+                ),
+                tooltip: LiveShareService().isBroadcasting
+                    ? 'Stop Sharing Canvas'
+                    : 'Share Canvas Live',
+                onPressed: _showLiveShareDialog,
               ),
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(

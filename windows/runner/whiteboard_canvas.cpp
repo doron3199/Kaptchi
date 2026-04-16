@@ -3444,6 +3444,38 @@ bool GetCanvasOverviewRgba(uint8_t* buffer, int width, int height) {
     return CopyBgrFrameToRgbaBuffer(overview, buffer, width, height);
 }
 
+bool GetCanvasOverviewJpeg(uint8_t* buffer, int max_bytes, int* out_size, int quality, int max_dim) {
+    if (!g_whiteboard_canvas || !buffer || !out_size || max_bytes <= 0) return false;
+    
+    cv::Size native_size = g_whiteboard_canvas->GetCanvasSize();
+    if (native_size.width <= 0 || native_size.height <= 0) return false;
+    
+    float scale = 1.0f;
+    if (max_dim > 0 && (native_size.width > max_dim || native_size.height > max_dim)) {
+        scale = static_cast<float>(max_dim) / std::max(native_size.width, native_size.height);
+    }
+    cv::Size view_size(
+        std::max(1, static_cast<int>(native_size.width * scale)),
+        std::max(1, static_cast<int>(native_size.height * scale))
+    );
+
+    cv::Mat overview;
+    if (!g_whiteboard_canvas->GetOverviewBlocking(view_size, overview)) return false;
+    
+    std::vector<uchar> buf;
+    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, quality};
+    bool success = cv::imencode(".jpg", overview, buf, params);
+    
+    if (!success || buf.size() > static_cast<size_t>(max_bytes)) {
+        *out_size = 0;
+        return false;
+    }
+    
+    std::memcpy(buffer, buf.data(), buf.size());
+    *out_size = static_cast<int>(buf.size());
+    return true;
+}
+
 bool GetCanvasViewportRgba(uint8_t* buffer, int width, int height,
                             float panX, float panY, float zoom) {
     if (!g_whiteboard_canvas || !buffer || width <= 0 || height <= 0) return false;

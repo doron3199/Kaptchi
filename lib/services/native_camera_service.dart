@@ -245,6 +245,20 @@ typedef GetCanvasFullResRgbaDart = bool Function(
   Pointer<Int32> outH,
 );
 
+typedef GetCanvasVersionFunc = Uint64 Function();
+typedef GetCanvasVersionDart = int Function();
+
+typedef GetCanvasOverviewJpegFunc = Bool Function(
+    Pointer<Uint8> buffer, Int32 maxBytes, Pointer<Int32> outSize, Int32 quality, Int32 maxDim);
+typedef GetCanvasOverviewJpegDart = bool Function(
+    Pointer<Uint8> buffer, int maxBytes, Pointer<Int32> outSize, int quality, int maxDim);
+
+typedef GetDisplayFrameIdFunc = Uint64 Function();
+typedef GetDisplayFrameIdDart = int Function();
+
+typedef GetFrameDataJpegFunc = Bool Function(Pointer<Uint8> buffer, Int32 maxBytes, Pointer<Int32> outSize, Int32 quality);
+typedef GetFrameDataJpegDart = bool Function(Pointer<Uint8> buffer, int maxBytes, Pointer<Int32> outSize, int quality);
+
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
   factory NativeCameraService() => _instance;
@@ -260,6 +274,8 @@ class NativeCameraService {
   late SetResolution _setResolution;
   late SetFilterSequence _setFilterSequence;
   late GetFrameData _getFrameData;
+  late GetDisplayFrameIdDart _getDisplayFrameId;
+  late GetFrameDataJpegDart _getFrameDataJpeg;
   late GetFrameWidth _getFrameWidth;
   late GetFrameHeight _getFrameHeight;
   late SetLiveCropCorners _setLiveCropCorners;
@@ -284,6 +300,10 @@ class NativeCameraService {
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
   late SetAbsenceScoreSeenThreshold _setAbsenceScoreSeenThreshold;
   late GetAbsenceScoreSeenThreshold _getAbsenceScoreSeenThreshold;
+  
+  late GetCanvasVersionDart _getCanvasVersion;
+  late GetCanvasOverviewJpegDart _getCanvasOverviewJpeg;
+  
   // Sub-canvas navigation bindings
   late GetSubCanvasCount _getSubCanvasCount;
   late GetActiveSubCanvasIndex _getActiveSubCanvasIndex;
@@ -331,6 +351,17 @@ class NativeCameraService {
     _getFrameData = _nativeLib
         .lookup<NativeFunction<GetFrameDataFunc>>('GetFrameData')
         .asFunction();
+        
+    try {
+        _getDisplayFrameId = _nativeLib
+            .lookup<NativeFunction<GetDisplayFrameIdFunc>>('GetDisplayFrameId')
+            .asFunction();
+            
+        _getFrameDataJpeg = _nativeLib
+            .lookup<NativeFunction<GetFrameDataJpegFunc>>('GetFrameDataJpeg')
+            .asFunction();
+    } catch (_) {}
+    
     _getFrameWidth = _nativeLib
         .lookup<NativeFunction<GetFrameWidthFunc>>('GetFrameWidth')
         .asFunction();
@@ -408,6 +439,14 @@ class NativeCameraService {
         .lookup<NativeFunction<GetAbsenceScoreSeenThresholdFunc>>(
           'GetAbsenceScoreSeenThreshold',
         )
+        .asFunction();
+
+    _getCanvasVersion = _nativeLib
+        .lookup<NativeFunction<GetCanvasVersionFunc>>('GetCanvasVersion')
+        .asFunction();
+        
+    _getCanvasOverviewJpeg = _nativeLib
+        .lookup<NativeFunction<GetCanvasOverviewJpegFunc>>('GetCanvasOverviewJpeg')
         .asFunction();
 
     // Sub-canvas navigation bindings
@@ -509,6 +548,30 @@ class NativeCameraService {
       return Uint8List.fromList(ptr.asTypedList(size));
     } finally {
       malloc.free(ptr);
+    }
+  }
+
+  int getDisplayFrameId() {
+    initialize();
+    return _getDisplayFrameId();
+  }
+
+  Uint8List? getFrameDataJpeg({int quality = 80}) {
+    initialize();
+    
+    final maxBytes = 4 * 1024 * 1024;
+    final buffer = malloc.allocate<Uint8>(maxBytes);
+    final outSize = malloc.allocate<Int32>(4);
+    
+    try {
+      final success = _getFrameDataJpeg(buffer, maxBytes, outSize, quality);
+      if (!success || outSize.value <= 0) return null;
+      
+      final byteList = buffer.asTypedList(outSize.value);
+      return Uint8List.fromList(byteList);
+    } finally {
+      malloc.free(buffer);
+      malloc.free(outSize);
     }
   }
 
@@ -622,6 +685,34 @@ class NativeCameraService {
       return Uint8List.fromList(ptr.asTypedList(size));
     } finally {
       malloc.free(ptr);
+    }
+  }
+
+  /// Returns the current version tick of the canvas, used for polling changes.
+  int getCanvasVersion() {
+    initialize();
+    return _getCanvasVersion();
+  }
+
+  /// Returns a JPEG compressed overview of the full canvas, or null if unavailable.
+  Uint8List? getCanvasOverviewJpeg(int maxDim, {int quality = 80}) {
+    initialize();
+    if (maxDim <= 0) return null;
+    
+    // Allocate 4MB, plenty for a high res JPEG
+    final maxBytes = 4 * 1024 * 1024;
+    final buffer = malloc.allocate<Uint8>(maxBytes);
+    final outSize = malloc.allocate<Int32>(4);
+    
+    try {
+      final success = _getCanvasOverviewJpeg(buffer, maxBytes, outSize, quality, maxDim);
+      if (!success || outSize.value <= 0) return null;
+      
+      final byteList = buffer.asTypedList(outSize.value);
+      return Uint8List.fromList(byteList);
+    } finally {
+      malloc.free(buffer);
+      malloc.free(outSize);
     }
   }
 

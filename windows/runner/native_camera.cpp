@@ -328,6 +328,31 @@ void NativeCamera::GetFrameData(uint8_t* buffer, int32_t size) {
     memcpy(buffer, current_frame_.data, expected_size);
 }
 
+bool NativeCamera::GetFrameDataJpeg(uint8_t* buffer, int max_bytes, int* out_size, int quality) {
+    if (!buffer || !out_size || max_bytes <= 0) return false;
+    
+    cv::Mat bgr_frame;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (current_frame_.empty()) return false;
+        // Output from NativeCamera is primarily RGBA display buffers 
+        cv::cvtColor(current_frame_, bgr_frame, cv::COLOR_RGBA2BGR);
+    }
+    
+    std::vector<uchar> buf;
+    std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, quality};
+    bool success = cv::imencode(".jpg", bgr_frame, buf, params);
+    
+    if (!success || buf.size() > static_cast<size_t>(max_bytes)) {
+        *out_size = 0;
+        return false;
+    }
+    
+    std::memcpy(buffer, buf.data(), buf.size());
+    *out_size = static_cast<int>(buf.size());
+    return true;
+}
+
 int32_t NativeCamera::GetFrameWidth() {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_frame_.empty() ? 0 : current_frame_.cols;
@@ -599,6 +624,7 @@ void NativeCamera::RefreshDisplayFrame() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         cv::cvtColor(display_bgr, current_frame_, cv::COLOR_BGR2RGBA);
+        display_frame_id_.fetch_add(1, std::memory_order_relaxed);
     }
 
     NoteDisplayFrame(
@@ -753,6 +779,7 @@ void NativeCamera::ProcessingThreadLoop() {
             std::lock_guard<std::mutex> lock(mutex_);
             // Convert BGR to RGBA (Flutter expects RGBA on Windows)
             cv::cvtColor(frame, current_frame_, cv::COLOR_BGR2RGBA);
+            display_frame_id_.fetch_add(1, std::memory_order_relaxed);
         }
         
         texture_registrar_->MarkTextureFrameAvailable(texture_id_);
@@ -1841,6 +1868,16 @@ extern "C" {
 
     __declspec(dllexport) void GetFrameData(uint8_t* buffer, int32_t size) {
         if (g_native_camera) g_native_camera->GetFrameData(buffer, size);
+    }
+
+    __declspec(dllexport) uint64_t GetDisplayFrameId() {
+        if (g_native_camera) return g_native_camera->GetDisplayFrameId();
+        return 0;
+    }
+
+    __declspec(dllexport) bool GetFrameDataJpeg(uint8_t* buffer, int max_bytes, int* out_size, int quality) {
+        if (g_native_camera) return g_native_camera->GetFrameDataJpeg(buffer, max_bytes, out_size, quality);
+        return false;
     }
 
     __declspec(dllexport) int32_t GetFrameWidth() {

@@ -504,6 +504,7 @@ extern "C" {
     __declspec(dllexport) void    SetCanvasRenderMode(int mode);
     __declspec(dllexport) int64_t GetCanvasTextureId();
     __declspec(dllexport) bool    GetCanvasOverviewRgba(uint8_t* buffer, int width, int height);
+    __declspec(dllexport) bool    GetCanvasOverviewJpeg(uint8_t* buffer, int max_bytes, int* out_size, int quality, int max_dim);
     __declspec(dllexport) bool    GetCanvasViewportRgba(uint8_t* buffer, int width, int height,
                                                          float panX, float panY, float zoom);
 

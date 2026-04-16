@@ -33,6 +33,11 @@ public:
     void RefreshDisplayFrame();
     bool CopyLatestWhiteboardInput(cv::Mat& frame_bgr, cv::Mat& person_mask);
 
+    uint64_t GetDisplayFrameId() const {
+        return display_frame_id_.load(std::memory_order_relaxed);
+    }
+    bool GetFrameDataJpeg(uint8_t* buffer, int max_bytes, int* out_size, int quality);
+
     // External frame input (for screen capture, etc.)
     void PushExternalFrame(const cv::Mat& frame);
 
@@ -58,6 +63,8 @@ private:
     std::unique_ptr<FlutterDesktopPixelBuffer> flutter_pixel_buffer_;
     
     std::vector<int> active_filters_;
+
+    std::atomic<uint64_t> display_frame_id_ = {0};
 
     // Resolution settings
     int target_width_ = 1920;
