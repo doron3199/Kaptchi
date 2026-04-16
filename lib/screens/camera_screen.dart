@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/gestures.dart';
@@ -1261,9 +1262,9 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
-    final String boardId = 'code'; 
+    final String boardId = (100000 + Random().nextInt(900000)).toString(); 
     final String host = 'localhost:3000'; 
-    final String wsUrl = 'ws://$host/api/ws?id=$boardId';
+    final String wsUrl = 'ws://$host/api/ws?id=$boardId&role=host';
     final String webUrl = 'http://$host/share?id=$boardId';
 
     showDialog(

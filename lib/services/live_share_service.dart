@@ -59,15 +59,15 @@ class LiveShareService {
   void _startPolling() {
     _pollingTimer?.cancel();
     
-    // Poll continuously at 2 FPS (every 500ms) right now to ensure the web updates unconditionally.
-    _pollingTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
+    // Poll continuously at 1 FPS (every 1000ms) right now to ensure the web updates unconditionally.
+    _pollingTimer = Timer.periodic(const Duration(milliseconds: 1000), (timer) {
       if (_socket == null || _socket!.readyState != WebSocket.open) {
         timer.cancel();
         return;
       }
       
       // Fetch JPEG string directly from true canvas overview 
-      final jpegBytes = _cameraService.getCanvasOverviewJpeg(4096, quality: 75);
+      final jpegBytes = _cameraService.getCanvasOverviewJpeg(8192, quality: 100);
       
       if (jpegBytes != null && jpegBytes.isNotEmpty) {
         // Send over websocket

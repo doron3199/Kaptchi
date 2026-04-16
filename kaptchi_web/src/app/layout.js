@@ -25,6 +25,7 @@ export default function RootLayout({ children }) {
     <html
       lang="en"
       className={`${inter.variable} ${outfit.variable}`}
+      suppressHydrationWarning
     >
       <body>{children}</body>
     </html>
