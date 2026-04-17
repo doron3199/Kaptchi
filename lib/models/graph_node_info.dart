@@ -106,6 +106,16 @@ class GraphHardEdge {
   });
 }
 
+class GraphHistoryTimelineEntry {
+  final int frameId;
+  final int nodeCount;
+
+  const GraphHistoryTimelineEntry({
+    required this.frameId,
+    required this.nodeCount,
+  });
+}
+
 class NodeComparison {
   static const int duplicateReasonPositionalOverlap = 1 << 0;
   static const int duplicateReasonCentroidIou = 1 << 1;

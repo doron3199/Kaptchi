@@ -13,7 +13,9 @@
 
 #include "whiteboard_canvas.h"
 #include "whiteboard_canvas_process.h"
+#ifndef KAPTCHI_CLI
 #include "native_camera.h"
+#endif
 #include "whiteboard_enhance.h"
 
 #if __has_include(<opencv2/shape.hpp>)
@@ -389,8 +391,192 @@ static int CopyGraphContoursToBuffer(const WhiteboardGroup& group,
     return written;
 }
 
+static GraphHistoryNode BuildGraphHistoryNode(const DrawingNode& node) {
+    GraphHistoryNode history_node;
+    history_node.id = node.id;
+    history_node.binary_mask = node.binary_mask.clone();
+    history_node.color_pixels = node.color_pixels.clone();
+    history_node.bbox_canvas = node.bbox_canvas;
+    history_node.centroid_canvas = node.centroid_canvas;
+    history_node.area = node.area;
+    history_node.absence_score = node.absence_score;
+    history_node.has_crossed_absence_seen_threshold =
+        node.has_crossed_absence_seen_threshold;
+    history_node.last_seen_frame = node.last_seen_frame;
+    history_node.created_frame = node.created_frame;
+    history_node.user_locked = node.user_locked;
+    history_node.duplicate_debug_marked = node.duplicate_debug_marked;
+    history_node.duplicate_debug_partner_id = node.duplicate_debug_partner_id;
+    history_node.duplicate_debug_positional_overlap =
+        node.duplicate_debug_positional_overlap;
+    history_node.duplicate_debug_centroid_iou =
+        node.duplicate_debug_centroid_iou;
+    history_node.duplicate_debug_bbox_iou = node.duplicate_debug_bbox_iou;
+    history_node.duplicate_debug_shape_difference =
+        node.duplicate_debug_shape_difference;
+    history_node.duplicate_debug_reason_mask = node.duplicate_debug_reason_mask;
+    history_node.contour_canvas.reserve(node.contour.size());
+    for (const cv::Point& point : node.contour) {
+        history_node.contour_canvas.emplace_back(
+            static_cast<float>(point.x + node.bbox_canvas.x),
+            static_cast<float>(point.y + node.bbox_canvas.y));
+    }
+    return history_node;
+}
+
+static int CopyGraphHistoryNodesToBuffer(const GraphHistoryEntry& entry,
+                                         float* buffer, int max_nodes) {
+    if (!buffer || max_nodes <= 0) return 0;
+    const int count = std::min(static_cast<int>(entry.nodes.size()), max_nodes);
+    for (int i = 0; i < count; i++) {
+        const GraphHistoryNode& node = entry.nodes[i];
+        float* c = buffer + i * 24;
+        c[0] = static_cast<float>(node.id);
+        c[1] = static_cast<float>(node.bbox_canvas.x);
+        c[2] = static_cast<float>(node.bbox_canvas.y);
+        c[3] = static_cast<float>(node.bbox_canvas.width);
+        c[4] = static_cast<float>(node.bbox_canvas.height);
+        c[5] = node.centroid_canvas.x;
+        c[6] = node.centroid_canvas.y;
+        c[7] = static_cast<float>(node.area);
+        c[8] = node.absence_score;
+        c[9] = static_cast<float>(node.last_seen_frame);
+        c[10] = static_cast<float>(node.created_frame);
+        c[11] = 0.0f;
+        c[12] = static_cast<float>(entry.bounds_min_x);
+        c[13] = static_cast<float>(entry.bounds_min_y);
+        c[14] = 0.0f;
+        c[15] = node.user_locked ? 1.0f : 0.0f;
+        c[16] = node.duplicate_debug_marked ? 1.0f : 0.0f;
+        c[17] = static_cast<float>(node.duplicate_debug_partner_id);
+        c[18] = node.duplicate_debug_positional_overlap;
+        c[19] = node.duplicate_debug_centroid_iou;
+        c[20] = node.duplicate_debug_bbox_iou;
+        c[21] = node.duplicate_debug_shape_difference;
+        c[22] = static_cast<float>(node.duplicate_debug_reason_mask);
+        c[23] = 0.0f;
+    }
+    return count;
+}
+
+static bool CopyGraphHistoryBoundsToBuffer(const GraphHistoryEntry& entry,
+                                           int* bounds) {
+    if (!bounds) return false;
+    bounds[0] = entry.bounds_min_x;
+    bounds[1] = entry.bounds_min_y;
+    bounds[2] = entry.bounds_max_x;
+    bounds[3] = entry.bounds_max_y;
+    return entry.bounds_max_x > entry.bounds_min_x &&
+           entry.bounds_max_y > entry.bounds_min_y;
+}
+
+static int CopyGraphHistoryContoursToBuffer(const GraphHistoryEntry& entry,
+                                            float* buffer, int max_floats) {
+    if (!buffer || max_floats <= 0) return 0;
+    int written = 0;
+    for (const GraphHistoryNode& node : entry.nodes) {
+        const int point_count = static_cast<int>(node.contour_canvas.size());
+        const int needed = 2 + point_count * 2;
+        if (written + needed > max_floats) break;
+        buffer[written++] = static_cast<float>(node.id);
+        buffer[written++] = static_cast<float>(point_count);
+        for (const cv::Point2f& point : node.contour_canvas) {
+            buffer[written++] = point.x;
+            buffer[written++] = point.y;
+        }
+    }
+    return written;
+}
+
+static int CopyGraphHistoryTimelineToBuffer(const WhiteboardGroup& group,
+                                            int* buffer, int max_entries) {
+    if (!buffer || max_entries <= 0) return 0;
+    const int count = std::min(static_cast<int>(group.graph_history.size()), max_entries);
+    for (int i = 0; i < count; i++) {
+        const GraphHistoryEntry& entry = group.graph_history[i];
+        buffer[i * 2] = entry.frame_id;
+        buffer[i * 2 + 1] = entry.node_count;
+    }
+    return count;
+}
+
+static int FindGraphHistoryPeakIndex(const WhiteboardGroup& group) {
+    if (group.graph_history.empty()) return -1;
+
+    int best_index = -1;
+    int best_node_count = -1;
+    for (int i = 0; i + 1 < static_cast<int>(group.graph_history.size()); i++) {
+        const int current = group.graph_history[i].node_count;
+        const int previous = i > 0 ? group.graph_history[i - 1].node_count : current;
+        const int next = group.graph_history[i + 1].node_count;
+        const bool rises_before = i == 0 || current >= previous;
+        const bool drops_after = current > next;
+        if (rises_before && drops_after && current > best_node_count) {
+            best_node_count = current;
+            best_index = i;
+        }
+    }
+
+    if (best_index >= 0) return best_index;
+
+    for (int i = 0; i < static_cast<int>(group.graph_history.size()); i++) {
+        const int current = group.graph_history[i].node_count;
+        if (current > best_node_count) {
+            best_node_count = current;
+            best_index = i;
+        }
+    }
+    return best_index;
+}
+
+static const GraphHistoryEntry* GetSelectedGraphHistoryEntry(
+    const WhiteboardGroup& group) {
+    if (group.graph_history.empty()) return nullptr;
+    int selected_index = group.selected_graph_history_index;
+    if (selected_index < 0 ||
+        selected_index >= static_cast<int>(group.graph_history.size())) {
+        selected_index = static_cast<int>(group.graph_history.size()) - 1;
+    }
+    return &group.graph_history[selected_index];
+}
+
+static bool IsNodeVisibleInMainCanvas(const DrawingNode& node);
+
+static bool IsGraphHistoryNodeVisibleInMainCanvas(const GraphHistoryNode& node) {
+    return !node.duplicate_debug_marked &&
+           node.has_crossed_absence_seen_threshold;
+}
+
+static size_t EstimateGraphHistoryNodeStorageBytes(const GraphHistoryNode& node) {
+    return node.binary_mask.total() * node.binary_mask.elemSize() +
+           node.color_pixels.total() * node.color_pixels.elemSize() +
+           node.contour_canvas.size() * sizeof(cv::Point2f) +
+           sizeof(GraphHistoryNode);
+}
+
+static size_t EstimateGraphHistoryEntryStorageBytes(const GraphHistoryEntry& entry) {
+    size_t total = sizeof(GraphHistoryEntry);
+    for (const GraphHistoryNode& node : entry.nodes) {
+        total += EstimateGraphHistoryNodeStorageBytes(node);
+    }
+    return total;
+}
+
+static bool IsHistoricalGraphSelection(const WhiteboardGroup& group) {
+    if (group.graph_history.empty()) return false;
+    const int idx = group.selected_graph_history_index;
+    return idx >= 0 && idx < static_cast<int>(group.graph_history.size()) - 1;
+}
+
 static const cv::Mat& GetRenderCacheForMode(const WhiteboardGroup& g, CanvasRenderMode m) {
     return m == CanvasRenderMode::kRaw ? g.raw_render_cache : g.stroke_render_cache;
+}
+
+static const cv::Mat& GetGraphHistoryRenderCacheForMode(const WhiteboardGroup& g,
+                                                        CanvasRenderMode m) {
+    return m == CanvasRenderMode::kRaw
+        ? g.graph_history_raw_render_cache
+        : g.graph_history_stroke_render_cache;
 }
 
 static bool GetRenderBoundsForMode(const WhiteboardGroup& g, CanvasRenderMode m,
@@ -403,6 +589,101 @@ static bool GetRenderBoundsForMode(const WhiteboardGroup& g, CanvasRenderMode m,
         mxx = g.stroke_max_px_x; mxy = g.stroke_max_px_y;
     }
     return mxx > mnx && mxy > mny;
+}
+
+static bool GetGraphHistoryRenderBoundsForMode(const GraphHistoryEntry& entry,
+                                               CanvasRenderMode mode,
+                                               int& mnx,
+                                               int& mny,
+                                               int& mxx,
+                                               int& mxy) {
+    if (mode == CanvasRenderMode::kRaw) {
+        mnx = entry.raw_min_x;
+        mny = entry.raw_min_y;
+        mxx = entry.raw_max_x;
+        mxy = entry.raw_max_y;
+    } else {
+        mnx = entry.bounds_min_x;
+        mny = entry.bounds_min_y;
+        mxx = entry.bounds_max_x;
+        mxy = entry.bounds_max_y;
+    }
+    return mxx > mnx && mxy > mny;
+}
+
+static void InvalidateGraphHistoryRenderCache(WhiteboardGroup& group) {
+    group.graph_history_stroke_render_cache.release();
+    group.graph_history_raw_render_cache.release();
+    group.graph_history_render_cache_index = -1;
+}
+
+static bool BuildGraphHistoryRenderCache(const GraphHistoryEntry& entry,
+                                         CanvasRenderMode mode,
+                                         cv::Mat& out_cache) {
+    int min_x = 0;
+    int min_y = 0;
+    int max_x = 0;
+    int max_y = 0;
+    if (!GetGraphHistoryRenderBoundsForMode(entry, mode, min_x, min_y, max_x, max_y)) {
+        out_cache.release();
+        return false;
+    }
+
+    const int width = std::max(1, max_x - min_x);
+    const int height = std::max(1, max_y - min_y);
+    cv::Mat canvas(height, width, CV_8UC3, cv::Scalar(255, 255, 255));
+
+    std::vector<const GraphHistoryNode*> sorted;
+    sorted.reserve(entry.nodes.size());
+    for (const GraphHistoryNode& node : entry.nodes) {
+        if (!IsGraphHistoryNodeVisibleInMainCanvas(node)) continue;
+        if (node.binary_mask.empty()) continue;
+        if (mode == CanvasRenderMode::kRaw && node.color_pixels.empty()) continue;
+        sorted.push_back(&node);
+    }
+    std::sort(sorted.begin(), sorted.end(),
+              [](const GraphHistoryNode* a, const GraphHistoryNode* b) {
+                  return a->created_frame < b->created_frame;
+              });
+
+    for (const GraphHistoryNode* node : sorted) {
+        cv::Rect dst(node->bbox_canvas.x - min_x,
+                     node->bbox_canvas.y - min_y,
+                     node->bbox_canvas.width,
+                     node->bbox_canvas.height);
+        const int clip_x0 = std::max(0, dst.x);
+        const int clip_y0 = std::max(0, dst.y);
+        const int clip_x1 = std::min(width, dst.x + dst.width);
+        const int clip_y1 = std::min(height, dst.y + dst.height);
+        if (clip_x0 >= clip_x1 || clip_y0 >= clip_y1) continue;
+
+        const int src_x0 = clip_x0 - dst.x;
+        const int src_y0 = clip_y0 - dst.y;
+        const int copy_width = clip_x1 - clip_x0;
+        const int copy_height = clip_y1 - clip_y0;
+        if (src_x0 + copy_width > node->binary_mask.cols ||
+            src_y0 + copy_height > node->binary_mask.rows) {
+            continue;
+        }
+
+        const cv::Rect src_rect(src_x0, src_y0, copy_width, copy_height);
+        const cv::Rect dst_rect(clip_x0, clip_y0, copy_width, copy_height);
+        if (mode == CanvasRenderMode::kRaw) {
+            if (src_x0 + copy_width > node->color_pixels.cols ||
+                src_y0 + copy_height > node->color_pixels.rows) {
+                continue;
+            }
+            node->color_pixels(src_rect).copyTo(canvas(dst_rect), node->binary_mask(src_rect));
+        } else {
+            canvas(dst_rect).setTo(cv::Scalar(0, 0, 0), node->binary_mask(src_rect));
+        }
+    }
+
+    if (mode == CanvasRenderMode::kStroke) {
+        cv::bitwise_not(canvas, canvas);
+    }
+    out_cache = std::move(canvas);
+    return !out_cache.empty();
 }
 
 static cv::Rect BuildHorizontalCropRect(const cv::Size& sz) {
@@ -1931,6 +2212,7 @@ void WhiteboardCanvas::SetDuplicateDebugMode(bool enabled) {
         if (!group) continue;
         if (!RemoveDuplicateGhostNodes(*group)) continue;
         UpdateGroupBounds(*group);
+        RecordGraphHistorySnapshot(*group, processed_frame_id_);
         group->stroke_cache_dirty = true;
         group->raw_cache_dirty = true;
         changed = true;
@@ -1950,6 +2232,22 @@ void WhiteboardCanvas::InvalidateRenderCaches() {
 
 bool WhiteboardCanvas::EnsureRenderCacheReady(WhiteboardGroup& group,
                                                CanvasRenderMode mode) {
+    if (IsHistoricalGraphSelection(group)) {
+        const GraphHistoryEntry* entry = GetSelectedGraphHistoryEntry(group);
+        if (!entry) return false;
+        if (group.graph_history_render_cache_index != group.selected_graph_history_index) {
+            InvalidateGraphHistoryRenderCache(group);
+            group.graph_history_render_cache_index = group.selected_graph_history_index;
+        }
+        cv::Mat& cache = mode == CanvasRenderMode::kRaw
+            ? group.graph_history_raw_render_cache
+            : group.graph_history_stroke_render_cache;
+        if (cache.empty()) {
+            return BuildGraphHistoryRenderCache(*entry, mode, cache);
+        }
+        return true;
+    }
+
     if (mode == CanvasRenderMode::kRaw) {
         if (group.raw_cache_dirty) { RebuildRawRenderCache(group); group.raw_cache_dirty = false; }
     } else {
@@ -1994,7 +2292,9 @@ bool WhiteboardCanvas::GetViewport(float panX, float panY, float zoom,
     auto& group = *groups_[idx];
     const CanvasRenderMode mode = GetRenderMode();
     if (!EnsureRenderCacheReady(group, mode)) return false;
-    const cv::Mat& cache = GetRenderCacheForMode(group, mode);
+    const cv::Mat& cache = IsHistoricalGraphSelection(group)
+        ? GetGraphHistoryRenderCacheForMode(group, mode)
+        : GetRenderCacheForMode(group, mode);
     zoom = std::max(1.0f, zoom);
     int cw = cache.cols, ch = cache.rows;
     float va = (float)viewSize.width / (float)viewSize.height;
@@ -2020,7 +2320,12 @@ bool WhiteboardCanvas::GetOverview(cv::Size viewSize, cv::Mat& out_frame) {
     auto& group = *groups_[idx];
     const CanvasRenderMode mode = GetRenderMode();
     if (!EnsureRenderCacheReady(group, mode)) return false;
-    return RenderOverviewToFrame(GetRenderCacheForMode(group, mode), viewSize, out_frame);
+    return RenderOverviewToFrame(
+        IsHistoricalGraphSelection(group)
+            ? GetGraphHistoryRenderCacheForMode(group, mode)
+            : GetRenderCacheForMode(group, mode),
+        viewSize,
+        out_frame);
 }
 
 bool WhiteboardCanvas::GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame) {
@@ -2033,7 +2338,12 @@ bool WhiteboardCanvas::GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame
     auto& group = *groups_[idx];
     const CanvasRenderMode mode = GetRenderMode();
     if (!EnsureRenderCacheReady(group, mode)) return false;
-    return RenderOverviewToFrame(GetRenderCacheForMode(group, mode), viewSize, out_frame);
+    return RenderOverviewToFrame(
+        IsHistoricalGraphSelection(group)
+            ? GetGraphHistoryRenderCacheForMode(group, mode)
+            : GetRenderCacheForMode(group, mode),
+        viewSize,
+        out_frame);
 }
 
 void WhiteboardCanvas::Reset() {
@@ -2055,6 +2365,77 @@ void WhiteboardCanvas::Reset() {
     BumpCanvasVersion();
     frame_w_ = frame_h_ = 0;
     processed_frame_id_ = 0;
+}
+
+void WhiteboardCanvas::RecordGraphHistorySnapshot(WhiteboardGroup& group,
+                                                  int frame_id) {
+    constexpr size_t kGraphHistoryStorageBudgetBytes =
+        192ull * 1024ull * 1024ull;
+
+    GraphHistoryEntry entry;
+    entry.frame_id = frame_id;
+    entry.node_count = static_cast<int>(group.nodes.size());
+
+    if (!group.nodes.empty()) {
+        entry.bounds_min_x = group.stroke_min_px_x;
+        entry.bounds_min_y = group.stroke_min_px_y;
+        entry.bounds_max_x = group.stroke_max_px_x;
+        entry.bounds_max_y = group.stroke_max_px_y;
+        entry.raw_min_x = group.raw_min_px_x;
+        entry.raw_min_y = group.raw_min_px_y;
+        entry.raw_max_x = group.raw_max_px_x;
+        entry.raw_max_y = group.raw_max_px_y;
+    }
+
+    entry.nodes.reserve(group.nodes.size());
+    for (const auto& pair : group.nodes) {
+        entry.nodes.push_back(BuildGraphHistoryNode(*pair.second));
+    }
+
+    const size_t entry_storage_bytes = EstimateGraphHistoryEntryStorageBytes(entry);
+
+    auto trim_oldest_entry = [&group]() {
+        if (group.graph_history.empty()) return;
+        const size_t oldest_entry_bytes =
+            EstimateGraphHistoryEntryStorageBytes(group.graph_history.front());
+        group.graph_history_storage_bytes = group.graph_history_storage_bytes > 0
+            ? group.graph_history_storage_bytes -
+                std::min(group.graph_history_storage_bytes, oldest_entry_bytes)
+            : 0;
+        group.graph_history.erase(group.graph_history.begin());
+        if (group.selected_graph_history_index > 0) {
+            group.selected_graph_history_index--;
+        } else if (!group.graph_history.empty()) {
+            group.selected_graph_history_index = 0;
+        } else {
+            group.selected_graph_history_index = -1;
+        }
+    };
+
+    while (!group.graph_history.empty() &&
+           (static_cast<int>(group.graph_history.size()) >= kMaxGraphHistoryEntries ||
+            group.graph_history_storage_bytes + entry_storage_bytes >
+                kGraphHistoryStorageBudgetBytes)) {
+        trim_oldest_entry();
+    }
+
+    const bool follow_latest = group.graph_history.empty() ||
+        group.selected_graph_history_index < 0 ||
+        group.selected_graph_history_index ==
+            static_cast<int>(group.graph_history.size()) - 1;
+
+    group.graph_history.push_back(std::move(entry));
+    group.graph_history_storage_bytes += entry_storage_bytes;
+    InvalidateGraphHistoryRenderCache(group);
+
+    if (follow_latest) {
+        group.selected_graph_history_index =
+            static_cast<int>(group.graph_history.size()) - 1;
+    } else if (group.selected_graph_history_index >=
+               static_cast<int>(group.graph_history.size())) {
+        group.selected_graph_history_index =
+            static_cast<int>(group.graph_history.size()) - 1;
+    }
 }
 
 bool WhiteboardCanvas::HasContent() const {
@@ -2099,6 +2480,24 @@ cv::Size WhiteboardCanvas::GetCanvasSize() const {
     int idx = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
     if (idx >= 0 && idx < (int)groups_.size()) {
         const auto& g = *groups_[idx];
+        if (IsHistoricalGraphSelection(g)) {
+            const GraphHistoryEntry* entry = GetSelectedGraphHistoryEntry(g);
+            if (entry) {
+                const auto& history_cache =
+                    GetGraphHistoryRenderCacheForMode(g, GetRenderMode());
+                if (!history_cache.empty()) {
+                    return cv::Size(history_cache.cols, history_cache.rows);
+                }
+                int mnx = 0;
+                int mny = 0;
+                int mxx = 0;
+                int mxy = 0;
+                if (GetGraphHistoryRenderBoundsForMode(
+                        *entry, GetRenderMode(), mnx, mny, mxx, mxy)) {
+                    return cv::Size(std::max(1, mxx - mnx), std::max(1, mxy - mny));
+                }
+            }
+        }
         const auto& cache = GetRenderCacheForMode(g, GetRenderMode());
         if (!cache.empty()) return cv::Size(cache.cols, cache.rows);
         int mnx, mny, mxx, mxy;
@@ -2233,15 +2632,24 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
     if (kEnableFrameStrokeRejectFilter)
         reject_mask = BuildFrameStrokeRejectMask(frame.size(), lecturer_rect);
 
-    // [1] Motion gate
+    // [1] Frame skip gate — drop every N frames before any processing
+    {
+        int skip = canvas_skip_frames_.load(std::memory_order_relaxed);
+        if (skip > 0) {
+            if (canvas_skip_counter_ < skip) { ++canvas_skip_counter_; return; }
+            canvas_skip_counter_ = 0;
+        }
+    }
+
+    // [2] Motion gate
     float mf = 0.0f; bool mth = false;
     if (ApplyMotionGate(gray, mf, mth)) return;
 
-    // [2] Binarize
+    // [3] Binarize
     int stroke_px = 0;
     cv::Mat binary = BuildBinaryMask(gray, no_update_mask, stroke_px);
 
-    // [3] Extract blobs
+    // [4] Extract blobs
     std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame);
     EnhanceFrameBlobs(blobs, frame, g_canvas_enhance_threshold.load());
 
@@ -2830,6 +3238,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
 
     if (graph_changed) {
         UpdateGroupBounds(group);
+        RecordGraphHistorySnapshot(group, current_frame);
         group.stroke_cache_dirty = true;
         group.raw_cache_dirty    = true;
         BumpCanvasVersion();
@@ -2976,6 +3385,7 @@ void WhiteboardCanvas::SeedGroupFromFrameBlobs(WhiteboardGroup& group,
         CreateHardEdgesForFrame(group, new_node_ids,
                                 kHardEdgeMaxCentroidDist);
     UpdateGroupBounds(group);
+    RecordGraphHistorySnapshot(group, current_frame);
     group.stroke_cache_dirty = true;
     group.raw_cache_dirty    = true;
     BumpCanvasVersion();
@@ -3267,6 +3677,8 @@ bool WhiteboardCanvas::MoveGraphNode(int node_id, float new_cx, float new_cy) {
         ApplyHardEdgeDelta(group, node_id, dx, dy, moved_self);
         PruneHardEdgesByDistance(group, kHardEdgeMaxCentroidDist);
     }
+    UpdateGroupBounds(group);
+    RecordGraphHistorySnapshot(group, processed_frame_id_);
     group.stroke_cache_dirty = true;
     group.raw_cache_dirty    = true;
     BumpCanvasVersion();
@@ -3282,6 +3694,8 @@ bool WhiteboardCanvas::DeleteGraphNode(int node_id) {
     if (group.nodes.find(node_id) == group.nodes.end()) return false;
     group.user_deleted_ids.insert(node_id);
     RemoveNodeFromGraph(group, node_id);
+    UpdateGroupBounds(group);
+    RecordGraphHistorySnapshot(group, processed_frame_id_);
     group.stroke_cache_dirty = true;
     group.raw_cache_dirty    = true;
     BumpCanvasVersion();
@@ -3329,6 +3743,7 @@ bool WhiteboardCanvas::ApplyUserEdits(const int* delete_ids, int delete_count,
 
     if (changed) {
         UpdateGroupBounds(group);
+        RecordGraphHistorySnapshot(group, processed_frame_id_);
         group.stroke_cache_dirty = true;
         group.raw_cache_dirty    = true;
         BumpCanvasVersion();
@@ -3368,6 +3783,128 @@ int WhiteboardCanvas::GetGraphNodeContours(float* buffer, int max_floats) const 
     return CopyGraphContoursToBuffer(*groups_[gi], buffer, max_floats);
 }
 
+int WhiteboardCanvas::GetGraphHistoryCount() const {
+    if (remote_process_ && helper_client_) return helper_client_->GetGraphHistoryCount();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+    return static_cast<int>(groups_[gi]->graph_history.size());
+}
+
+int WhiteboardCanvas::GetGraphHistorySelectedIndex() const {
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetGraphHistorySelectedIndex();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return -1;
+    const WhiteboardGroup& group = *groups_[gi];
+    if (group.graph_history.empty()) return -1;
+    if (group.selected_graph_history_index < 0 ||
+        group.selected_graph_history_index >= static_cast<int>(group.graph_history.size())) {
+        return static_cast<int>(group.graph_history.size()) - 1;
+    }
+    return group.selected_graph_history_index;
+}
+
+void WhiteboardCanvas::SetGraphHistorySelectedIndex(int idx) {
+    if (remote_process_ && helper_client_) {
+        helper_client_->SetGraphHistorySelectedIndex(idx);
+        return;
+    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return;
+    auto& group = *groups_[gi];
+    if (group.graph_history.empty()) {
+        group.selected_graph_history_index = -1;
+        InvalidateGraphHistoryRenderCache(group);
+        return;
+    }
+    const int previous_index = group.selected_graph_history_index;
+    if (idx < 0) {
+        group.selected_graph_history_index = static_cast<int>(group.graph_history.size()) - 1;
+    } else {
+        group.selected_graph_history_index = std::max(
+            0,
+            std::min(idx, static_cast<int>(group.graph_history.size()) - 1));
+    }
+    if (group.selected_graph_history_index != previous_index) {
+        InvalidateGraphHistoryRenderCache(group);
+        BumpCanvasVersion();
+    }
+}
+
+int WhiteboardCanvas::GetGraphHistoryTimeline(int* buffer, int max_entries) const {
+    if (!buffer || max_entries <= 0) return 0;
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetGraphHistoryTimeline(buffer, max_entries);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+    return CopyGraphHistoryTimelineToBuffer(*groups_[gi], buffer, max_entries);
+}
+
+int WhiteboardCanvas::GetGraphHistoryPeakIndex() const {
+    if (remote_process_ && helper_client_) return helper_client_->GetGraphHistoryPeakIndex();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return -1;
+    return FindGraphHistoryPeakIndex(*groups_[gi]);
+}
+
+int WhiteboardCanvas::GetSelectedGraphHistoryNodeCount() const {
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetSelectedGraphHistoryNodeCount();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+    const GraphHistoryEntry* entry = GetSelectedGraphHistoryEntry(*groups_[gi]);
+    return entry ? static_cast<int>(entry->nodes.size()) : 0;
+}
+
+int WhiteboardCanvas::GetSelectedGraphHistoryNodes(float* buffer, int max_nodes) const {
+    if (!buffer || max_nodes <= 0) return 0;
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetSelectedGraphHistoryNodes(buffer, max_nodes);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+    const GraphHistoryEntry* entry = GetSelectedGraphHistoryEntry(*groups_[gi]);
+    return entry ? CopyGraphHistoryNodesToBuffer(*entry, buffer, max_nodes) : 0;
+}
+
+bool WhiteboardCanvas::GetSelectedGraphHistoryCanvasBounds(int* bounds) const {
+    if (!bounds) return false;
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetSelectedGraphHistoryCanvasBounds(bounds);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return false;
+    const GraphHistoryEntry* entry = GetSelectedGraphHistoryEntry(*groups_[gi]);
+    return entry ? CopyGraphHistoryBoundsToBuffer(*entry, bounds) : false;
+}
+
+int WhiteboardCanvas::GetSelectedGraphHistoryNodeContours(float* buffer,
+                                                           int max_floats) const {
+    if (!buffer || max_floats <= 0) return 0;
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetSelectedGraphHistoryNodeContours(buffer, max_floats);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    int gi = canvas_view_mode_.load() ? view_group_idx_ : active_group_idx_;
+    if (gi < 0) gi = active_group_idx_;
+    if (gi < 0 || gi >= (int)groups_.size()) return 0;
+    const GraphHistoryEntry* entry = GetSelectedGraphHistoryEntry(*groups_[gi]);
+    return entry ? CopyGraphHistoryContoursToBuffer(*entry, buffer, max_floats) : 0;
+}
+
 // ============================================================================
 //  SECTION 14: FFI exports
 // ============================================================================
@@ -3389,17 +3926,23 @@ void SetPanoramaEnabled(bool enabled) {
             g_whiteboard_canvas->Reset();
         }
     }
+#ifndef KAPTCHI_CLI
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+#endif
 }
 
 void ResetPanorama() {
     if (g_whiteboard_canvas) g_whiteboard_canvas->Reset();
+#ifndef KAPTCHI_CLI
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+#endif
 }
 
 void SetPanoramaViewport(float panX, float panY, float zoom) {
     g_canvas_pan_x.store(panX); g_canvas_pan_y.store(panY); g_canvas_zoom.store(zoom);
+#ifndef KAPTCHI_CLI
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+#endif
 }
 
 void GetPanoramaCanvasSize(int* width, int* height) {
@@ -3417,11 +3960,21 @@ bool IsPanoramaEnabled() { return g_whiteboard_enabled.load(); }
 
 void SetCanvasViewMode(bool mode) {
     if (g_whiteboard_canvas) g_whiteboard_canvas->SetCanvasViewMode(mode);
+#ifndef KAPTCHI_CLI
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+#endif
 }
 
 bool IsCanvasViewMode() {
     return g_whiteboard_canvas && g_whiteboard_canvas->IsCanvasViewMode();
+}
+
+void SetCanvasSkipFrames(int32_t n) {
+    if (g_whiteboard_canvas) g_whiteboard_canvas->SetCanvasSkipFrames(n);
+}
+
+int32_t GetCanvasSkipFrames() {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetCanvasSkipFrames() : 0;
 }
 
 void SetCanvasRenderMode(int mode) {
@@ -3430,11 +3983,17 @@ void SetCanvasRenderMode(int mode) {
             mode == static_cast<int>(CanvasRenderMode::kRaw)
                 ? CanvasRenderMode::kRaw : CanvasRenderMode::kStroke);
     }
+#ifndef KAPTCHI_CLI
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+#endif
 }
 
 int64_t GetCanvasTextureId() {
+#ifndef KAPTCHI_CLI
     return g_native_camera ? g_native_camera->GetTextureId() : -1;
+#else
+    return -1;
+#endif
 }
 
 bool GetCanvasOverviewRgba(uint8_t* buffer, int width, int height) {
@@ -3572,6 +4131,49 @@ bool GetGraphCanvasBounds(int* bounds) {
 int GetGraphNodeContours(float* buffer, int max_floats) {
     return g_whiteboard_canvas
         ? g_whiteboard_canvas->GetGraphNodeContours(buffer, max_floats) : 0;
+}
+
+int GetGraphHistoryCount() {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetGraphHistoryCount() : 0;
+}
+
+int GetGraphHistorySelectedIndex() {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetGraphHistorySelectedIndex() : -1;
+}
+
+void SetGraphHistorySelectedIndex(int idx) {
+    if (g_whiteboard_canvas) g_whiteboard_canvas->SetGraphHistorySelectedIndex(idx);
+#ifndef KAPTCHI_CLI
+    if (g_native_camera) g_native_camera->RefreshDisplayFrame();
+#endif
+}
+
+int GetGraphHistoryTimeline(int* buffer, int max_entries) {
+    return g_whiteboard_canvas
+        ? g_whiteboard_canvas->GetGraphHistoryTimeline(buffer, max_entries) : 0;
+}
+
+int GetGraphHistoryPeakIndex() {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetGraphHistoryPeakIndex() : -1;
+}
+
+int GetSelectedGraphHistoryNodeCount() {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetSelectedGraphHistoryNodeCount() : 0;
+}
+
+int GetSelectedGraphHistoryNodes(float* buffer, int max_nodes) {
+    return g_whiteboard_canvas
+        ? g_whiteboard_canvas->GetSelectedGraphHistoryNodes(buffer, max_nodes) : 0;
+}
+
+bool GetSelectedGraphHistoryCanvasBounds(int* bounds) {
+    return g_whiteboard_canvas &&
+        g_whiteboard_canvas->GetSelectedGraphHistoryCanvasBounds(bounds);
+}
+
+int GetSelectedGraphHistoryNodeContours(float* buffer, int max_floats) {
+    return g_whiteboard_canvas
+        ? g_whiteboard_canvas->GetSelectedGraphHistoryNodeContours(buffer, max_floats) : 0;
 }
 
 // Debug snapshot stubs

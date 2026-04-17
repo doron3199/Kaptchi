@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 import '../services/native_camera_service.dart';
 
@@ -13,12 +14,16 @@ class VideoSourceSheet extends StatelessWidget {
   /// windowHandle = 0 means capture full monitor
   final Function(int monitorIndex, int windowHandle)? onSelectScreenCapture;
 
+  /// Callback when user picks a local video file (Windows only)
+  final Function(String path)? onSelectVideoFile;
+
   const VideoSourceSheet({
     super.key,
     required this.cameras,
     required this.onSelectCamera,
     required this.onSelectMobile,
     this.onSelectScreenCapture,
+    this.onSelectVideoFile,
   });
 
   @override
@@ -112,6 +117,27 @@ class VideoSourceSheet extends StatelessWidget {
               const Divider(),
             ],
 
+            // Video File (Windows only)
+            if (Platform.isWindows && onSelectVideoFile != null) ...[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Video File',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: Colors.grey,
+                  ),
+                ),
+              ),
+              ListTile(
+                leading: const Icon(Icons.video_file),
+                title: const Text('Open video file…'),
+                subtitle: const Text('mp4, avi, mov, mkv'),
+                onTap: () => _pickVideoFile(context),
+              ),
+              const Divider(),
+            ],
+
             Align(
               alignment: Alignment.centerLeft,
               child: Text(
@@ -132,6 +158,19 @@ class VideoSourceSheet extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  void _pickVideoFile(BuildContext context) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp4', 'avi', 'mov', 'mkv', 'webm'],
+      dialogTitle: 'Select a video file',
+    );
+    if (result != null && result.files.single.path != null) {
+      final path = result.files.single.path!;
+      if (context.mounted) Navigator.pop(context);
+      onSelectVideoFile!(path);
+    }
   }
 
   void _showWindowPicker(BuildContext context) {

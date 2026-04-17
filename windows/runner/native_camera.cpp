@@ -229,6 +229,11 @@ void NativeCamera::StartStream(const char* url) {
     Stop(); // Stop existing if any
 
     stream_url_ = url;
+    is_video_file_ = false;
+    video_complete_ = false;
+    video_progress_ = 0.0f;
+    video_total_frames_ = 0.0;
+    // video_skip_frames_ is NOT reset here — caller sets it before StartStream if needed
     is_running_ = true;
     is_stream_ = true;
     restart_requested_ = false;
@@ -432,12 +437,27 @@ void NativeCamera::CameraThreadLoop() {
 
         if (needs_open) {
             needs_open = false;
-            
+
             if (is_stream_) {
                 std::cout << "Opening stream " << stream_url_ << "..." << std::endl;
                 capture_.open(stream_url_);
                 if (capture_.isOpened()) {
-                    std::cout << "Stream opened successfully." << std::endl;
+                    // Detect video file: files have a finite frame count; live streams return 0 or -1
+                    double total_frames = capture_.get(cv::CAP_PROP_FRAME_COUNT);
+                    is_video_file_ = (total_frames > 0);
+                    if (is_video_file_) {
+                        video_total_frames_ = total_frames;
+                        video_fps_ = capture_.get(cv::CAP_PROP_FPS);
+                        if (video_fps_ <= 0) video_fps_ = 25.0;
+                        video_complete_ = false;
+                        video_progress_ = 0.0f;
+                        std::cout << "Video file opened. Total frames: " << total_frames
+                                  << ", fps: " << video_fps_
+                                  << ", skip: " << video_skip_frames_.load() << std::endl;
+                    } else {
+                        is_video_file_ = false;
+                        std::cout << "Stream opened successfully." << std::endl;
+                    }
                 } else {
                     std::cerr << "Failed to open stream: " << stream_url_ << std::endl;
                 }
@@ -487,12 +507,25 @@ void NativeCamera::CameraThreadLoop() {
              continue;
         }
 
+        // Consume pending seek request (video file only).
+        if (is_video_file_) {
+            float target = pending_seek_progress_.exchange(-1.0f);
+            if (target >= 0.0f && video_total_frames_ > 0) {
+                double target_frame = target * video_total_frames_;
+                if (target_frame < 0) target_frame = 0;
+                if (target_frame >= video_total_frames_)
+                    target_frame = video_total_frames_ - 1;
+                capture_.set(cv::CAP_PROP_POS_FRAMES, target_frame);
+                video_complete_ = false;
+                video_progress_ = static_cast<float>(target_frame / video_total_frames_);
+            }
+        }
+
         cv::Mat frame;
         if (capture_.read(frame)) {
             if (!frame.empty()) {
                 // Rotate if vertical (portrait) to make it horizontal (landscape)
                 if (is_stream_ && frame.rows > frame.cols) {
-                    // std::cout << "Rotating frame..." << std::endl;
                     cv::Mat rotated;
                     cv::rotate(frame, rotated, cv::ROTATE_90_CLOCKWISE);
                     frame = rotated;
@@ -504,12 +537,38 @@ void NativeCamera::CameraThreadLoop() {
                     has_new_frame_ = true;
                 }
                 processing_cv_.notify_one();
+
+                // Video file: update progress, seek forward by skip, then wait
+                // for the processing thread to consume this frame before loading the next.
+                if (is_video_file_) {
+                    double pos = capture_.get(cv::CAP_PROP_POS_FRAMES);
+                    if (video_total_frames_ > 0)
+                        video_progress_ = static_cast<float>(pos / video_total_frames_);
+                    int skip = video_skip_frames_.load();
+                    if (skip > 0) {
+                        double next_pos = pos + skip;
+                        if (next_pos < video_total_frames_)
+                            capture_.set(cv::CAP_PROP_POS_FRAMES, next_pos);
+                    }
+                    // Wait until processing thread has consumed the frame
+                    std::unique_lock<std::mutex> lock(processing_mutex_);
+                    frame_consumed_cv_.wait(lock, [this] {
+                        return !has_new_frame_ || !is_running_;
+                    });
+                }
             } else {
-                 std::cerr << "Captured empty frame." << std::endl;
+                std::cerr << "Captured empty frame." << std::endl;
             }
         } else {
-             // std::cerr << "Failed to read frame." << std::endl;
-             std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            if (is_video_file_) {
+                // End of video file
+                std::cout << "Video file playback complete." << std::endl;
+                video_complete_ = true;
+                video_progress_ = 1.0f;
+                break; // Exit capture loop; processing thread will drain naturally
+            }
+            // Live stream: brief sleep to avoid busy-loop on transient read failure
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     }
     
@@ -658,6 +717,8 @@ void NativeCamera::ProcessingThreadLoop() {
             pending_frame_.copyTo(frame);
             has_new_frame_ = false;
         }
+        // Signal capture thread (video file mode) that frame has been consumed
+        frame_consumed_cv_.notify_one();
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -2143,5 +2204,36 @@ extern "C" {
 
         // Convert back to BGRA
         cv::cvtColor(bgr, frame, cv::COLOR_BGR2BGRA);
+    }
+
+    // --- Video File Playback FFI Exports ---
+
+    // Returns true once the video file has finished playing
+    __declspec(dllexport) bool IsVideoComplete() {
+        if (!g_native_camera) return false;
+        return g_native_camera->IsVideoComplete();
+    }
+
+    // Returns playback progress 0.0–1.0 (0 if not a video file)
+    __declspec(dllexport) float GetVideoProgress() {
+        if (!g_native_camera) return 0.0f;
+        return g_native_camera->GetVideoProgress();
+    }
+
+    // Set the delay between processed frames (ms). 1000 = 1 fps, 500 = 2 fps.
+    // Call after StartStream() to override the default 1000 ms.
+    __declspec(dllexport) void SetVideoSkipFrames(int32_t skip) {
+        if (g_native_camera) g_native_camera->SetVideoSkipFrames(skip);
+    }
+    __declspec(dllexport) int32_t GetVideoSkipFrames() {
+        if (!g_native_camera) return 0;
+        return g_native_camera->GetVideoSkipFrames();
+    }
+    __declspec(dllexport) void SeekVideoToProgress(float progress) {
+        if (g_native_camera) g_native_camera->SeekVideoToProgress(progress);
+    }
+    // Keep old name as alias for backward compat (unused, but avoids linker gaps)
+    __declspec(dllexport) void SetVideoFrameInterval(int32_t skip) {
+        if (g_native_camera) g_native_camera->SetVideoSkipFrames(skip);
     }
 }

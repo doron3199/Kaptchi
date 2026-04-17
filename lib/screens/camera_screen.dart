@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:camera/camera.dart' as c;
 import '../services/document_service.dart';
+import '../models/graph_node_info.dart';
 
 import 'package:image/image.dart' as img;
 import 'package:file_picker/file_picker.dart';
@@ -20,25 +21,27 @@ import 'edit_canvas_screen.dart';
 import 'crop_screen.dart';
 import '../services/media_server_service.dart';
 import '../services/image_processing_service.dart';
-import '../widgets/native_camera_view.dart';
 import '../services/native_camera_service.dart';
 import '../services/live_share_service.dart';
 import '../services/rtmp_service.dart';
 import '../services/raw_socket_service.dart';
 import '../widgets/camera_sidebars.dart';
 import '../widgets/camera_stream_view.dart';
+import '../widgets/native_texture_view.dart';
 import '../widgets/resizable_overlay.dart';
 import '../services/gallery_service.dart';
 import '../services/filters_service.dart';
 import '../widgets/mobile_connection_dialog.dart';
 import '../widgets/video_source_sheet.dart';
-import '../widgets/zoomable_stream_view.dart';
+import '../widgets/graph_history_sparkline.dart';
 
 class CameraScreen extends StatefulWidget {
   final String? connectionUrl;
   final int? initialCameraIndex;
   final String? initialStreamUrl;
   final bool isVddCapture;
+  /// When set, immediately opens this local video file in whiteboard canvas mode
+  final String? initialVideoFilePath;
 
   const CameraScreen({
     super.key,
@@ -46,6 +49,7 @@ class CameraScreen extends StatefulWidget {
     this.initialCameraIndex,
     this.initialStreamUrl,
     this.isVddCapture = false,
+    this.initialVideoFilePath,
   });
 
   @override
@@ -78,7 +82,6 @@ class _CameraScreenState extends State<CameraScreen>
   double _phoneMaxZoom = 10.0;
   bool _isDigitalZoomOverride = false;
   double _lockedPhoneZoom = 1.0;
-  Offset _viewOffset = Offset.zero;
 
   // Overlay State (Feature 11)
   Uint8List? _overlayImageBytes;
@@ -114,6 +117,22 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isHighWhiteboardSensitivity = false;
   double? _canvasAspectRatio; // null = use default 16:9
   Timer? _canvasPollTimer;
+  List<GraphHistoryTimelineEntry> _graphHistoryTimeline = const [];
+  int _selectedGraphHistoryIndex = -1;
+  int _graphHistoryPeakIndex = -1;
+  bool _graphHistoryFollowLatest = true;
+  bool _isDraggingGraphHistory = false;
+  double _graphHistoryDragValue = 0.0;
+
+  // Video file playback state
+  bool _isVideoFileMode = false;
+  double _videoProgress = 0.0;
+  int _videoSkipFrames = 0; // 0 = every frame; set before starting video
+  // When the user is dragging the seek slider, we show their chosen value
+  // locally and ignore the polled progress until they release.
+  bool _isSeekingVideo = false;
+  double _seekDragValue = 0.0;
+  final TextEditingController _skipFramesController = TextEditingController(text: '0');
   // Notifier for canvas navigation state — updated by the poll timer without
   // a full setState rebuild (prevents live-view flicker).
   final _canvasNavNotifier = ValueNotifier<({int count, int active})>((
@@ -137,7 +156,8 @@ class _CameraScreenState extends State<CameraScreen>
 
   void _startCanvasPollTimer() {
     _canvasPollTimer?.cancel();
-    _canvasPollTimer = Timer.periodic(const Duration(milliseconds: 800), (_) {
+    unawaited(_refreshGraphHistoryState());
+    _canvasPollTimer = Timer.periodic(const Duration(milliseconds: 800), (_) async {
       if (!mounted || !Platform.isWindows) return;
       final svc = NativeCameraService();
       final count = svc.getSubCanvasCount();
@@ -162,6 +182,27 @@ class _CameraScreenState extends State<CameraScreen>
           }
         }
       }
+      await _refreshGraphHistoryState();
+      if (!mounted) return;
+      // Poll video file progress / completion
+      if (_isVideoFileMode) {
+        final progress = svc.getVideoProgress();
+        final complete = svc.isVideoComplete();
+        if (complete) {
+          setState(() {
+            _isVideoFileMode = false;
+            _videoProgress = 1.0;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Video processing complete')),
+          );
+        } else if (!_isSeekingVideo &&
+            (progress - _videoProgress).abs() > 0.005) {
+          setState(() {
+            _videoProgress = progress;
+          });
+        }
+      }
     });
   }
 
@@ -169,6 +210,51 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasPollTimer?.cancel();
     _canvasPollTimer = null;
     _canvasNavNotifier.value = (count: 0, active: 0);
+    _resetWhiteboardUiState();
+  }
+
+  /// Integer skip-frames control shown in the toolbar while a video file is playing.
+  Widget _buildVideoSkipControl() {
+    void applySkip(int skip) {
+      final clamped = skip.clamp(0, 9999);
+      setState(() => _videoSkipFrames = clamped);
+      _skipFramesController.text = clamped.toString();
+      NativeCameraService().setVideoSkipFrames(clamped);
+    }
+
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        IconButton(
+          icon: const Icon(Icons.remove, size: 18),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          onPressed: () => applySkip(_videoSkipFrames - 1),
+        ),
+        SizedBox(
+          width: 48,
+          child: TextField(
+            controller: _skipFramesController,
+            keyboardType: TextInputType.number,
+            textAlign: TextAlign.center,
+            style: const TextStyle(fontSize: 13),
+            decoration: const InputDecoration(
+              isDense: true,
+              contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+              border: OutlineInputBorder(),
+            ),
+            onSubmitted: (v) => applySkip(int.tryParse(v) ?? _videoSkipFrames),
+          ),
+        ),
+        IconButton(
+          icon: const Icon(Icons.add, size: 18),
+          padding: EdgeInsets.zero,
+          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+          onPressed: () => applySkip(_videoSkipFrames + 1),
+        ),
+        const Text('skip', style: TextStyle(fontSize: 11)),
+      ],
+    );
   }
 
   void _setCanvasViewMode(bool enabled) {
@@ -176,13 +262,185 @@ class _CameraScreenState extends State<CameraScreen>
       _isCanvasViewMode = enabled;
       _canvasAspectRatio = enabled ? _canvasAspectRatio : null;
       _currentZoom = 1.0;
-      _viewOffset = Offset.zero;
+      if (enabled) {
+        _graphHistoryFollowLatest = true;
+      }
     });
     NativeCameraService().setCanvasViewMode(enabled);
   }
 
   void _resetWhiteboardUiState() {
     _canvasNavNotifier.value = (count: 0, active: 0);
+    _graphHistoryTimeline = const [];
+    _selectedGraphHistoryIndex = -1;
+    _graphHistoryPeakIndex = -1;
+    _graphHistoryFollowLatest = true;
+    _isDraggingGraphHistory = false;
+    _graphHistoryDragValue = 0.0;
+  }
+
+  bool _sameGraphHistoryTimeline(
+    List<GraphHistoryTimelineEntry> left,
+    List<GraphHistoryTimelineEntry> right,
+  ) {
+    if (identical(left, right)) return true;
+    if (left.length != right.length) return false;
+    for (int i = 0; i < left.length; i++) {
+      if (left[i].frameId != right[i].frameId ||
+          left[i].nodeCount != right[i].nodeCount) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  Future<void> _refreshGraphHistoryState() async {
+    if (!mounted || !Platform.isWindows || !_isWhiteboardMode) return;
+
+    final svc = NativeCameraService();
+    var timeline = svc.getGraphHistoryTimeline();
+    final latestIndex = timeline.isEmpty ? -1 : timeline.length - 1;
+    if (_graphHistoryFollowLatest && timeline.isNotEmpty) {
+      if (svc.getGraphHistorySelectedIndex() != latestIndex) {
+        svc.setGraphHistorySelectedIndex(latestIndex);
+      }
+    }
+
+    final rawSelectedIndex = svc.getGraphHistorySelectedIndex();
+    final peakIndex = svc.getGraphHistoryPeakIndex();
+    final selectedIndex = timeline.isEmpty
+        ? -1
+        : (_graphHistoryFollowLatest
+              ? latestIndex
+              : rawSelectedIndex.clamp(0, timeline.length - 1));
+
+    if (!mounted) return;
+
+    final shouldUpdate = !_sameGraphHistoryTimeline(
+          timeline,
+          _graphHistoryTimeline,
+        ) ||
+        selectedIndex != _selectedGraphHistoryIndex ||
+        peakIndex != _graphHistoryPeakIndex;
+
+    if (!shouldUpdate) return;
+
+    setState(() {
+      _graphHistoryTimeline = timeline;
+      _selectedGraphHistoryIndex = selectedIndex;
+      _graphHistoryPeakIndex = peakIndex;
+      if (!_isDraggingGraphHistory && selectedIndex >= 0) {
+        _graphHistoryDragValue = selectedIndex.toDouble();
+      }
+    });
+  }
+
+  Future<void> _selectGraphHistoryIndex(
+    int index, {
+    required bool followLatest,
+  }) async {
+    final svc = NativeCameraService();
+    svc.setGraphHistorySelectedIndex(index);
+
+    setState(() {
+      _graphHistoryFollowLatest = followLatest;
+      _selectedGraphHistoryIndex = index;
+      _graphHistoryDragValue = index.toDouble();
+    });
+
+    for (int attempt = 0; attempt < 8; attempt++) {
+      if (!mounted) return;
+      final currentIndex = svc.getGraphHistorySelectedIndex();
+      if (currentIndex == index) break;
+      await Future.delayed(const Duration(milliseconds: 30));
+    }
+
+    await _refreshGraphHistoryState();
+  }
+
+  Future<({Uint8List bytes, int width, int height})?> _buildSelectedGraphPdfImage() async {
+    final canvasSize = NativeCameraService().getPanoramaCanvasSize();
+    final maxWidth = canvasSize.width > 0
+        ? canvasSize.width.ceil().clamp(1, 16384)
+        : 4096;
+    final maxHeight = canvasSize.height > 0
+        ? canvasSize.height.ceil().clamp(1, 16384)
+        : 4096;
+    final result = NativeCameraService().getCanvasFullResRgba(
+      maxWidth: maxWidth,
+      maxHeight: maxHeight,
+    );
+    if (result == null) {
+      return null;
+    }
+
+    final image = await ui.ImmutableBuffer.fromUint8List(result.bytes)
+        .then(
+          (buffer) => ui.ImageDescriptor.raw(
+            buffer,
+            width: result.width,
+            height: result.height,
+            pixelFormat: ui.PixelFormat.rgba8888,
+          ),
+        )
+        .then((descriptor) => descriptor.instantiateCodec())
+        .then((codec) => codec.getNextFrame())
+        .then((frame) => frame.image);
+
+    final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
+    if (byteData == null) {
+      return null;
+    }
+
+    return (
+      bytes: byteData.buffer.asUint8List(),
+      width: result.width,
+      height: result.height,
+    );
+  }
+
+  Future<void> _exportSelectedGraphToPdf() async {
+    final image = await _buildSelectedGraphPdfImage();
+    if (image == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No graph snapshot selected to export.')),
+      );
+      return;
+    }
+
+    try {
+      final file = await DocumentService.instance.exportPdf(
+        images: [image],
+        fileName: _pdfNameController.text.trim(),
+        directoryPath: _pdfPathController.text.trim(),
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Saved graph PDF to ${file.path}')),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error exporting graph PDF: $e')),
+      );
+    }
+  }
+
+  Future<void> _autoExportPeakGraphToPdf() async {
+    final svc = NativeCameraService();
+    final peakIndex = svc.getGraphHistoryPeakIndex();
+    if (peakIndex < 0) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No peak graph was found to export.')),
+      );
+      return;
+    }
+
+    await _selectGraphHistoryIndex(peakIndex, followLatest: false);
+    await _exportSelectedGraphToPdf();
   }
 
   void _toggleWhiteboardSensitivity() {
@@ -311,6 +569,23 @@ class _CameraScreenState extends State<CameraScreen>
       _isStreamMode = true;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         _connectToStream(widget.initialStreamUrl!);
+      });
+    } else if (widget.initialVideoFilePath != null) {
+      _isStreamMode = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        await _connectToStream(widget.initialVideoFilePath!);
+        if (!mounted) return;
+        final svc = NativeCameraService();
+        svc.setVideoSkipFrames(_videoSkipFrames);
+        svc.setPanoramaEnabled(true);
+        svc.setCanvasViewMode(true);
+        setState(() {
+          _isVideoFileMode = true;
+          _videoProgress = 0.0;
+          _isWhiteboardMode = true;
+          _isCanvasViewMode = true;
+        });
+        _startCanvasPollTimer();
       });
     }
 
@@ -475,6 +750,10 @@ class _CameraScreenState extends State<CameraScreen>
       supportsMobileRtmp: _supportsMobileRtmp,
       controller: _controller,
       connectionUrl: widget.connectionUrl,
+      overrideAspectRatio: _isCanvasViewMode ? _canvasAspectRatio : null,
+      transformationController: _isCanvasViewMode
+          ? _canvasTransformationController
+          : null,
     );
   }
 
@@ -660,7 +939,6 @@ class _CameraScreenState extends State<CameraScreen>
               _isDigitalZoomOverride = true;
               _lockedPhoneZoom = 1.0;
               _currentZoom = 1.0;
-              _viewOffset = Offset.zero;
             });
 
             NativeCameraService().selectCamera(index);
@@ -692,7 +970,6 @@ class _CameraScreenState extends State<CameraScreen>
                 _isDigitalZoomOverride = true;
                 _lockedPhoneZoom = 1.0;
                 _currentZoom = 1.0;
-                _viewOffset = Offset.zero;
               });
             } else {
               ScaffoldMessenger.of(context).showSnackBar(
@@ -703,6 +980,26 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               );
             }
+          },
+          onSelectVideoFile: (path) async {
+            Navigator.pop(context);
+            _switchToSource();
+            await _connectToStream(path);
+            if (!mounted) return;
+            final svc = NativeCameraService();
+            svc.setVideoSkipFrames(_videoSkipFrames);
+            svc.setPanoramaEnabled(true);
+            svc.setCanvasViewMode(true);
+            setState(() {
+              _isDigitalZoomOverride = true;
+              _lockedPhoneZoom = 1.0;
+              _currentZoom = 1.0;
+              _isWhiteboardMode = true;
+              _isCanvasViewMode = true;
+              _isVideoFileMode = true;
+              _videoProgress = 0.0;
+            });
+            _startCanvasPollTimer();
           },
         ),
       );
@@ -726,24 +1023,11 @@ class _CameraScreenState extends State<CameraScreen>
     Size viewportSize,
     int clickType,
   ) {
-    // Compute the visual scale (digital zoom portion beyond the phone/optical limit)
-    final double limit = _isDigitalZoomOverride
-        ? _lockedPhoneZoom
-        : _phoneMaxZoom;
-    final double visualScale = _currentZoom > limit
-        ? _currentZoom / limit
-        : 1.0;
-
-    // Reverse the transform: screen position → content position
-    // The ZoomableStreamView applies: translate(_viewOffset) then scale(visualScale)
-    // So: screenPos = offset + contentPos * visualScale
-    // Inverse: contentPos = (screenPos - offset) / visualScale
-    final double contentX = (tapPos.dx - _viewOffset.dx) / visualScale;
-    final double contentY = (tapPos.dy - _viewOffset.dy) / visualScale;
+    final Offset scenePoint = _transformationController.toScene(tapPos);
 
     // Normalize to 0-1 range relative to viewport
-    double normalizedX = contentX / viewportSize.width;
-    double normalizedY = contentY / viewportSize.height;
+    double normalizedX = scenePoint.dx / viewportSize.width;
+    double normalizedY = scenePoint.dy / viewportSize.height;
 
     // If live crop is active, map display coords back to original frame coords
     if (_isLiveCropActive) {
@@ -768,18 +1052,10 @@ class _CameraScreenState extends State<CameraScreen>
     Size viewportSize,
     double scrollDeltaY,
   ) {
-    final double limit = _isDigitalZoomOverride
-        ? _lockedPhoneZoom
-        : _phoneMaxZoom;
-    final double visualScale = _currentZoom > limit
-        ? _currentZoom / limit
-        : 1.0;
+    final Offset scenePoint = _transformationController.toScene(scrollPos);
 
-    final double contentX = (scrollPos.dx - _viewOffset.dx) / visualScale;
-    final double contentY = (scrollPos.dy - _viewOffset.dy) / visualScale;
-
-    double normalizedX = contentX / viewportSize.width;
-    double normalizedY = contentY / viewportSize.height;
+    double normalizedX = scenePoint.dx / viewportSize.width;
+    double normalizedY = scenePoint.dy / viewportSize.height;
 
     // If live crop is active, map display coords back to original frame coords
     if (_isLiveCropActive) {
@@ -869,14 +1145,16 @@ class _CameraScreenState extends State<CameraScreen>
 
     _canvasPollTimer?.cancel();
     _canvasNavNotifier.dispose();
+    _skipFramesController.dispose();
     _flashController.dispose();
     super.dispose();
   }
 
   Future<void> _startLocalCamera() async {
     if (Platform.isWindows) {
-      // On Windows, we use NativeCameraService via NativeCameraView.
-      // We do NOT initialize package:camera controller to avoid conflicts.
+      if (!NativeCameraService().isScreenCaptureActive()) {
+        NativeCameraService().start();
+      }
       if (mounted) {
         setState(() {
           _isInitialized = true;
@@ -1369,6 +1647,146 @@ class _CameraScreenState extends State<CameraScreen>
       textDirection: TextDirection.ltr,
       child: Scaffold(
         appBar: AppBar(
+          bottom: _isVideoFileMode
+              ? (_isCanvasViewMode && _graphHistoryTimeline.isNotEmpty
+                    ? PreferredSize(
+                        preferredSize: const Size.fromHeight(82),
+                        child: Padding(
+                          padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Row(
+                                children: [
+                                  Text(
+                                    'Graph ${(_selectedGraphHistoryIndex >= 0 ? _selectedGraphHistoryIndex + 1 : 0)}/${_graphHistoryTimeline.length}',
+                                    style: const TextStyle(fontSize: 12),
+                                  ),
+                                  const Spacer(),
+                                  if (_selectedGraphHistoryIndex >= 0 &&
+                                      _selectedGraphHistoryIndex <
+                                          _graphHistoryTimeline.length)
+                                    Text(
+                                      '${_graphHistoryTimeline[_selectedGraphHistoryIndex].nodeCount} nodes',
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                  if (_selectedGraphHistoryIndex ==
+                                      _graphHistoryPeakIndex)
+                                    const Padding(
+                                      padding: EdgeInsets.only(left: 8),
+                                      child: Text(
+                                        'peak',
+                                        style: TextStyle(
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w700,
+                                          color: Colors.orange,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 6),
+                              GraphHistorySparkline(
+                                timeline: _graphHistoryTimeline,
+                                selectedIndex: _selectedGraphHistoryIndex,
+                                peakIndex: _graphHistoryPeakIndex,
+                              ),
+                              const SizedBox(height: 4),
+                              SliderTheme(
+                                data: SliderTheme.of(context).copyWith(
+                                  trackHeight: 4,
+                                  thumbShape: const RoundSliderThumbShape(
+                                    enabledThumbRadius: 7,
+                                  ),
+                                  overlayShape: const RoundSliderOverlayShape(
+                                    overlayRadius: 14,
+                                  ),
+                                  activeTrackColor: Colors.teal,
+                                  inactiveTrackColor: Colors.grey.withAlpha(80),
+                                  thumbColor: Colors.teal,
+                                ),
+                                child: Slider(
+                                  value: (_isDraggingGraphHistory
+                                          ? _graphHistoryDragValue
+                                          : _selectedGraphHistoryIndex.toDouble())
+                                      .clamp(
+                                        0.0,
+                                        (_graphHistoryTimeline.length - 1)
+                                            .toDouble(),
+                                      ),
+                                  min: 0.0,
+                                  max: (_graphHistoryTimeline.length - 1)
+                                      .toDouble(),
+                                  onChangeStart: (value) {
+                                    setState(() {
+                                      _isDraggingGraphHistory = true;
+                                      _graphHistoryDragValue = value;
+                                    });
+                                  },
+                                  onChanged: (value) {
+                                    setState(() => _graphHistoryDragValue = value);
+                                  },
+                                  onChangeEnd: (value) {
+                                    final index = value.round();
+                                    final latestIndex =
+                                        _graphHistoryTimeline.length - 1;
+                                    setState(() {
+                                      _isDraggingGraphHistory = false;
+                                      _graphHistoryDragValue = value;
+                                    });
+                                    unawaited(
+                                      _selectGraphHistoryIndex(
+                                        index,
+                                        followLatest: index >= latestIndex,
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      )
+                    : PreferredSize(
+                        preferredSize: const Size.fromHeight(24),
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 4,
+                            thumbShape: const RoundSliderThumbShape(
+                                enabledThumbRadius: 7),
+                            overlayShape: const RoundSliderOverlayShape(
+                                overlayRadius: 14),
+                            activeTrackColor: Colors.blue,
+                            inactiveTrackColor: Colors.grey.withAlpha(80),
+                            thumbColor: Colors.blue,
+                          ),
+                          child: Slider(
+                            value: (_isSeekingVideo
+                                    ? _seekDragValue
+                                    : _videoProgress)
+                                .clamp(0.0, 1.0),
+                            min: 0.0,
+                            max: 1.0,
+                            onChangeStart: (v) {
+                              setState(() {
+                                _isSeekingVideo = true;
+                                _seekDragValue = v;
+                              });
+                            },
+                            onChanged: (v) {
+                              setState(() => _seekDragValue = v);
+                            },
+                            onChangeEnd: (v) {
+                              NativeCameraService().seekVideoToProgress(v);
+                              setState(() {
+                                _isSeekingVideo = false;
+                                _videoProgress = v;
+                              });
+                            },
+                          ),
+                        ),
+                      ))
+              : null,
           title: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1434,6 +1852,9 @@ class _CameraScreenState extends State<CameraScreen>
                 }
               },
             ),
+            // Video file skip-frames control
+            if (_isVideoFileMode)
+              _buildVideoSkipControl(),
             // VDD Scroll Mode Toggle (zoom vs forward scroll)
             if (_isVddCaptureMode)
               IconButton(
@@ -1544,7 +1965,7 @@ class _CameraScreenState extends State<CameraScreen>
                 tooltip: AppLocalizations.of(context)!.resetWhiteboard,
                 onPressed: () {
                   NativeCameraService().resetPanorama();
-                  _resetWhiteboardUiState();
+                  setState(_resetWhiteboardUiState);
                 },
               ),
             IconButton(
@@ -1631,7 +2052,7 @@ class _CameraScreenState extends State<CameraScreen>
                                           ),
                                         ],
                                       )
-                                    : NativeCameraView(
+                                        : NativeTextureView(
                                         transformationController:
                                             _isCanvasViewMode
                                             ? _canvasTransformationController
@@ -1641,36 +2062,15 @@ class _CameraScreenState extends State<CameraScreen>
                                             : null,
                                       );
 
-                                final videoStack = Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    if (_isCanvasViewMode)
-                                      windowsChild
-                                    else
-                                      ZoomableStreamView(
-                                        enabled: true,
-                                        disableScrollZoom:
-                                            _isVddCaptureMode &&
-                                            _vddScrollForwardsToDisplay,
-                                        currentZoom: _currentZoom,
-                                        viewOffset: _viewOffset,
-                                        isDigitalZoomOverride:
-                                            _isDigitalZoomOverride,
-                                        lockedPhoneZoom: _lockedPhoneZoom,
-                                        isStreamMode: _isStreamMode,
-                                        phoneMaxZoom: _phoneMaxZoom,
-                                        onTransformChanged:
-                                            (zoom, offset, viewportSize) {
-                                              setState(() {
-                                                _currentZoom = zoom;
-                                                _viewOffset = offset;
-                                              });
-                                            },
-                                        onSendZoomCommand: _sendZoomCommand,
+                                final videoStack = _isCanvasViewMode
+                                    ? windowsChild
+                                    : InteractiveViewer(
+                                        transformationController:
+                                            _transformationController,
+                                        minScale: 1.0,
+                                        maxScale: 50.0,
                                         child: windowsChild,
-                                      ),
-                                  ],
-                                );
+                                      );
 
                                 // Wrap with tap forwarding when in VDD capture mode
                                 if (!_isVddCaptureMode) return videoStack;
@@ -2070,6 +2470,15 @@ class _CameraScreenState extends State<CameraScreen>
               pdfNameController: _pdfNameController,
               pdfPathController: _pdfPathController,
               onExportPdf: _exportPdf,
+              showGraphExportActions: Platform.isWindows && _isWhiteboardMode,
+              canExportSelectedGraph: _selectedGraphHistoryIndex >= 0,
+              canAutoExportGraph: _graphHistoryTimeline.isNotEmpty,
+              onExportSelectedGraphPdf: () {
+                unawaited(_exportSelectedGraphToPdf());
+              },
+              onAutoExportGraphPdf: () {
+                unawaited(_autoExportPeakGraphToPdf());
+              },
               onSelectDirectory: _pickSaveDirectory,
               onCropImage: _cropImage,
               onUseAsOverlay: _useAsOverlay,

@@ -800,6 +800,22 @@ class _HomeScreenState extends State<HomeScreen> with WindowListener {
                       onSelectWindow: _showWindowPicker,
                       onSelectVirtualWindow: _handleVirtualDisplayCapture,
                     ),
+
+                    VideoFileWidget(
+                      onSelectVideoFile: (path) {
+                        Navigator.push(
+                          context,
+                          MaterialPageRoute(
+                            builder: (_) => CameraScreen(
+                              initialVideoFilePath: path,
+                            ),
+                          ),
+                        ).then((_) {
+                          NativeCameraService().stop();
+                          if (mounted) _startServer();
+                        });
+                      },
+                    ),
                   ],
                 ),
               ),

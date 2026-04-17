@@ -1,6 +1,8 @@
 #include "whiteboard_canvas_process.h"
 
+#ifndef KAPTCHI_CLI
 #include "native_camera.h"
+#endif
 #include "whiteboard_canvas.h"
 
 #include <windows.h>
@@ -43,6 +45,10 @@ constexpr int kMaxGraphEdges = 16384;
 constexpr int kGraphEdgeStride = 2;
 constexpr int kMaxGraphEdgeInts = kMaxGraphEdges * kGraphEdgeStride;
 constexpr int kMaxGraphContourFloats = 500000;
+constexpr int kMaxGraphHistoryEntries = 2048;
+constexpr int kGraphHistoryTimelineStride = 2;
+constexpr int kMaxGraphHistoryTimelineInts =
+    kMaxGraphHistoryEntries * kGraphHistoryTimelineStride;
 constexpr DWORD kGraphCompareTimeoutMs = 2000;
 constexpr int kGraphCompareResultFloats = 19;
 constexpr int kMaxEditDeletes = 256;
@@ -98,6 +104,19 @@ struct SharedState {
     LONG graph_bounds_w = 0;
     LONG graph_bounds_h = 0;
     LONG graph_bounds_valid = 0;
+    LONG graph_history_count = 0;
+    LONG graph_history_peak_index = -1;
+    LONG graph_history_requested_index = -1;
+    LONG graph_history_selected_index = -1;
+    LONG graph_history_timeline_entries = 0;
+    LONG graph_history_selected_node_count = 0;
+    LONG graph_history_selected_node_floats_written = 0;
+    LONG graph_history_selected_contour_floats_written = 0;
+    LONG graph_history_selected_bounds_x = 0;
+    LONG graph_history_selected_bounds_y = 0;
+    LONG graph_history_selected_bounds_w = 0;
+    LONG graph_history_selected_bounds_h = 0;
+    LONG graph_history_selected_bounds_valid = 0;
     LONG graph_compare_request_id = 0;
     LONG graph_compare_node_a = -1;
     LONG graph_compare_node_b = -1;
@@ -111,6 +130,9 @@ struct SharedState {
     float graph_nodes[kMaxGraphNodeFloats];
     int graph_edges[kMaxGraphEdgeInts];
     float graph_contours[kMaxGraphContourFloats];
+    int graph_history_timeline[kMaxGraphHistoryTimelineInts];
+    float graph_history_selected_nodes[kMaxGraphNodeFloats];
+    float graph_history_selected_contours[kMaxGraphContourFloats];
     float graph_compare_result[kGraphCompareResultFloats];
 
     // User edit commands (client -> helper)
@@ -156,6 +178,7 @@ struct HelperStateSnapshot {
     int graph_compare_request_id = 0;
     int graph_compare_node_a = -1;
     int graph_compare_node_b = -1;
+    int requested_graph_history_index = -1;
     int edit_request_id = 0;
     bool edit_lock_all = false;
     int edit_delete_count = 0;
@@ -290,6 +313,7 @@ public:
             }
 
             canvas.SetCanvasViewMode(snapshot.canvas_view_mode);
+            canvas.SetGraphHistorySelectedIndex(snapshot.requested_graph_history_index);
             canvas.SetRenderMode(snapshot.render_mode);
             canvas.SetDuplicateDebugMode(snapshot.duplicate_debug_enabled);
 
@@ -307,7 +331,10 @@ public:
                 cv::Mat person_mask = snapshot.person_mask;
                 if (person_mask.empty() || person_mask.size() != snapshot.frame.size() ||
                     person_mask.type() != CV_8UC1) {
+#ifndef KAPTCHI_CLI
                     person_mask = GetWhiteboardPersonMask(snapshot.frame);
+#endif
+                    // In CLI mode: leave person_mask empty (no YOLO detection)
                 }
                 canvas.ProcessFrame(snapshot.frame, person_mask);
             }
@@ -490,6 +517,8 @@ private:
         snapshot.graph_compare_request_id = static_cast<int>(shared_->graph_compare_request_id);
         snapshot.graph_compare_node_a = static_cast<int>(shared_->graph_compare_node_a);
         snapshot.graph_compare_node_b = static_cast<int>(shared_->graph_compare_node_b);
+        snapshot.requested_graph_history_index =
+            static_cast<int>(shared_->graph_history_requested_index);
 
         shared_->reset_requested = 0;
         shared_->pending_active_subcanvas = kNoSubCanvasRequest;
@@ -565,10 +594,23 @@ private:
         int graph_contour_floats = 0;
         int graph_bounds[4] = {0, 0, 0, 0};
         bool graph_bounds_valid = false;
+        int graph_history_count = 0;
+        int graph_history_peak_index = -1;
+        int graph_history_selected_index = -1;
+        int graph_history_timeline_entries = 0;
+        int graph_history_selected_node_count = 0;
+        int graph_history_selected_node_floats = 0;
+        int graph_history_selected_contour_floats = 0;
+        int graph_history_selected_bounds[4] = {0, 0, 0, 0};
+        bool graph_history_selected_bounds_valid = false;
         float local_graph_nodes[kMaxGraphNodeFloats];
         int local_graph_edges[kMaxGraphEdgeInts];
+        int local_graph_history_timeline[kMaxGraphHistoryTimelineInts] = {};
+        float local_graph_history_selected_nodes[kMaxGraphNodeFloats];
         // Use a heap buffer for contours (too large for stack)
         static thread_local std::vector<float> local_graph_contours(kMaxGraphContourFloats);
+        static thread_local std::vector<float> local_graph_history_selected_contours(
+            kMaxGraphContourFloats);
 
         if (has_content) {
             graph_node_count = canvas.GetGraphNodeCount();
@@ -578,6 +620,27 @@ private:
                 graph_contour_floats = canvas.GetGraphNodeContours(
                     local_graph_contours.data(), kMaxGraphContourFloats);
                 graph_bounds_valid = canvas.GetGraphCanvasBounds(graph_bounds);
+            }
+
+            graph_history_count = canvas.GetGraphHistoryCount();
+            graph_history_peak_index = canvas.GetGraphHistoryPeakIndex();
+            graph_history_selected_index = canvas.GetGraphHistorySelectedIndex();
+            if (graph_history_count > 0) {
+                graph_history_timeline_entries = canvas.GetGraphHistoryTimeline(
+                    local_graph_history_timeline, kMaxGraphHistoryEntries);
+                graph_history_selected_node_count =
+                    canvas.GetSelectedGraphHistoryNodeCount();
+                graph_history_selected_node_floats =
+                    canvas.GetSelectedGraphHistoryNodes(
+                        local_graph_history_selected_nodes,
+                        kMaxGraphNodes) * kGraphNodeStride;
+                graph_history_selected_contour_floats =
+                    canvas.GetSelectedGraphHistoryNodeContours(
+                        local_graph_history_selected_contours.data(),
+                        kMaxGraphContourFloats);
+                graph_history_selected_bounds_valid =
+                    canvas.GetSelectedGraphHistoryCanvasBounds(
+                        graph_history_selected_bounds);
             }
         }
 
@@ -608,6 +671,14 @@ private:
             shared_->graph_edge_count = 0;
             shared_->graph_contour_floats_written = 0;
             shared_->graph_bounds_valid = 0;
+            shared_->graph_history_count = 0;
+            shared_->graph_history_peak_index = -1;
+            shared_->graph_history_selected_index = -1;
+            shared_->graph_history_timeline_entries = 0;
+            shared_->graph_history_selected_node_count = 0;
+            shared_->graph_history_selected_node_floats_written = 0;
+            shared_->graph_history_selected_contour_floats_written = 0;
+            shared_->graph_history_selected_bounds_valid = 0;
             Unlock(mutex_.get());
             return;
         }
@@ -655,6 +726,46 @@ private:
             shared_->graph_bounds_y = graph_bounds[1];
             shared_->graph_bounds_w = graph_bounds[2];
             shared_->graph_bounds_h = graph_bounds[3];
+        }
+
+        shared_->graph_history_count = graph_history_count;
+        shared_->graph_history_peak_index = graph_history_peak_index;
+        shared_->graph_history_selected_index = graph_history_selected_index;
+        shared_->graph_history_timeline_entries = graph_history_timeline_entries;
+        shared_->graph_history_selected_node_count = graph_history_selected_node_count;
+        shared_->graph_history_selected_node_floats_written =
+            graph_history_selected_node_floats;
+        shared_->graph_history_selected_contour_floats_written =
+            graph_history_selected_contour_floats;
+        if (graph_history_timeline_entries > 0) {
+            std::memcpy(shared_->graph_history_timeline,
+                        local_graph_history_timeline,
+                        static_cast<size_t>(graph_history_timeline_entries) *
+                            kGraphHistoryTimelineStride * sizeof(int));
+        }
+        if (graph_history_selected_node_floats > 0) {
+            std::memcpy(shared_->graph_history_selected_nodes,
+                        local_graph_history_selected_nodes,
+                        static_cast<size_t>(graph_history_selected_node_floats) *
+                            sizeof(float));
+        }
+        if (graph_history_selected_contour_floats > 0) {
+            std::memcpy(shared_->graph_history_selected_contours,
+                        local_graph_history_selected_contours.data(),
+                        static_cast<size_t>(graph_history_selected_contour_floats) *
+                            sizeof(float));
+        }
+        shared_->graph_history_selected_bounds_valid =
+            graph_history_selected_bounds_valid ? 1 : 0;
+        if (graph_history_selected_bounds_valid) {
+            shared_->graph_history_selected_bounds_x =
+                graph_history_selected_bounds[0];
+            shared_->graph_history_selected_bounds_y =
+                graph_history_selected_bounds[1];
+            shared_->graph_history_selected_bounds_w =
+                graph_history_selected_bounds[2];
+            shared_->graph_history_selected_bounds_h =
+                graph_history_selected_bounds[3];
         }
 
         // Write edit command results
@@ -1196,6 +1307,115 @@ bool WhiteboardCanvasHelperClient::GetGraphCanvasBounds(int* bounds) const {
         }
     });
     return valid;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphHistoryCount() const {
+    if (!IsReady()) return 0;
+    int count = 0;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        count = static_cast<int>(impl_->shared->graph_history_count);
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphHistorySelectedIndex() const {
+    if (!IsReady()) return -1;
+    int index = -1;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        index = static_cast<int>(impl_->shared->graph_history_selected_index);
+    });
+    return index;
+}
+
+void WhiteboardCanvasHelperClient::SetGraphHistorySelectedIndex(int idx) {
+    if (!IsReady()) return;
+    impl_->WithLock(20, [&]() {
+        impl_->shared->graph_history_requested_index = idx;
+    });
+    impl_->SignalHelper();
+}
+
+int WhiteboardCanvasHelperClient::GetGraphHistoryTimeline(int* buffer, int max_entries) const {
+    if (!IsReady() || !buffer || max_entries <= 0) return 0;
+    int count = 0;
+    impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
+        const int available = static_cast<int>(impl_->shared->graph_history_timeline_entries);
+        count = std::min(available, max_entries);
+        if (count > 0) {
+            std::memcpy(buffer,
+                        impl_->shared->graph_history_timeline,
+                        static_cast<size_t>(count) * kGraphHistoryTimelineStride * sizeof(int));
+        }
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetGraphHistoryPeakIndex() const {
+    if (!IsReady()) return -1;
+    int index = -1;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        index = static_cast<int>(impl_->shared->graph_history_peak_index);
+    });
+    return index;
+}
+
+int WhiteboardCanvasHelperClient::GetSelectedGraphHistoryNodeCount() const {
+    if (!IsReady()) return 0;
+    int count = 0;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        count = static_cast<int>(impl_->shared->graph_history_selected_node_count);
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetSelectedGraphHistoryNodes(float* buffer,
+                                                               int max_nodes) const {
+    if (!IsReady() || !buffer || max_nodes <= 0) return 0;
+    int count = 0;
+    impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
+        const int total_floats =
+            static_cast<int>(impl_->shared->graph_history_selected_node_floats_written);
+        const int available_nodes = total_floats / kGraphNodeStride;
+        count = std::min(available_nodes, max_nodes);
+        if (count > 0) {
+            std::memcpy(buffer,
+                        impl_->shared->graph_history_selected_nodes,
+                        static_cast<size_t>(count) * kGraphNodeStride * sizeof(float));
+        }
+    });
+    return count;
+}
+
+bool WhiteboardCanvasHelperClient::GetSelectedGraphHistoryCanvasBounds(int* bounds) const {
+    if (!IsReady() || !bounds) return false;
+    bool valid = false;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        valid = impl_->shared->graph_history_selected_bounds_valid != 0;
+        if (valid) {
+            bounds[0] = static_cast<int>(impl_->shared->graph_history_selected_bounds_x);
+            bounds[1] = static_cast<int>(impl_->shared->graph_history_selected_bounds_y);
+            bounds[2] = static_cast<int>(impl_->shared->graph_history_selected_bounds_w);
+            bounds[3] = static_cast<int>(impl_->shared->graph_history_selected_bounds_h);
+        }
+    });
+    return valid;
+}
+
+int WhiteboardCanvasHelperClient::GetSelectedGraphHistoryNodeContours(float* buffer,
+                                                                      int max_floats) const {
+    if (!IsReady() || !buffer || max_floats <= 0) return 0;
+    int written = 0;
+    impl_->WithLock(kImageReadLockTimeoutMs, [&]() {
+        const int available = static_cast<int>(
+            impl_->shared->graph_history_selected_contour_floats_written);
+        written = std::min(available, max_floats);
+        if (written > 0) {
+            std::memcpy(buffer,
+                        impl_->shared->graph_history_selected_contours,
+                        static_cast<size_t>(written) * sizeof(float));
+        }
+    });
+    return written;
 }
 
 bool WhiteboardCanvasHelperClient::CompareGraphNodes(int id_a, int id_b, float* result) const {

@@ -21,6 +21,16 @@ public:
     void Start();
     void StartStream(const char* url);
     void Stop();
+    void SetVideoSkipFrames(int skip) { video_skip_frames_ = std::max(0, skip); }
+    int  GetVideoSkipFrames() const { return video_skip_frames_.load(); }
+    bool IsVideoComplete() const { return video_complete_.load(); }
+    float GetVideoProgress() const { return video_progress_.load(); }
+    // Request the capture thread to seek to a 0..1 position in the video file.
+    void SeekVideoToProgress(float progress) {
+        if (progress < 0.f) progress = 0.f;
+        if (progress > 1.f) progress = 1.f;
+        pending_seek_progress_.store(progress);
+    }
     void StartProcessingOnly(); // For screen capture: start processing thread without camera
     void SwitchCamera();
     void SelectCamera(int index);
@@ -54,6 +64,18 @@ private:
     std::atomic<bool> restart_requested_ = false;
     std::atomic<int> pending_camera_index_ = 0;
     std::mutex mutex_;
+
+    // Video file playback state
+    std::atomic<bool> is_video_file_ = false;
+    std::atomic<int> video_skip_frames_ = 0;
+    double video_fps_ = 0.0;
+    std::condition_variable frame_consumed_cv_; // signalled when processing thread takes a frame
+    std::atomic<bool> video_complete_ = false;
+    std::atomic<float> video_progress_ = 0.0f;
+    double video_total_frames_ = 0.0;
+    // -1.0f means "no seek pending"; otherwise a 0..1 target position
+    // that the capture thread will consume on the next loop iteration.
+    std::atomic<float> pending_seek_progress_ = -1.0f;
     
     cv::Mat current_frame_;
     cv::Mat last_source_frame_bgr_;

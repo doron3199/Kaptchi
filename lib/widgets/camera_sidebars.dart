@@ -460,6 +460,11 @@ class GallerySidebar extends StatelessWidget {
   final TextEditingController pdfNameController;
   final TextEditingController pdfPathController;
   final VoidCallback onExportPdf;
+  final bool showGraphExportActions;
+  final bool canExportSelectedGraph;
+  final bool canAutoExportGraph;
+  final VoidCallback onExportSelectedGraphPdf;
+  final VoidCallback onAutoExportGraphPdf;
   final VoidCallback onSelectDirectory;
   final Function(int) onCropImage;
   final Function(int) onUseAsOverlay;
@@ -478,6 +483,11 @@ class GallerySidebar extends StatelessWidget {
     required this.pdfNameController,
     required this.pdfPathController,
     required this.onExportPdf,
+    this.showGraphExportActions = false,
+    this.canExportSelectedGraph = false,
+    this.canAutoExportGraph = false,
+    required this.onExportSelectedGraphPdf,
+    required this.onAutoExportGraphPdf,
     required this.onSelectDirectory,
     required this.onCropImage,
     required this.onUseAsOverlay,
@@ -754,6 +764,38 @@ class GallerySidebar extends StatelessWidget {
                       ),
                     ),
                   ),
+                  if (showGraphExportActions) ...[
+                    const SizedBox(height: 10),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: canExportSelectedGraph
+                            ? onExportSelectedGraphPdf
+                            : null,
+                        icon: const Icon(Icons.schema),
+                        label: const Text('Export Selected Graph PDF'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: Colors.teal,
+                          foregroundColor: Colors.white,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    SizedBox(
+                      width: double.infinity,
+                      child: OutlinedButton.icon(
+                        onPressed: canAutoExportGraph
+                            ? onAutoExportGraphPdf
+                            : null,
+                        icon: const Icon(Icons.auto_graph),
+                        label: const Text('Auto Export Peak Graph'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          side: const BorderSide(color: Colors.white54),
+                        ),
+                      ),
+                    ),
+                  ],
                   const SizedBox(height: 10),
                 ],
               ],

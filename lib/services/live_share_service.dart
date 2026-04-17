@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart';
 import 'app_logger.dart';
 import 'native_camera_service.dart';
 
@@ -14,7 +12,6 @@ class LiveShareService {
   final NativeCameraService _cameraService = NativeCameraService();
   WebSocket? _socket;
   Timer? _pollingTimer;
-  int _lastCanvasVersion = -1;
   bool _isConnecting = false;
   
   String? _currentBoardId;

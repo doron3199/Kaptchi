@@ -108,3 +108,34 @@ target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
 add_dependencies(${BINARY_NAME} flutter_assemble)
+
+# ---------------------------------------------------------------------------
+# kaptchi_cli — standalone video-to-PDF whiteboard processor
+# Does not depend on Flutter; links only OpenCV + whiteboard canvas sources.
+# ---------------------------------------------------------------------------
+add_executable(kaptchi_cli
+  "cli_main.cpp"
+  "whiteboard_canvas.cpp"
+  "whiteboard_canvas_process.cpp"
+  "whiteboard_enhance.cpp"
+)
+
+target_include_directories(kaptchi_cli PRIVATE "${OPENCV_ROOT}/include")
+target_include_directories(kaptchi_cli PRIVATE "${CMAKE_SOURCE_DIR}")
+
+target_link_libraries(kaptchi_cli PRIVATE
+  debug   "${OPENCV_ROOT}/x64/vc16/lib/opencv_world4120d.lib"
+  optimized "${OPENCV_ROOT}/x64/vc16/lib/opencv_world4120.lib"
+)
+
+target_compile_definitions(kaptchi_cli PRIVATE "NOMINMAX" "KAPTCHI_CLI=1")
+
+# Use C++17 (required for std::filesystem if used in canvas sources)
+target_compile_features(kaptchi_cli PRIVATE cxx_std_17)
+
+# Copy kaptchi_cli.exe next to the main app binary after build
+add_custom_command(TARGET kaptchi_cli POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different
+  "$<TARGET_FILE:kaptchi_cli>"
+  "$<TARGET_FILE_DIR:${BINARY_NAME}>"
+)

@@ -44,6 +44,15 @@ public:
     int GetGraphHardEdges(int* buffer, int max_edges) const;
     int GetGraphNodeContours(float* buffer, int max_floats) const;
     bool GetGraphCanvasBounds(int* bounds) const;
+    int GetGraphHistoryCount() const;
+    int GetGraphHistorySelectedIndex() const;
+    void SetGraphHistorySelectedIndex(int idx);
+    int GetGraphHistoryTimeline(int* buffer, int max_entries) const;
+    int GetGraphHistoryPeakIndex() const;
+    int GetSelectedGraphHistoryNodeCount() const;
+    int GetSelectedGraphHistoryNodes(float* buffer, int max_nodes) const;
+    bool GetSelectedGraphHistoryCanvasBounds(int* bounds) const;
+    int GetSelectedGraphHistoryNodeContours(float* buffer, int max_floats) const;
     bool CompareGraphNodes(int id_a, int id_b, float* result) const;
     int  GetGraphNodeMasks(uint8_t* buffer, int max_bytes) const;
 

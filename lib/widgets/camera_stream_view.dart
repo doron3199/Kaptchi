@@ -10,12 +10,16 @@ class CameraStreamView extends StatelessWidget {
   final bool supportsMobileRtmp;
   final c.CameraController? controller;
   final String? connectionUrl;
+  final double? overrideAspectRatio;
+  final TransformationController? transformationController;
 
   const CameraStreamView({
     super.key,
     required this.supportsMobileRtmp,
     required this.controller,
     this.connectionUrl,
+    this.overrideAspectRatio,
+    this.transformationController,
   });
 
   @override
@@ -98,7 +102,10 @@ class CameraStreamView extends StatelessWidget {
 
     if (Platform.isWindows) {
       debugPrint('Using NativeTextureView');
-      return const NativeTextureView();
+      return NativeTextureView(
+        overrideAspectRatio: overrideAspectRatio,
+        transformationController: transformationController,
+      );
     }
 
     return const Center(child: CircularProgressIndicator());

@@ -74,6 +74,12 @@ typedef SetCanvasViewMode = void Function(bool mode);
 typedef IsCanvasViewModeFunc = Bool Function();
 typedef IsCanvasViewMode = bool Function();
 
+typedef SetCanvasSkipFramesFunc = Void Function(Int32 n);
+typedef SetCanvasSkipFrames = void Function(int n);
+
+typedef GetCanvasSkipFramesFunc = Int32 Function();
+typedef GetCanvasSkipFrames = int Function();
+
 typedef SetCanvasRenderModeFunc = Void Function(Int32 mode);
 typedef SetCanvasRenderMode = void Function(int mode);
 
@@ -177,6 +183,55 @@ typedef GetGraphNodeContoursFFI = int Function(Pointer<Float> buffer, int maxFlo
 typedef GetGraphNodeMasksFunc = Int32 Function(Pointer<Uint8> buffer, Int32 maxBytes);
 typedef GetGraphNodeMasksFFI = int Function(Pointer<Uint8> buffer, int maxBytes);
 
+typedef GetGraphHistoryCountFunc = Int32 Function();
+typedef GetGraphHistoryCountFFI = int Function();
+
+typedef GetGraphHistorySelectedIndexFunc = Int32 Function();
+typedef GetGraphHistorySelectedIndexFFI = int Function();
+
+typedef SetGraphHistorySelectedIndexFunc = Void Function(Int32 idx);
+typedef SetGraphHistorySelectedIndexFFI = void Function(int idx);
+
+typedef GetGraphHistoryTimelineFunc = Int32 Function(
+  Pointer<Int32> buffer,
+  Int32 maxEntries,
+);
+typedef GetGraphHistoryTimelineFFI = int Function(
+  Pointer<Int32> buffer,
+  int maxEntries,
+);
+
+typedef GetGraphHistoryPeakIndexFunc = Int32 Function();
+typedef GetGraphHistoryPeakIndexFFI = int Function();
+
+typedef GetSelectedGraphHistoryNodeCountFunc = Int32 Function();
+typedef GetSelectedGraphHistoryNodeCountFFI = int Function();
+
+typedef GetSelectedGraphHistoryNodesFunc = Int32 Function(
+  Pointer<Float> buffer,
+  Int32 maxNodes,
+);
+typedef GetSelectedGraphHistoryNodesFFI = int Function(
+  Pointer<Float> buffer,
+  int maxNodes,
+);
+
+typedef GetSelectedGraphHistoryCanvasBoundsFunc = Bool Function(
+  Pointer<Int32> bounds,
+);
+typedef GetSelectedGraphHistoryCanvasBoundsFFI = bool Function(
+  Pointer<Int32> bounds,
+);
+
+typedef GetSelectedGraphHistoryNodeContoursFunc = Int32 Function(
+  Pointer<Float> buffer,
+  Int32 maxFloats,
+);
+typedef GetSelectedGraphHistoryNodeContoursFFI = int Function(
+  Pointer<Float> buffer,
+  int maxFloats,
+);
+
 typedef CaptureGraphDebugSnapshotFunc = Bool Function(Int32 slot);
 typedef CaptureGraphDebugSnapshotFFI = bool Function(int slot);
 
@@ -259,6 +314,22 @@ typedef GetDisplayFrameIdDart = int Function();
 typedef GetFrameDataJpegFunc = Bool Function(Pointer<Uint8> buffer, Int32 maxBytes, Pointer<Int32> outSize, Int32 quality);
 typedef GetFrameDataJpegDart = bool Function(Pointer<Uint8> buffer, int maxBytes, Pointer<Int32> outSize, int quality);
 
+// Video file playback FFI types
+typedef IsVideoCompleteFunc = Bool Function();
+typedef IsVideoCompleteDart = bool Function();
+
+typedef GetVideoProgressFunc = Float Function();
+typedef GetVideoProgressDart = double Function();
+
+typedef SetVideoSkipFramesFunc = Void Function(Int32 skip);
+typedef SetVideoSkipFramesDart = void Function(int skip);
+
+typedef GetVideoSkipFramesFunc = Int32 Function();
+typedef GetVideoSkipFramesDart = int Function();
+
+typedef SeekVideoToProgressFunc = Void Function(Float progress);
+typedef SeekVideoToProgressDart = void Function(double progress);
+
 class NativeCameraService {
   static final NativeCameraService _instance = NativeCameraService._internal();
   factory NativeCameraService() => _instance;
@@ -291,6 +362,8 @@ class NativeCameraService {
   // Canvas (whiteboard) bindings
   late SetCanvasViewMode _setCanvasViewMode;
   late IsCanvasViewMode _isCanvasViewMode;
+  late SetCanvasSkipFrames _setCanvasSkipFrames;
+  late GetCanvasSkipFrames _getCanvasSkipFrames;
   late SetCanvasRenderMode _setCanvasRenderMode;
   late GetCanvasTextureId _getCanvasTextureId;
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
@@ -310,6 +383,13 @@ class NativeCameraService {
   late SetActiveSubCanvas _setActiveSubCanvas;
   late GetSortedSubCanvasIndex _getSortedSubCanvasIndex;
   late GetSortedPosition _getSortedPosition;
+
+  // Video file playback bindings
+  late IsVideoCompleteDart _isVideoComplete;
+  late GetVideoProgressDart _getVideoProgress;
+  late SetVideoSkipFramesDart _setVideoSkipFrames;
+  late GetVideoSkipFramesDart _getVideoSkipFrames;
+  late SeekVideoToProgressDart _seekVideoToProgress;
 
   bool _isInitialized = false;
 
@@ -401,6 +481,12 @@ class NativeCameraService {
     _isCanvasViewMode = _nativeLib
         .lookup<NativeFunction<IsCanvasViewModeFunc>>('IsCanvasViewMode')
         .asFunction();
+    _setCanvasSkipFrames = _nativeLib
+        .lookup<NativeFunction<SetCanvasSkipFramesFunc>>('SetCanvasSkipFrames')
+        .asFunction();
+    _getCanvasSkipFrames = _nativeLib
+        .lookup<NativeFunction<GetCanvasSkipFramesFunc>>('GetCanvasSkipFrames')
+        .asFunction();
     _setCanvasRenderMode = _nativeLib
       .lookup<NativeFunction<SetCanvasRenderModeFunc>>('SetCanvasRenderMode')
       .asFunction();
@@ -470,6 +556,23 @@ class NativeCameraService {
         .lookup<NativeFunction<GetSortedPositionFunc>>('GetSortedPosition')
         .asFunction();
 
+    // Video file playback bindings
+    _isVideoComplete = _nativeLib
+        .lookup<NativeFunction<IsVideoCompleteFunc>>('IsVideoComplete')
+        .asFunction();
+    _getVideoProgress = _nativeLib
+        .lookup<NativeFunction<GetVideoProgressFunc>>('GetVideoProgress')
+        .asFunction();
+    _setVideoSkipFrames = _nativeLib
+        .lookup<NativeFunction<SetVideoSkipFramesFunc>>('SetVideoSkipFrames')
+        .asFunction();
+    _getVideoSkipFrames = _nativeLib
+        .lookup<NativeFunction<GetVideoSkipFramesFunc>>('GetVideoSkipFrames')
+        .asFunction();
+    _seekVideoToProgress = _nativeLib
+        .lookup<NativeFunction<SeekVideoToProgressFunc>>('SeekVideoToProgress')
+        .asFunction();
+
     _isInitialized = true;
   }
 
@@ -491,6 +594,36 @@ class NativeCameraService {
     } finally {
       malloc.free(ptr);
     }
+  }
+
+  // --- Video file playback ---
+
+  bool isVideoComplete() {
+    initialize();
+    return _isVideoComplete();
+  }
+
+  double getVideoProgress() {
+    initialize();
+    return _getVideoProgress();
+  }
+
+  /// Set how many frames to skip between each processed frame.
+  /// 0 = every frame, 23 = ~1fps on 24fps video, etc.
+  void setVideoSkipFrames(int skip) {
+    initialize();
+    _setVideoSkipFrames(skip);
+  }
+
+  int getVideoSkipFrames() {
+    initialize();
+    return _getVideoSkipFrames();
+  }
+
+  /// Seek the currently playing video file to [progress] (0.0 .. 1.0).
+  void seekVideoToProgress(double progress) {
+    initialize();
+    _seekVideoToProgress(progress);
   }
 
   void stop() {
@@ -657,6 +790,16 @@ class NativeCameraService {
   bool isCanvasViewMode() {
     initialize();
     return _isCanvasViewMode();
+  }
+
+  void setCanvasSkipFrames(int n) {
+    initialize();
+    _setCanvasSkipFrames(n);
+  }
+
+  int getCanvasSkipFrames() {
+    initialize();
+    return _getCanvasSkipFrames();
   }
 
   /// Select which stitched whiteboard output to display.
@@ -1142,6 +1285,15 @@ class NativeCameraService {
   late GetGraphCanvasBoundsFFI _getGraphCanvasBounds;
   GetGraphNodeContoursFFI? _getGraphNodeContours;
   GetGraphNodeMasksFFI? _getGraphNodeMasks;
+  late GetGraphHistoryCountFFI _getGraphHistoryCount;
+  late GetGraphHistorySelectedIndexFFI _getGraphHistorySelectedIndex;
+  late SetGraphHistorySelectedIndexFFI _setGraphHistorySelectedIndex;
+  late GetGraphHistoryTimelineFFI _getGraphHistoryTimeline;
+  late GetGraphHistoryPeakIndexFFI _getGraphHistoryPeakIndex;
+  late GetSelectedGraphHistoryNodeCountFFI _getSelectedGraphHistoryNodeCount;
+  late GetSelectedGraphHistoryNodesFFI _getSelectedGraphHistoryNodes;
+  late GetSelectedGraphHistoryCanvasBoundsFFI _getSelectedGraphHistoryCanvasBounds;
+  GetSelectedGraphHistoryNodeContoursFFI? _getSelectedGraphHistoryNodeContours;
   late CaptureGraphDebugSnapshotFFI _captureGraphDebugSnapshot;
   late GetGraphSnapshotNodeCountFFI _getGraphSnapshotNodeCount;
   late GetGraphSnapshotNodesFFI _getGraphSnapshotNodes;
@@ -1282,6 +1434,106 @@ class NativeCameraService {
     } catch (e) {
       _getGraphNodeMasks = null;
       AppLogger.ffi('  lookup GetGraphNodeMasks: not found (optional) - $e');
+    }
+
+    try {
+      _getGraphHistoryCount = _nativeLib
+          .lookup<NativeFunction<GetGraphHistoryCountFunc>>('GetGraphHistoryCount')
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphHistoryCount: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphHistoryCount FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphHistorySelectedIndex = _nativeLib
+          .lookup<NativeFunction<GetGraphHistorySelectedIndexFunc>>(
+            'GetGraphHistorySelectedIndex',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphHistorySelectedIndex: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphHistorySelectedIndex FAILED: $e');
+      rethrow;
+    }
+    try {
+      _setGraphHistorySelectedIndex = _nativeLib
+          .lookup<NativeFunction<SetGraphHistorySelectedIndexFunc>>(
+            'SetGraphHistorySelectedIndex',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup SetGraphHistorySelectedIndex: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup SetGraphHistorySelectedIndex FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphHistoryTimeline = _nativeLib
+          .lookup<NativeFunction<GetGraphHistoryTimelineFunc>>(
+            'GetGraphHistoryTimeline',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphHistoryTimeline: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphHistoryTimeline FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getGraphHistoryPeakIndex = _nativeLib
+          .lookup<NativeFunction<GetGraphHistoryPeakIndexFunc>>(
+            'GetGraphHistoryPeakIndex',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetGraphHistoryPeakIndex: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetGraphHistoryPeakIndex FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getSelectedGraphHistoryNodeCount = _nativeLib
+          .lookup<NativeFunction<GetSelectedGraphHistoryNodeCountFunc>>(
+            'GetSelectedGraphHistoryNodeCount',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryNodeCount: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryNodeCount FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getSelectedGraphHistoryNodes = _nativeLib
+          .lookup<NativeFunction<GetSelectedGraphHistoryNodesFunc>>(
+            'GetSelectedGraphHistoryNodes',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryNodes: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryNodes FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getSelectedGraphHistoryCanvasBounds = _nativeLib
+          .lookup<NativeFunction<GetSelectedGraphHistoryCanvasBoundsFunc>>(
+            'GetSelectedGraphHistoryCanvasBounds',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryCanvasBounds: OK');
+    } catch (e) {
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryCanvasBounds FAILED: $e');
+      rethrow;
+    }
+    try {
+      _getSelectedGraphHistoryNodeContours = _nativeLib
+          .lookup<NativeFunction<GetSelectedGraphHistoryNodeContoursFunc>>(
+            'GetSelectedGraphHistoryNodeContours',
+          )
+          .asFunction();
+      AppLogger.ffi('  lookup GetSelectedGraphHistoryNodeContours: OK');
+    } catch (e) {
+      _getSelectedGraphHistoryNodeContours = null;
+      AppLogger.ffi(
+        '  lookup GetSelectedGraphHistoryNodeContours: not found (optional) - $e',
+      );
     }
 
     try {
@@ -1690,6 +1942,78 @@ class NativeCameraService {
     } finally {
       malloc.free(buffer);
     }
+  }
+
+  int getGraphHistoryCount() {
+    _initializeGraphDebug();
+    return _getGraphHistoryCount();
+  }
+
+  int getGraphHistorySelectedIndex() {
+    _initializeGraphDebug();
+    return _getGraphHistorySelectedIndex();
+  }
+
+  void setGraphHistorySelectedIndex(int index) {
+    _initializeGraphDebug();
+    _setGraphHistorySelectedIndex(index);
+  }
+
+  List<GraphHistoryTimelineEntry> getGraphHistoryTimeline() {
+    _initializeGraphDebug();
+    final count = _getGraphHistoryCount();
+    if (count <= 0) return const [];
+
+    final buffer = malloc.allocate<Int32>(count * 2 * 4);
+    try {
+      final actual = _getGraphHistoryTimeline(buffer, count);
+      final entries = <GraphHistoryTimelineEntry>[];
+      for (int i = 0; i < actual; i++) {
+        entries.add(
+          GraphHistoryTimelineEntry(
+            frameId: buffer[i * 2],
+            nodeCount: buffer[i * 2 + 1],
+          ),
+        );
+      }
+      return entries;
+    } finally {
+      malloc.free(buffer);
+    }
+  }
+
+  int getGraphHistoryPeakIndex() {
+    _initializeGraphDebug();
+    return _getGraphHistoryPeakIndex();
+  }
+
+  List<GraphNodeInfo> getSelectedGraphHistoryNodes() {
+    _initializeGraphDebug();
+    final count = _getSelectedGraphHistoryNodeCount();
+    return _readGraphNodes(
+      count: count,
+      reader: (buffer, maxNodes) => _getSelectedGraphHistoryNodes(buffer, maxNodes),
+      logLabel: 'getSelectedGraphHistoryNodes',
+    );
+  }
+
+  Rect? getSelectedGraphHistoryCanvasBounds() {
+    _initializeGraphDebug();
+    return _readGraphBounds(
+      reader: (buffer) => _getSelectedGraphHistoryCanvasBounds(buffer),
+      logLabel: 'getSelectedGraphHistoryCanvasBounds',
+    );
+  }
+
+  Map<int, List<Offset>> getSelectedGraphHistoryNodeContours() {
+    _initializeGraphDebug();
+    return _readGraphContours(
+      reader: _getSelectedGraphHistoryNodeContours == null
+          ? null
+          : (buffer, maxFloats) =>
+              _getSelectedGraphHistoryNodeContours!(buffer, maxFloats),
+      logLabel: 'getSelectedGraphHistoryNodeContours',
+    );
   }
 
   bool captureGraphSnapshot(int slot) {

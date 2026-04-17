@@ -94,6 +94,42 @@ struct FrameBlob {
     cv::Point2f  matched_offset{0, 0};
 };
 
+struct GraphHistoryNode {
+    int id = -1;
+    cv::Mat binary_mask;
+    cv::Mat color_pixels;
+    cv::Rect bbox_canvas;
+    cv::Point2f centroid_canvas;
+    double area = 0.0;
+    float absence_score = kAbsenceScoreInitial;
+    bool has_crossed_absence_seen_threshold = false;
+    int last_seen_frame = 0;
+    int created_frame = 0;
+    bool user_locked = false;
+    bool duplicate_debug_marked = false;
+    int duplicate_debug_partner_id = -1;
+    float duplicate_debug_positional_overlap = 0.0f;
+    float duplicate_debug_centroid_iou = 0.0f;
+    float duplicate_debug_bbox_iou = 0.0f;
+    float duplicate_debug_shape_difference = 1.0f;
+    int duplicate_debug_reason_mask = 0;
+    std::vector<cv::Point2f> contour_canvas;
+};
+
+struct GraphHistoryEntry {
+    int frame_id = 0;
+    int node_count = 0;
+    int bounds_min_x = 0;
+    int bounds_min_y = 0;
+    int bounds_max_x = 0;
+    int bounds_max_y = 0;
+    int raw_min_x = 0;
+    int raw_min_y = 0;
+    int raw_max_x = 0;
+    int raw_max_y = 0;
+    std::vector<GraphHistoryNode> nodes;
+};
+
 // ---------------------------------------------------------------------------
 // SpatialIndex -- Grid-based spatial hash for fast proximity queries
 // ---------------------------------------------------------------------------
@@ -172,6 +208,9 @@ std::unordered_map<int, std::unique_ptr<DrawingNode>> nodes;
     bool    stroke_cache_dirty = true;
     cv::Mat raw_render_cache;
     bool    raw_cache_dirty    = true;
+    cv::Mat graph_history_stroke_render_cache;
+    cv::Mat graph_history_raw_render_cache;
+    int graph_history_render_cache_index = -1;
 
     std::unordered_set<int> user_deleted_ids;
 
@@ -179,6 +218,10 @@ std::unordered_map<int, std::unique_ptr<DrawingNode>> nodes;
     // frame when their centroids are nearby. When one node moves, all
     // transitively connected nodes move by the same delta.
     std::unordered_map<int, std::unordered_set<int>> hard_edges;
+
+    std::vector<GraphHistoryEntry> graph_history;
+    size_t graph_history_storage_bytes = 0;
+    int selected_graph_history_index = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -205,6 +248,10 @@ public:
                      cv::Size viewSize, cv::Mat& out_frame);
     bool GetOverview(cv::Size viewSize, cv::Mat& out_frame);
     bool GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame);
+
+    // --- Frame skip (skip N frames between processed ones) ---
+    void SetCanvasSkipFrames(int n) { canvas_skip_frames_.store(n); }
+    int  GetCanvasSkipFrames() const { return canvas_skip_frames_.load(); }
 
     // --- State control ---
     void Reset();
@@ -247,6 +294,17 @@ public:
     int  LockAllGraphNodes();
     bool GetGraphCanvasBounds(int* bounds) const;
     int  GetGraphNodeContours(float* buffer, int max_floats) const;
+
+    // --- Graph history access (timeline + selected snapshot) ---
+    int  GetGraphHistoryCount() const;
+    int  GetGraphHistorySelectedIndex() const;
+    void SetGraphHistorySelectedIndex(int idx);
+    int  GetGraphHistoryTimeline(int* buffer, int max_entries) const;
+    int  GetGraphHistoryPeakIndex() const;
+    int  GetSelectedGraphHistoryNodeCount() const;
+    int  GetSelectedGraphHistoryNodes(float* buffer, int max_nodes) const;
+    bool GetSelectedGraphHistoryCanvasBounds(int* bounds) const;
+    int  GetSelectedGraphHistoryNodeContours(float* buffer, int max_floats) const;
 
 private:
     // -----------------------------------------------------------------------
@@ -396,6 +454,10 @@ private:
     // Maximum centroid distance for creating a hard edge between nodes from the same frame.
     static constexpr float kHardEdgeMaxCentroidDist      = 100.0f;
 
+    // --- Graph history ---
+    // Maximum number of distinct graph states retained per sub-canvas.
+    static const int       kMaxGraphHistoryEntries       = 2048;
+
     // --- Canvas defaults ---
     static const int kDefaultCanvasWidth  = 1920;
     static const int kDefaultCanvasHeight = 1080;
@@ -443,6 +505,8 @@ private:
     }
 
     int processed_frame_id_ = 0;
+    std::atomic<int> canvas_skip_frames_{0};
+    int canvas_skip_counter_ = 0;
 
     // -----------------------------------------------------------------------
     // Internal methods (run on worker_thread_)
@@ -473,6 +537,7 @@ private:
                                  const std::vector<FrameBlob>& blobs,
                                  int current_frame);
     void UpdateGroupBounds(WhiteboardGroup& group);
+    void RecordGraphHistorySnapshot(WhiteboardGroup& group, int frame_id);
 };
 
 // ---------------------------------------------------------------------------
@@ -501,6 +566,8 @@ extern "C" {
 
     __declspec(dllexport) void    SetCanvasViewMode(bool mode);
     __declspec(dllexport) bool    IsCanvasViewMode();
+    __declspec(dllexport) void    SetCanvasSkipFrames(int32_t n);
+    __declspec(dllexport) int32_t GetCanvasSkipFrames();
     __declspec(dllexport) void    SetCanvasRenderMode(int mode);
     __declspec(dllexport) int64_t GetCanvasTextureId();
     __declspec(dllexport) bool    GetCanvasOverviewRgba(uint8_t* buffer, int width, int height);
@@ -538,6 +605,17 @@ extern "C" {
     __declspec(dllexport) int     LockAllGraphNodes();
     __declspec(dllexport) bool    GetGraphCanvasBounds(int* bounds);
     __declspec(dllexport) int     GetGraphNodeContours(float* buffer, int max_floats);
+
+    __declspec(dllexport) int     GetGraphHistoryCount();
+    __declspec(dllexport) int     GetGraphHistorySelectedIndex();
+    __declspec(dllexport) void    SetGraphHistorySelectedIndex(int idx);
+    __declspec(dllexport) int     GetGraphHistoryTimeline(int* buffer, int max_entries);
+    __declspec(dllexport) int     GetGraphHistoryPeakIndex();
+    __declspec(dllexport) int     GetSelectedGraphHistoryNodeCount();
+    __declspec(dllexport) int     GetSelectedGraphHistoryNodes(float* buffer, int max_nodes);
+    __declspec(dllexport) bool    GetSelectedGraphHistoryCanvasBounds(int* bounds);
+    __declspec(dllexport) int     GetSelectedGraphHistoryNodeContours(float* buffer,
+                                                                       int max_floats);
 
     // Debug snapshots (stubs)
     __declspec(dllexport) bool    CaptureGraphDebugSnapshot(int slot);

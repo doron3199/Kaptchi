@@ -3,7 +3,14 @@ import 'package:flutter/material.dart';
 import '../services/native_camera_service.dart';
 
 class NativeTextureView extends StatefulWidget {
-  const NativeTextureView({super.key});
+  final double? overrideAspectRatio;
+  final TransformationController? transformationController;
+
+  const NativeTextureView({
+    super.key,
+    this.overrideAspectRatio,
+    this.transformationController,
+  });
 
   @override
   State<NativeTextureView> createState() => _NativeTextureViewState();
@@ -58,6 +65,27 @@ class _NativeTextureViewState extends State<NativeTextureView> {
             Text('Initializing Graphics...', style: TextStyle(color: Colors.white)),
           ],
         ),
+      );
+    }
+
+    final overrideAspectRatio = widget.overrideAspectRatio;
+    if (overrideAspectRatio != null) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final height = constraints.maxHeight;
+          final width = height * overrideAspectRatio;
+          return InteractiveViewer(
+            transformationController: widget.transformationController,
+            constrained: false,
+            minScale: 0.5,
+            maxScale: 10.0,
+            child: SizedBox(
+              width: width,
+              height: height,
+              child: Texture(textureId: textureId),
+            ),
+          );
+        },
       );
     }
 

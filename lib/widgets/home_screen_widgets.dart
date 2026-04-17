@@ -1,6 +1,7 @@
 // import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:kaptchi_flutter/l10n/app_localizations.dart';
 import '../services/native_camera_service.dart';
@@ -151,6 +152,61 @@ class ScreenCaptureWidget extends StatelessWidget {
         ),
       );
     }).toList();
+  }
+}
+
+class VideoFileWidget extends StatelessWidget {
+  final Function(String path) onSelectVideoFile;
+
+  const VideoFileWidget({super.key, required this.onSelectVideoFile});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Divider(color: Colors.white24, height: 32),
+        const Padding(
+          padding: EdgeInsets.symmetric(horizontal: 16.0),
+          child: Text(
+            'Video File',
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+              color: Colors.white70,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        Card(
+          color: Colors.indigo[800],
+          margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: ListTile(
+            leading: const Icon(Icons.video_file, color: Colors.white),
+            title: const Text(
+              'Open video file…',
+              style: TextStyle(color: Colors.white),
+            ),
+            subtitle: const Text(
+              'mp4, avi, mov, mkv — runs whiteboard canvas at 1fps',
+              style: TextStyle(color: Colors.white60, fontSize: 11),
+            ),
+            onTap: () => _pickAndOpen(context),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _pickAndOpen(BuildContext context) async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp4', 'avi', 'mov', 'mkv', 'webm'],
+      dialogTitle: 'Select a video file',
+    );
+    if (result != null && result.files.single.path != null) {
+      onSelectVideoFile(result.files.single.path!);
+    }
   }
 }
 
