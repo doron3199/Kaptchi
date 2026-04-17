@@ -191,6 +191,9 @@ NativeCamera::~NativeCamera() {
 void NativeCamera::Start() {
     if (is_running_ && !is_stream_) return;
 
+    video_paused_ = false;
+    pending_seek_progress_ = -1.0f;
+
     // Stop screen capture if running to prevent conflicts
     if (g_screen_capture && g_screen_capture->IsCapturing()) {
         g_screen_capture->StopCapture();
@@ -232,7 +235,9 @@ void NativeCamera::StartStream(const char* url) {
     is_video_file_ = false;
     video_complete_ = false;
     video_progress_ = 0.0f;
+    video_paused_ = false;
     video_total_frames_ = 0.0;
+    pending_seek_progress_ = -1.0f;
     is_running_ = true;
     is_stream_ = true;
     restart_requested_ = false;
@@ -242,6 +247,8 @@ void NativeCamera::StartStream(const char* url) {
 
 void NativeCamera::Stop() {
     is_running_ = false;
+    video_paused_ = false;
+    pending_seek_progress_ = -1.0f;
     
     // Wake up processing thread so it can exit
     {
@@ -505,8 +512,22 @@ void NativeCamera::CameraThreadLoop() {
              continue;
         }
 
-        // Consume pending seek request (video file only).
+        // Respect pause state and consume pending seek requests (video file only).
         if (is_video_file_) {
+            while (is_running_) {
+                const bool is_paused =
+                    video_paused_.load(std::memory_order_relaxed);
+                const float pending_seek =
+                    pending_seek_progress_.load(std::memory_order_relaxed);
+                if (!is_paused || pending_seek >= 0.0f) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(15));
+            }
+            if (!is_running_) {
+                break;
+            }
+
             float target = pending_seek_progress_.exchange(-1.0f);
             if (target >= 0.0f && video_total_frames_ > 0) {
                 double target_frame = target * video_total_frames_;
@@ -2210,6 +2231,15 @@ extern "C" {
     __declspec(dllexport) float GetVideoProgress() {
         if (!g_native_camera) return 0.0f;
         return g_native_camera->GetVideoProgress();
+    }
+
+    __declspec(dllexport) bool IsVideoPaused() {
+        if (!g_native_camera) return false;
+        return g_native_camera->IsVideoPaused();
+    }
+
+    __declspec(dllexport) void SetVideoPaused(bool paused) {
+        if (g_native_camera) g_native_camera->SetVideoPaused(paused);
     }
 
     __declspec(dllexport) void SeekVideoToProgress(float progress) {

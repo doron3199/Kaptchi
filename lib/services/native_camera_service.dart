@@ -74,12 +74,6 @@ typedef SetCanvasViewMode = void Function(bool mode);
 typedef IsCanvasViewModeFunc = Bool Function();
 typedef IsCanvasViewMode = bool Function();
 
-typedef SetCanvasSkipFramesFunc = Void Function(Int32 n);
-typedef SetCanvasSkipFrames = void Function(int n);
-
-typedef GetCanvasSkipFramesFunc = Int32 Function();
-typedef GetCanvasSkipFrames = int Function();
-
 typedef SetCanvasRenderModeFunc = Void Function(Int32 mode);
 typedef SetCanvasRenderMode = void Function(int mode);
 
@@ -321,6 +315,12 @@ typedef IsVideoCompleteDart = bool Function();
 typedef GetVideoProgressFunc = Float Function();
 typedef GetVideoProgressDart = double Function();
 
+typedef IsVideoPausedFunc = Bool Function();
+typedef IsVideoPausedDart = bool Function();
+
+typedef SetVideoPausedFunc = Void Function(Bool paused);
+typedef SetVideoPausedDart = void Function(bool paused);
+
 typedef SeekVideoToProgressFunc = Void Function(Float progress);
 typedef SeekVideoToProgressDart = void Function(double progress);
 
@@ -356,8 +356,6 @@ class NativeCameraService {
   // Canvas (whiteboard) bindings
   late SetCanvasViewMode _setCanvasViewMode;
   late IsCanvasViewMode _isCanvasViewMode;
-  late SetCanvasSkipFrames _setCanvasSkipFrames;
-  late GetCanvasSkipFrames _getCanvasSkipFrames;
   late SetCanvasRenderMode _setCanvasRenderMode;
   late GetCanvasTextureId _getCanvasTextureId;
   late GetCanvasOverviewRgba _getCanvasOverviewRgba;
@@ -381,6 +379,8 @@ class NativeCameraService {
   // Video file playback bindings
   late IsVideoCompleteDart _isVideoComplete;
   late GetVideoProgressDart _getVideoProgress;
+  late IsVideoPausedDart _isVideoPaused;
+  late SetVideoPausedDart _setVideoPaused;
   late SeekVideoToProgressDart _seekVideoToProgress;
 
   bool _isInitialized = false;
@@ -473,12 +473,6 @@ class NativeCameraService {
     _isCanvasViewMode = _nativeLib
         .lookup<NativeFunction<IsCanvasViewModeFunc>>('IsCanvasViewMode')
         .asFunction();
-    _setCanvasSkipFrames = _nativeLib
-        .lookup<NativeFunction<SetCanvasSkipFramesFunc>>('SetCanvasSkipFrames')
-        .asFunction();
-    _getCanvasSkipFrames = _nativeLib
-        .lookup<NativeFunction<GetCanvasSkipFramesFunc>>('GetCanvasSkipFrames')
-        .asFunction();
     _setCanvasRenderMode = _nativeLib
       .lookup<NativeFunction<SetCanvasRenderModeFunc>>('SetCanvasRenderMode')
       .asFunction();
@@ -555,6 +549,12 @@ class NativeCameraService {
     _getVideoProgress = _nativeLib
         .lookup<NativeFunction<GetVideoProgressFunc>>('GetVideoProgress')
         .asFunction();
+    _isVideoPaused = _nativeLib
+      .lookup<NativeFunction<IsVideoPausedFunc>>('IsVideoPaused')
+      .asFunction();
+    _setVideoPaused = _nativeLib
+      .lookup<NativeFunction<SetVideoPausedFunc>>('SetVideoPaused')
+      .asFunction();
     _seekVideoToProgress = _nativeLib
         .lookup<NativeFunction<SeekVideoToProgressFunc>>('SeekVideoToProgress')
         .asFunction();
@@ -592,6 +592,16 @@ class NativeCameraService {
   double getVideoProgress() {
     initialize();
     return _getVideoProgress();
+  }
+
+  bool isVideoPaused() {
+    initialize();
+    return _isVideoPaused();
+  }
+
+  void setVideoPaused(bool paused) {
+    initialize();
+    _setVideoPaused(paused);
   }
 
   /// Seek the currently playing video file to [progress] (0.0 .. 1.0).
@@ -764,16 +774,6 @@ class NativeCameraService {
   bool isCanvasViewMode() {
     initialize();
     return _isCanvasViewMode();
-  }
-
-  void setCanvasSkipFrames(int n) {
-    initialize();
-    _setCanvasSkipFrames(n);
-  }
-
-  int getCanvasSkipFrames() {
-    initialize();
-    return _getCanvasSkipFrames();
   }
 
   /// Select which stitched whiteboard output to display.

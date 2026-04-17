@@ -249,10 +249,6 @@ public:
     bool GetOverview(cv::Size viewSize, cv::Mat& out_frame);
     bool GetOverviewBlocking(cv::Size viewSize, cv::Mat& out_frame);
 
-    // --- Frame skip (skip N frames between processed ones) ---
-    void SetCanvasSkipFrames(int n) { canvas_skip_frames_.store(n); }
-    int  GetCanvasSkipFrames() const { return canvas_skip_frames_.load(); }
-
     // --- State control ---
     void Reset();
     bool HasContent() const;
@@ -341,10 +337,10 @@ private:
     static const int       kBinarizeBlockSize            = 51;
     // Constant subtracted from the adaptive threshold mean. Higher = only high-contrast marks
     // are binarized. Lower = thicker strokes captured (more sensitive).
-    static const int       kBinarizeOffset               = 6;
+    static const int       kBinarizeOffset               = 10;
     // Connected components smaller than this area (px²) at half-resolution are removed before
     // upscaling. Eliminates isolated noise specks from the binary mask.
-    static const int       kBinarizeMinBlobArea          = 3;
+    static const int       kBinarizeMinBlobArea          = 10;
     // Morphological dilation kernel size (NxN). Larger = wider strokes and more connected blobs.
     // Raise to join nearby strokes into one blob. Lower to keep strokes thin and separate.
     static const int       kDilationKernelSize           = 11;
@@ -505,8 +501,6 @@ private:
     }
 
     int processed_frame_id_ = 0;
-    std::atomic<int> canvas_skip_frames_{0};
-    int canvas_skip_counter_ = 0;
 
     // -----------------------------------------------------------------------
     // Internal methods (run on worker_thread_)
@@ -566,8 +560,6 @@ extern "C" {
 
     __declspec(dllexport) void    SetCanvasViewMode(bool mode);
     __declspec(dllexport) bool    IsCanvasViewMode();
-    __declspec(dllexport) void    SetCanvasSkipFrames(int32_t n);
-    __declspec(dllexport) int32_t GetCanvasSkipFrames();
     __declspec(dllexport) void    SetCanvasRenderMode(int mode);
     __declspec(dllexport) int64_t GetCanvasTextureId();
     __declspec(dllexport) bool    GetCanvasOverviewRgba(uint8_t* buffer, int width, int height);

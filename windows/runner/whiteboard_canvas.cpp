@@ -2632,24 +2632,15 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
     if (kEnableFrameStrokeRejectFilter)
         reject_mask = BuildFrameStrokeRejectMask(frame.size(), lecturer_rect);
 
-    // [1] Frame skip gate — drop every N frames before any processing
-    {
-        int skip = canvas_skip_frames_.load(std::memory_order_relaxed);
-        if (skip > 0) {
-            if (canvas_skip_counter_ < skip) { ++canvas_skip_counter_; return; }
-            canvas_skip_counter_ = 0;
-        }
-    }
-
-    // [2] Motion gate
+    // [1] Motion gate
     float mf = 0.0f; bool mth = false;
     if (ApplyMotionGate(gray, mf, mth)) return;
 
-    // [3] Binarize
+    // [2] Binarize
     int stroke_px = 0;
     cv::Mat binary = BuildBinaryMask(gray, no_update_mask, stroke_px);
 
-    // [4] Extract blobs
+    // [3] Extract blobs
     std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame);
     EnhanceFrameBlobs(blobs, frame, g_canvas_enhance_threshold.load());
 
@@ -3967,14 +3958,6 @@ void SetCanvasViewMode(bool mode) {
 
 bool IsCanvasViewMode() {
     return g_whiteboard_canvas && g_whiteboard_canvas->IsCanvasViewMode();
-}
-
-void SetCanvasSkipFrames(int32_t n) {
-    if (g_whiteboard_canvas) g_whiteboard_canvas->SetCanvasSkipFrames(n);
-}
-
-int32_t GetCanvasSkipFrames() {
-    return g_whiteboard_canvas ? g_whiteboard_canvas->GetCanvasSkipFrames() : 0;
 }
 
 void SetCanvasRenderMode(int mode) {

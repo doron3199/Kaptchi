@@ -23,6 +23,8 @@ public:
     void Stop();
     bool IsVideoComplete() const { return video_complete_.load(); }
     float GetVideoProgress() const { return video_progress_.load(); }
+    bool IsVideoPaused() const { return video_paused_.load(); }
+    void SetVideoPaused(bool paused) { video_paused_.store(paused); }
     // Request the capture thread to seek to a 0..1 position in the video file.
     void SeekVideoToProgress(float progress) {
         if (progress < 0.f) progress = 0.f;
@@ -69,6 +71,7 @@ private:
     std::condition_variable frame_consumed_cv_; // signalled when processing thread takes a frame
     std::atomic<bool> video_complete_ = false;
     std::atomic<float> video_progress_ = 0.0f;
+    std::atomic<bool> video_paused_ = false;
     double video_total_frames_ = 0.0;
     // -1.0f means "no seek pending"; otherwise a 0..1 target position
     // that the capture thread will consume on the next loop iteration.

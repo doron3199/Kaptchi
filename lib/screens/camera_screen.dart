@@ -127,6 +127,7 @@ class _CameraScreenState extends State<CameraScreen>
   // Video file playback state
   bool _isVideoFileMode = false;
   double _videoProgress = 0.0;
+  bool _isVideoPaused = false;
   // When the user is dragging the seek slider, we show their chosen value
   // locally and ignore the polled progress until they release.
   bool _isSeekingVideo = false;
@@ -189,6 +190,7 @@ class _CameraScreenState extends State<CameraScreen>
         if (complete) {
           setState(() {
             _isVideoFileMode = false;
+            _isVideoPaused = false;
             _videoProgress = 1.0;
           });
           ScaffoldMessenger.of(context).showSnackBar(
@@ -231,6 +233,71 @@ class _CameraScreenState extends State<CameraScreen>
     _graphHistoryFollowLatest = true;
     _isDraggingGraphHistory = false;
     _graphHistoryDragValue = 0.0;
+    _isVideoPaused = false;
+  }
+
+  void _setVideoPaused(bool paused) {
+    NativeCameraService().setVideoPaused(paused);
+    if (!mounted) {
+      _isVideoPaused = paused;
+      return;
+    }
+    setState(() {
+      _isVideoPaused = paused;
+    });
+  }
+
+  Widget _buildVideoPlaybackControls() {
+    return SizedBox(
+      height: 40,
+      child: Row(
+        children: [
+          IconButton(
+            onPressed: _isVideoFileMode
+                ? () => _setVideoPaused(!_isVideoPaused)
+                : null,
+            icon: Icon(_isVideoPaused ? Icons.play_arrow : Icons.pause),
+            tooltip: _isVideoPaused ? 'Play video' : 'Pause video',
+          ),
+          Expanded(
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 4,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                overlayShape: const RoundSliderOverlayShape(
+                  overlayRadius: 14,
+                ),
+                activeTrackColor: Colors.blue,
+                inactiveTrackColor: Colors.lightBlue.withAlpha(90),
+                thumbColor: Colors.blue,
+              ),
+              child: Slider(
+                value: (_isSeekingVideo ? _seekDragValue : _videoProgress)
+                    .clamp(0.0, 1.0),
+                min: 0.0,
+                max: 1.0,
+                onChangeStart: (v) {
+                  setState(() {
+                    _isSeekingVideo = true;
+                    _seekDragValue = v;
+                  });
+                },
+                onChanged: (v) {
+                  setState(() => _seekDragValue = v);
+                },
+                onChangeEnd: (v) {
+                  NativeCameraService().seekVideoToProgress(v);
+                  setState(() {
+                    _isSeekingVideo = false;
+                    _videoProgress = v;
+                  });
+                },
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 
   bool _sameGraphHistoryTimeline(
@@ -565,6 +632,7 @@ class _CameraScreenState extends State<CameraScreen>
         svc.setCanvasViewMode(true);
         setState(() {
           _isVideoFileMode = true;
+          _isVideoPaused = false;
           _videoProgress = 0.0;
           _isWhiteboardMode = true;
           _isCanvasViewMode = true;
@@ -980,6 +1048,7 @@ class _CameraScreenState extends State<CameraScreen>
               _isWhiteboardMode = true;
               _isCanvasViewMode = true;
               _isVideoFileMode = true;
+              _isVideoPaused = false;
               _videoProgress = 0.0;
             });
             _startCanvasPollTimer();
@@ -1098,11 +1167,13 @@ class _CameraScreenState extends State<CameraScreen>
     // Stop ALL sources before starting new one
     NativeCameraService().stop(); // Stop camera/stream
     NativeCameraService().stopScreenCapture(); // Stop screen capture
+    NativeCameraService().setVideoPaused(false);
 
     // Clear crop when switching inputs
     NativeCameraService().setLiveCropCorners(null);
     setState(() {
       _isLiveCropActive = false;
+      _isVideoPaused = false;
     });
   }
 
@@ -1632,7 +1703,7 @@ class _CameraScreenState extends State<CameraScreen>
           bottom: _isVideoFileMode
               ? (_isCanvasViewMode && _graphHistoryTimeline.isNotEmpty
                     ? PreferredSize(
-                        preferredSize: const Size.fromHeight(82),
+                        preferredSize: const Size.fromHeight(124),
                         child: Padding(
                           padding: const EdgeInsets.fromLTRB(12, 4, 12, 10),
                           child: Column(
@@ -1725,47 +1796,17 @@ class _CameraScreenState extends State<CameraScreen>
                                   },
                                 ),
                               ),
+                              const SizedBox(height: 4),
+                              _buildVideoPlaybackControls(),
                             ],
                           ),
                         ),
                       )
                     : PreferredSize(
-                        preferredSize: const Size.fromHeight(24),
-                        child: SliderTheme(
-                          data: SliderTheme.of(context).copyWith(
-                            trackHeight: 4,
-                            thumbShape: const RoundSliderThumbShape(
-                                enabledThumbRadius: 7),
-                            overlayShape: const RoundSliderOverlayShape(
-                                overlayRadius: 14),
-                            activeTrackColor: Colors.blue,
-                            inactiveTrackColor: Colors.lightBlue.withAlpha(90),
-                            thumbColor: Colors.blue,
-                          ),
-                          child: Slider(
-                            value: (_isSeekingVideo
-                                    ? _seekDragValue
-                                    : _videoProgress)
-                                .clamp(0.0, 1.0),
-                            min: 0.0,
-                            max: 1.0,
-                            onChangeStart: (v) {
-                              setState(() {
-                                _isSeekingVideo = true;
-                                _seekDragValue = v;
-                              });
-                            },
-                            onChanged: (v) {
-                              setState(() => _seekDragValue = v);
-                            },
-                            onChangeEnd: (v) {
-                              NativeCameraService().seekVideoToProgress(v);
-                              setState(() {
-                                _isSeekingVideo = false;
-                                _videoProgress = v;
-                              });
-                            },
-                          ),
+                        preferredSize: const Size.fromHeight(44),
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 8),
+                          child: _buildVideoPlaybackControls(),
                         ),
                       ))
               : null,

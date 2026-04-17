@@ -24,9 +24,6 @@ class CameraStreamView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    debugPrint(
-      'Building Stream Widget. Windows: ${Platform.isWindows}',
-    );
     if (supportsMobileRtmp) {
       // On Android, if we are "transmitting" (simulated), show the local camera
       // If we are actually streaming via HaishinKit, we should show its preview
@@ -101,7 +98,6 @@ class CameraStreamView extends StatelessWidget {
     }
 
     if (Platform.isWindows) {
-      debugPrint('Using NativeTextureView');
       return NativeTextureView(
         overrideAspectRatio: overrideAspectRatio,
         transformationController: transformationController,
