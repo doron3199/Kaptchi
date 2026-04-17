@@ -21,8 +21,6 @@ public:
     void Start();
     void StartStream(const char* url);
     void Stop();
-    void SetVideoSkipFrames(int skip) { video_skip_frames_ = std::max(0, skip); }
-    int  GetVideoSkipFrames() const { return video_skip_frames_.load(); }
     bool IsVideoComplete() const { return video_complete_.load(); }
     float GetVideoProgress() const { return video_progress_.load(); }
     // Request the capture thread to seek to a 0..1 position in the video file.
@@ -67,7 +65,6 @@ private:
 
     // Video file playback state
     std::atomic<bool> is_video_file_ = false;
-    std::atomic<int> video_skip_frames_ = 0;
     double video_fps_ = 0.0;
     std::condition_variable frame_consumed_cv_; // signalled when processing thread takes a frame
     std::atomic<bool> video_complete_ = false;

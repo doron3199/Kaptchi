@@ -233,7 +233,6 @@ void NativeCamera::StartStream(const char* url) {
     video_complete_ = false;
     video_progress_ = 0.0f;
     video_total_frames_ = 0.0;
-    // video_skip_frames_ is NOT reset here — caller sets it before StartStream if needed
     is_running_ = true;
     is_stream_ = true;
     restart_requested_ = false;
@@ -452,8 +451,7 @@ void NativeCamera::CameraThreadLoop() {
                         video_complete_ = false;
                         video_progress_ = 0.0f;
                         std::cout << "Video file opened. Total frames: " << total_frames
-                                  << ", fps: " << video_fps_
-                                  << ", skip: " << video_skip_frames_.load() << std::endl;
+                                  << ", fps: " << video_fps_ << std::endl;
                     } else {
                         is_video_file_ = false;
                         std::cout << "Stream opened successfully." << std::endl;
@@ -538,18 +536,12 @@ void NativeCamera::CameraThreadLoop() {
                 }
                 processing_cv_.notify_one();
 
-                // Video file: update progress, seek forward by skip, then wait
-                // for the processing thread to consume this frame before loading the next.
+                // Video file: update progress, then wait for the processing thread
+                // to consume this frame before loading the next.
                 if (is_video_file_) {
                     double pos = capture_.get(cv::CAP_PROP_POS_FRAMES);
                     if (video_total_frames_ > 0)
                         video_progress_ = static_cast<float>(pos / video_total_frames_);
-                    int skip = video_skip_frames_.load();
-                    if (skip > 0) {
-                        double next_pos = pos + skip;
-                        if (next_pos < video_total_frames_)
-                            capture_.set(cv::CAP_PROP_POS_FRAMES, next_pos);
-                    }
                     // Wait until processing thread has consumed the frame
                     std::unique_lock<std::mutex> lock(processing_mutex_);
                     frame_consumed_cv_.wait(lock, [this] {
@@ -2220,20 +2212,7 @@ extern "C" {
         return g_native_camera->GetVideoProgress();
     }
 
-    // Set the delay between processed frames (ms). 1000 = 1 fps, 500 = 2 fps.
-    // Call after StartStream() to override the default 1000 ms.
-    __declspec(dllexport) void SetVideoSkipFrames(int32_t skip) {
-        if (g_native_camera) g_native_camera->SetVideoSkipFrames(skip);
-    }
-    __declspec(dllexport) int32_t GetVideoSkipFrames() {
-        if (!g_native_camera) return 0;
-        return g_native_camera->GetVideoSkipFrames();
-    }
     __declspec(dllexport) void SeekVideoToProgress(float progress) {
         if (g_native_camera) g_native_camera->SeekVideoToProgress(progress);
-    }
-    // Keep old name as alias for backward compat (unused, but avoids linker gaps)
-    __declspec(dllexport) void SetVideoFrameInterval(int32_t skip) {
-        if (g_native_camera) g_native_camera->SetVideoSkipFrames(skip);
     }
 }

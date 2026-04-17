@@ -321,12 +321,6 @@ typedef IsVideoCompleteDart = bool Function();
 typedef GetVideoProgressFunc = Float Function();
 typedef GetVideoProgressDart = double Function();
 
-typedef SetVideoSkipFramesFunc = Void Function(Int32 skip);
-typedef SetVideoSkipFramesDart = void Function(int skip);
-
-typedef GetVideoSkipFramesFunc = Int32 Function();
-typedef GetVideoSkipFramesDart = int Function();
-
 typedef SeekVideoToProgressFunc = Void Function(Float progress);
 typedef SeekVideoToProgressDart = void Function(double progress);
 
@@ -387,8 +381,6 @@ class NativeCameraService {
   // Video file playback bindings
   late IsVideoCompleteDart _isVideoComplete;
   late GetVideoProgressDart _getVideoProgress;
-  late SetVideoSkipFramesDart _setVideoSkipFrames;
-  late GetVideoSkipFramesDart _getVideoSkipFrames;
   late SeekVideoToProgressDart _seekVideoToProgress;
 
   bool _isInitialized = false;
@@ -563,12 +555,6 @@ class NativeCameraService {
     _getVideoProgress = _nativeLib
         .lookup<NativeFunction<GetVideoProgressFunc>>('GetVideoProgress')
         .asFunction();
-    _setVideoSkipFrames = _nativeLib
-        .lookup<NativeFunction<SetVideoSkipFramesFunc>>('SetVideoSkipFrames')
-        .asFunction();
-    _getVideoSkipFrames = _nativeLib
-        .lookup<NativeFunction<GetVideoSkipFramesFunc>>('GetVideoSkipFrames')
-        .asFunction();
     _seekVideoToProgress = _nativeLib
         .lookup<NativeFunction<SeekVideoToProgressFunc>>('SeekVideoToProgress')
         .asFunction();
@@ -606,18 +592,6 @@ class NativeCameraService {
   double getVideoProgress() {
     initialize();
     return _getVideoProgress();
-  }
-
-  /// Set how many frames to skip between each processed frame.
-  /// 0 = every frame, 23 = ~1fps on 24fps video, etc.
-  void setVideoSkipFrames(int skip) {
-    initialize();
-    _setVideoSkipFrames(skip);
-  }
-
-  int getVideoSkipFrames() {
-    initialize();
-    return _getVideoSkipFrames();
   }
 
   /// Seek the currently playing video file to [progress] (0.0 .. 1.0).

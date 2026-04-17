@@ -127,12 +127,10 @@ class _CameraScreenState extends State<CameraScreen>
   // Video file playback state
   bool _isVideoFileMode = false;
   double _videoProgress = 0.0;
-  int _videoSkipFrames = 0; // 0 = every frame; set before starting video
   // When the user is dragging the seek slider, we show their chosen value
   // locally and ignore the polled progress until they release.
   bool _isSeekingVideo = false;
   double _seekDragValue = 0.0;
-  final TextEditingController _skipFramesController = TextEditingController(text: '0');
   // Notifier for canvas navigation state — updated by the poll timer without
   // a full setState rebuild (prevents live-view flicker).
   final _canvasNavNotifier = ValueNotifier<({int count, int active})>((
@@ -211,50 +209,6 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasPollTimer = null;
     _canvasNavNotifier.value = (count: 0, active: 0);
     _resetWhiteboardUiState();
-  }
-
-  /// Integer skip-frames control shown in the toolbar while a video file is playing.
-  Widget _buildVideoSkipControl() {
-    void applySkip(int skip) {
-      final clamped = skip.clamp(0, 9999);
-      setState(() => _videoSkipFrames = clamped);
-      _skipFramesController.text = clamped.toString();
-      NativeCameraService().setVideoSkipFrames(clamped);
-    }
-
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        IconButton(
-          icon: const Icon(Icons.remove, size: 18),
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          onPressed: () => applySkip(_videoSkipFrames - 1),
-        ),
-        SizedBox(
-          width: 48,
-          child: TextField(
-            controller: _skipFramesController,
-            keyboardType: TextInputType.number,
-            textAlign: TextAlign.center,
-            style: const TextStyle(fontSize: 13),
-            decoration: const InputDecoration(
-              isDense: true,
-              contentPadding: EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-              border: OutlineInputBorder(),
-            ),
-            onSubmitted: (v) => applySkip(int.tryParse(v) ?? _videoSkipFrames),
-          ),
-        ),
-        IconButton(
-          icon: const Icon(Icons.add, size: 18),
-          padding: EdgeInsets.zero,
-          constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          onPressed: () => applySkip(_videoSkipFrames + 1),
-        ),
-        const Text('skip', style: TextStyle(fontSize: 11)),
-      ],
-    );
   }
 
   void _setCanvasViewMode(bool enabled) {
@@ -358,7 +312,7 @@ class _CameraScreenState extends State<CameraScreen>
     await _refreshGraphHistoryState();
   }
 
-  Future<({Uint8List bytes, int width, int height})?> _buildSelectedGraphPdfImage() async {
+  Future<({Uint8List bytes, int width, int height})?> _buildSelectedGraphImage() async {
     final canvasSize = NativeCameraService().getPanoramaCanvasSize();
     final maxWidth = canvasSize.width > 0
         ? canvasSize.width.ceil().clamp(1, 16384)
@@ -399,48 +353,79 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  Future<void> _exportSelectedGraphToPdf() async {
-    final image = await _buildSelectedGraphPdfImage();
-    if (image == null) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No graph snapshot selected to export.')),
-      );
-      return;
-    }
-
-    try {
-      final file = await DocumentService.instance.exportPdf(
-        images: [image],
-        fileName: _pdfNameController.text.trim(),
-        directoryPath: _pdfPathController.text.trim(),
-      );
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Saved graph PDF to ${file.path}')),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error exporting graph PDF: $e')),
-      );
-    }
-  }
-
-  Future<void> _autoExportPeakGraphToPdf() async {
+  Future<void> _addPeakGraphToGallery() async {
     final svc = NativeCameraService();
     final peakIndex = svc.getGraphHistoryPeakIndex();
     if (peakIndex < 0) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No peak graph was found to export.')),
+        const SnackBar(content: Text('No peak graph was found to add.')),
       );
       return;
     }
 
     await _selectGraphHistoryIndex(peakIndex, followLatest: false);
-    await _exportSelectedGraphToPdf();
+
+    final image = await _buildSelectedGraphImage();
+    if (image == null) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No peak graph image was available.')),
+      );
+      return;
+    }
+
+    GalleryService.instance.addImage(image.bytes, image.width, image.height);
+
+    if (!mounted) return;
+    setState(() {
+      _isSidebarOpen = true;
+      _isGalleryFullScreen = false;
+      _currentGalleryIndex = GalleryService.instance.images.length - 1;
+    });
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Peak graph image added to gallery.')),
+    );
+  }
+
+  Future<void> _restoreGraphHistorySelection({
+    required int previousSelectedIndex,
+    required bool previousFollowLatest,
+  }) async {
+    if (!mounted) return;
+    if (previousSelectedIndex >= 0) {
+      await _selectGraphHistoryIndex(
+        previousSelectedIndex,
+        followLatest: previousFollowLatest,
+      );
+      return;
+    }
+    if (previousFollowLatest && _graphHistoryTimeline.isNotEmpty) {
+      await _selectGraphHistoryIndex(
+        _graphHistoryTimeline.length - 1,
+        followLatest: true,
+      );
+    } else {
+      setState(() {
+        _graphHistoryFollowLatest = previousFollowLatest;
+      });
+    }
+  }
+
+  Future<void> _addPeakGraphToGalleryPreservingSelection() async {
+    final previousFollowLatest = _graphHistoryFollowLatest;
+    final previousSelectedIndex = _selectedGraphHistoryIndex;
+    try {
+      await _addPeakGraphToGallery();
+    } finally {
+      if (mounted) {
+        await _restoreGraphHistorySelection(
+          previousSelectedIndex: previousSelectedIndex,
+          previousFollowLatest: previousFollowLatest,
+        );
+      }
+    }
   }
 
   void _toggleWhiteboardSensitivity() {
@@ -576,7 +561,6 @@ class _CameraScreenState extends State<CameraScreen>
         await _connectToStream(widget.initialVideoFilePath!);
         if (!mounted) return;
         final svc = NativeCameraService();
-        svc.setVideoSkipFrames(_videoSkipFrames);
         svc.setPanoramaEnabled(true);
         svc.setCanvasViewMode(true);
         setState(() {
@@ -987,7 +971,6 @@ class _CameraScreenState extends State<CameraScreen>
             await _connectToStream(path);
             if (!mounted) return;
             final svc = NativeCameraService();
-            svc.setVideoSkipFrames(_videoSkipFrames);
             svc.setPanoramaEnabled(true);
             svc.setCanvasViewMode(true);
             setState(() {
@@ -1145,7 +1128,6 @@ class _CameraScreenState extends State<CameraScreen>
 
     _canvasPollTimer?.cancel();
     _canvasNavNotifier.dispose();
-    _skipFramesController.dispose();
     _flashController.dispose();
     super.dispose();
   }
@@ -1757,7 +1739,7 @@ class _CameraScreenState extends State<CameraScreen>
                             overlayShape: const RoundSliderOverlayShape(
                                 overlayRadius: 14),
                             activeTrackColor: Colors.blue,
-                            inactiveTrackColor: Colors.grey.withAlpha(80),
+                            inactiveTrackColor: Colors.lightBlue.withAlpha(90),
                             thumbColor: Colors.blue,
                           ),
                           child: Slider(
@@ -1852,9 +1834,6 @@ class _CameraScreenState extends State<CameraScreen>
                 }
               },
             ),
-            // Video file skip-frames control
-            if (_isVideoFileMode)
-              _buildVideoSkipControl(),
             // VDD Scroll Mode Toggle (zoom vs forward scroll)
             if (_isVddCaptureMode)
               IconButton(
@@ -1938,6 +1917,17 @@ class _CameraScreenState extends State<CameraScreen>
                     ? 'Sensitivity: High'
                     : 'Sensitivity: Normal',
                 onPressed: _toggleWhiteboardSensitivity,
+              ),
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: const Icon(Icons.auto_graph),
+                color: _graphHistoryTimeline.isNotEmpty ? Colors.tealAccent : null,
+                tooltip: 'Add Peak Graph To Gallery',
+                onPressed: _graphHistoryTimeline.isNotEmpty
+                    ? () {
+                        unawaited(_addPeakGraphToGalleryPreservingSelection());
+                      }
+                    : null,
               ),
             // Edit Canvas (only visible when whiteboard mode is active)
             if (Platform.isWindows && _isWhiteboardMode)
@@ -2470,15 +2460,6 @@ class _CameraScreenState extends State<CameraScreen>
               pdfNameController: _pdfNameController,
               pdfPathController: _pdfPathController,
               onExportPdf: _exportPdf,
-              showGraphExportActions: Platform.isWindows && _isWhiteboardMode,
-              canExportSelectedGraph: _selectedGraphHistoryIndex >= 0,
-              canAutoExportGraph: _graphHistoryTimeline.isNotEmpty,
-              onExportSelectedGraphPdf: () {
-                unawaited(_exportSelectedGraphToPdf());
-              },
-              onAutoExportGraphPdf: () {
-                unawaited(_autoExportPeakGraphToPdf());
-              },
               onSelectDirectory: _pickSaveDirectory,
               onCropImage: _cropImage,
               onUseAsOverlay: _useAsOverlay,
