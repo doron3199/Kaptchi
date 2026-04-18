@@ -2773,7 +2773,7 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
         stale_reattach_fail_count_ = 0;
     }
 
-    MaybeRunPeriodicMergeLocked();
+    // MaybeRunPeriodicMergeLocked();
 }
 
 // ============================================================================

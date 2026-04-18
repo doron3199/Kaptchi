@@ -325,7 +325,7 @@ private:
     static constexpr bool  kEnableMotionGate            = true;
     // Fraction of changed pixels above which a frame is considered too shaky and skipped.
     // Lower = stricter (fewer frames accepted, less ghosting). Higher = more frames processed including shaky ones.
-    static constexpr float kMaxMotionFraction            = 0.06f;
+    static constexpr float kMaxMotionFraction            = 0.04f;
     // Once a low-motion frame is accepted, the gate enters a lock state and stays there
     // until a later frame exceeds this motion fraction. The unlocking frame is also skipped.
     static constexpr float kOpenMotionGateLockFraction   = 0.09f;
@@ -473,8 +473,8 @@ private:
 
     // --- Multi-canvas lifecycle ---
     // Frames without any new node added before considering the canvas stale.
-    // At ~24fps processing this is ~10 seconds.
-    static const int   kStaleNoGrowthFrames  = 240;
+    // At ~24fps processing this is ~30 seconds.
+    static const int   kStaleNoGrowthFrames  = 720;
     // Minimum blob→node matches needed to re-attach to an existing group.
     static const int   kReattachMinMatches   = 6;
     // Seconds between automatic merge attempts.
