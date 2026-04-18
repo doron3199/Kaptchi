@@ -113,6 +113,23 @@ typedef GetAbsenceScoreSeenThreshold = double Function();
 typedef GetSubCanvasCountFunc = Int32 Function();
 typedef GetSubCanvasCount = int Function();
 
+typedef TryMergeGroupsNowFunc = Bool Function();
+typedef TryMergeGroupsNowDart = bool Function();
+
+typedef GetLastLifecycleEventFunc = Int32 Function();
+typedef GetLastLifecycleEventDart = int Function();
+
+typedef GetSubCanvasPeakIndexFunc = Int32 Function(Int32 canvasIdx);
+typedef GetSubCanvasPeakIndexDart = int Function(int canvasIdx);
+
+typedef GetSubCanvasHistoryCountFunc = Int32 Function(Int32 canvasIdx);
+typedef GetSubCanvasHistoryCountDart = int Function(int canvasIdx);
+
+typedef GetSubCanvasOverviewRgbaFunc = Bool Function(
+    Int32 canvasIdx, Int32 historyIdx, Pointer<Uint8> buffer, Int32 width, Int32 height);
+typedef GetSubCanvasOverviewRgbaDart = bool Function(
+    int canvasIdx, int historyIdx, Pointer<Uint8> buffer, int width, int height);
+
 typedef GetActiveSubCanvasIndexFunc = Int32 Function();
 typedef GetActiveSubCanvasIndex = int Function();
 
@@ -375,6 +392,11 @@ class NativeCameraService {
   late SetActiveSubCanvas _setActiveSubCanvas;
   late GetSortedSubCanvasIndex _getSortedSubCanvasIndex;
   late GetSortedPosition _getSortedPosition;
+  late TryMergeGroupsNowDart _tryMergeGroupsNow;
+  late GetLastLifecycleEventDart _getLastLifecycleEvent;
+  late GetSubCanvasPeakIndexDart _getSubCanvasPeakIndex;
+  late GetSubCanvasHistoryCountDart _getSubCanvasHistoryCount;
+  late GetSubCanvasOverviewRgbaDart _getSubCanvasOverviewRgba;
 
   // Video file playback bindings
   late IsVideoCompleteDart _isVideoComplete;
@@ -540,6 +562,21 @@ class NativeCameraService {
         .asFunction();
     _getSortedPosition = _nativeLib
         .lookup<NativeFunction<GetSortedPositionFunc>>('GetSortedPosition')
+        .asFunction();
+    _tryMergeGroupsNow = _nativeLib
+        .lookup<NativeFunction<TryMergeGroupsNowFunc>>('TryMergeGroupsNow')
+        .asFunction();
+    _getLastLifecycleEvent = _nativeLib
+        .lookup<NativeFunction<GetLastLifecycleEventFunc>>('GetLastLifecycleEvent')
+        .asFunction();
+    _getSubCanvasPeakIndex = _nativeLib
+        .lookup<NativeFunction<GetSubCanvasPeakIndexFunc>>('GetSubCanvasPeakIndex')
+        .asFunction();
+    _getSubCanvasHistoryCount = _nativeLib
+        .lookup<NativeFunction<GetSubCanvasHistoryCountFunc>>('GetSubCanvasHistoryCount')
+        .asFunction();
+    _getSubCanvasOverviewRgba = _nativeLib
+        .lookup<NativeFunction<GetSubCanvasOverviewRgbaFunc>>('GetSubCanvasOverviewRgba')
         .asFunction();
 
     // Video file playback bindings
@@ -896,6 +933,49 @@ class NativeCameraService {
   int getSortedPosition(int idx) {
     initialize();
     return _getSortedPosition(idx);
+  }
+
+  /// Peak history index for sub-canvas at vector index [canvasIdx]. -1 if none.
+  int getSubCanvasPeakIndex(int canvasIdx) {
+    initialize();
+    return _getSubCanvasPeakIndex(canvasIdx);
+  }
+
+  /// History entry count for sub-canvas at vector index [canvasIdx].
+  int getSubCanvasHistoryCount(int canvasIdx) {
+    initialize();
+    return _getSubCanvasHistoryCount(canvasIdx);
+  }
+
+  /// Render sub-canvas [canvasIdx] at [historyIdx] (-1 = latest) into an RGBA buffer.
+  /// Returns null on failure.
+  ({Uint8List bytes, int width, int height})? getSubCanvasOverviewRgba(
+      int canvasIdx, int historyIdx,
+      {int width = 1920, int height = 1080}) {
+    initialize();
+    final buf = malloc.allocate<Uint8>(width * height * 4);
+    try {
+      final ok = _getSubCanvasOverviewRgba(canvasIdx, historyIdx, buf, width, height);
+      if (!ok) return null;
+      final bytes = Uint8List.fromList(buf.asTypedList(width * height * 4));
+      return (bytes: bytes, width: width, height: height);
+    } finally {
+      malloc.free(buf);
+    }
+  }
+
+  /// Attempt to merge the two closest sub-canvases. Returns true if a merge happened.
+  bool tryMergeGroupsNow() {
+    initialize();
+    return _tryMergeGroupsNow();
+  }
+
+  /// Returns the last lifecycle event and clears it. 0 = None.
+  /// Bits 0-7: event type (1=Reattach, 2=Spawned, 3=Merged).
+  /// Bits 8-23: target group index.
+  int getLastLifecycleEvent() {
+    initialize();
+    return _getLastLifecycleEvent();
   }
 
   // --- Screen Capture Methods ---

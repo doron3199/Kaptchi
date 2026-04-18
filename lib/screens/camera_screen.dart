@@ -128,6 +128,7 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isVideoFileMode = false;
   double _videoProgress = 0.0;
   bool _isVideoPaused = false;
+  bool _isVideoComplete = false;
   // When the user is dragging the seek slider, we show their chosen value
   // locally and ignore the polled progress until they release.
   bool _isSeekingVideo = false;
@@ -183,15 +184,30 @@ class _CameraScreenState extends State<CameraScreen>
       }
       await _refreshGraphHistoryState();
       if (!mounted) return;
+      // Poll multi-canvas lifecycle events and show toasts
+      final event = svc.getLastLifecycleEvent();
+      if (event != 0 && mounted) {
+        final type = event & 0xFF;
+        final targetIdx = (event >> 8) & 0xFFFF;
+        String? msg;
+        if (type == 1) msg = 'Resumed canvas ${targetIdx + 1}';
+        if (type == 2) msg = 'Started new canvas ${targetIdx + 1}';
+        if (type == 3) msg = 'Canvases merged';
+        if (msg != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(msg), duration: const Duration(seconds: 2)),
+          );
+        }
+      }
       // Poll video file progress / completion
       if (_isVideoFileMode) {
         final progress = svc.getVideoProgress();
         final complete = svc.isVideoComplete();
-        if (complete) {
+        if (complete && !_isVideoComplete) {
           setState(() {
-            _isVideoFileMode = false;
-            _isVideoPaused = false;
+            _isVideoPaused = true;
             _videoProgress = 1.0;
+            _isVideoComplete = true;
           });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Video processing complete')),
@@ -290,6 +306,8 @@ class _CameraScreenState extends State<CameraScreen>
                   setState(() {
                     _isSeekingVideo = false;
                     _videoProgress = v;
+                    _isVideoComplete = false;
+                    _isVideoPaused = false;
                   });
                 },
               ),
@@ -379,72 +397,83 @@ class _CameraScreenState extends State<CameraScreen>
     await _refreshGraphHistoryState();
   }
 
-  Future<({Uint8List bytes, int width, int height})?> _buildSelectedGraphImage() async {
-    final canvasSize = NativeCameraService().getPanoramaCanvasSize();
-    final maxWidth = canvasSize.width > 0
+  // Renders one canvas+historyIndex to a PNG image, using the direct per-canvas FFI.
+  Future<({Uint8List bytes, int width, int height})?> _buildCanvasAtHistory(
+      int canvasIdx, int historyIdx) async {
+    final svc = NativeCameraService();
+    final canvasSize = svc.getPanoramaCanvasSize();
+    final maxW = canvasSize.width > 0
         ? canvasSize.width.ceil().clamp(1, 16384)
-        : 4096;
-    final maxHeight = canvasSize.height > 0
+        : 1920;
+    final maxH = canvasSize.height > 0
         ? canvasSize.height.ceil().clamp(1, 16384)
-        : 4096;
-    final result = NativeCameraService().getCanvasFullResRgba(
-      maxWidth: maxWidth,
-      maxHeight: maxHeight,
-    );
-    if (result == null) {
-      return null;
-    }
-
+        : 1080;
+    final result = svc.getSubCanvasOverviewRgba(
+        canvasIdx, historyIdx, width: maxW, height: maxH);
+    if (result == null) return null;
     final image = await ui.ImmutableBuffer.fromUint8List(result.bytes)
-        .then(
-          (buffer) => ui.ImageDescriptor.raw(
-            buffer,
+        .then((buf) => ui.ImageDescriptor.raw(buf,
             width: result.width,
             height: result.height,
-            pixelFormat: ui.PixelFormat.rgba8888,
-          ),
-        )
-        .then((descriptor) => descriptor.instantiateCodec())
-        .then((codec) => codec.getNextFrame())
-        .then((frame) => frame.image);
-
+            pixelFormat: ui.PixelFormat.rgba8888))
+        .then((d) => d.instantiateCodec())
+        .then((c) => c.getNextFrame())
+        .then((f) => f.image);
     final byteData = await image.toByteData(format: ui.ImageByteFormat.png);
-    if (byteData == null) {
-      return null;
-    }
-
-    return (
-      bytes: byteData.buffer.asUint8List(),
-      width: result.width,
-      height: result.height,
-    );
+    if (byteData == null) return null;
+    return (bytes: byteData.buffer.asUint8List(),
+            width: result.width,
+            height: result.height);
   }
 
   Future<void> _addPeakGraphToGallery() async {
     final svc = NativeCameraService();
-    final peakIndex = svc.getGraphHistoryPeakIndex();
-    if (peakIndex < 0) {
+    const kStaleThreshold = 5;
+    final canvasCount = svc.getSubCanvasCount();
+    if (canvasCount == 0) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No peak graph was found to add.')),
+        const SnackBar(content: Text('No canvas data available.')),
       );
       return;
     }
 
-    await _selectGraphHistoryIndex(peakIndex, followLatest: false);
+    int added = 0;
+    for (int ci = 0; ci < canvasCount; ci++) {
+      final peakIdx = svc.getSubCanvasPeakIndex(ci);
+      final histCount = svc.getSubCanvasHistoryCount(ci);
+      final latestIdx = histCount - 1;
 
-    final image = await _buildSelectedGraphImage();
-    if (image == null) {
+      if (peakIdx >= 0) {
+        final img = await _buildCanvasAtHistory(ci, peakIdx);
+        if (img != null) {
+          GalleryService.instance.addImage(img.bytes, img.width, img.height);
+          added++;
+        }
+      }
+
+      // Also add latest if it's sufficiently ahead of peak
+      final peakIsStale =
+          peakIdx < 0 || (latestIdx - peakIdx >= kStaleThreshold);
+      if (peakIsStale && latestIdx >= 0) {
+        final img = await _buildCanvasAtHistory(ci, latestIdx);
+        if (img != null) {
+          GalleryService.instance.addImage(img.bytes, img.width, img.height);
+          added++;
+        }
+      }
+
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('No peak graph image was available.')),
-      );
-      return;
     }
-
-    GalleryService.instance.addImage(image.bytes, image.width, image.height);
 
     if (!mounted) return;
+    if (added == 0) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No peak graph images were available.')),
+      );
+      return;
+    }
+
     setState(() {
       _isSidebarOpen = true;
       _isGalleryFullScreen = false;
@@ -452,7 +481,7 @@ class _CameraScreenState extends State<CameraScreen>
     });
 
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Peak graph image added to gallery.')),
+      SnackBar(content: Text('Added $added peak graph image(s) to gallery.')),
     );
   }
 
@@ -1999,6 +2028,29 @@ class _CameraScreenState extends State<CameraScreen>
                   setState(_resetWhiteboardUiState);
                 },
               ),
+            // Merge canvases (only when 2+ sub-canvases exist)
+            if (Platform.isWindows && _isWhiteboardMode)
+              ValueListenableBuilder<({int count, int active})>(
+                valueListenable: _canvasNavNotifier,
+                builder: (ctx, nav, _) {
+                  if (nav.count < 2) return const SizedBox.shrink();
+                  return IconButton(
+                    icon: const Icon(Icons.merge_type),
+                    tooltip: 'Merge canvases',
+                    onPressed: () {
+                      final merged = NativeCameraService().tryMergeGroupsNow();
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+                          content: Text(merged
+                              ? 'Canvases merged'
+                              : 'Nothing to merge yet'),
+                          duration: const Duration(seconds: 2),
+                        ));
+                      }
+                    },
+                  );
+                },
+              ),
             IconButton(
               icon: const Icon(Icons.home),
               tooltip: AppLocalizations.of(context)!.backToHome,
@@ -2383,24 +2435,7 @@ class _CameraScreenState extends State<CameraScreen>
                               );
                             },
                           ),
-                          // Canvas index indicator
-                          Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 10,
-                              vertical: 4,
-                            ),
-                            decoration: BoxDecoration(
-                              color: Colors.black54,
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Text(
-                              '${nav.active + 1} / ${nav.count}',
-                              style: const TextStyle(
-                                color: Colors.white,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
+                          const Spacer(),
                           _SubCanvasArrowButton(
                             icon: Icons.chevron_right,
                             enabled: nav.active < nav.count - 1,

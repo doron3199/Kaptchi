@@ -28,10 +28,14 @@ public:
     CanvasRenderMode GetRenderMode() const;
     cv::Size GetCanvasSize() const;
     int GetSubCanvasCount() const;
+    int GetSubCanvasHistoryCount(int canvas_idx) const;
+    int GetSubCanvasPeakIndex(int canvas_idx) const;
     int GetActiveSubCanvasIndex() const;
     void SetActiveSubCanvas(int idx);
     int GetSortedSubCanvasIndex(int pos) const;
     int GetSortedPosition(int idx) const;
+    bool GetOverviewBlockingForCanvas(int canvas_idx, int history_idx,
+                                      cv::Size viewSize, cv::Mat& out_frame);
     void SyncSettings(bool debug_enabled,
                       bool duplicate_debug_enabled,
                       float absence_score_seen_threshold,

@@ -32,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -2362,6 +2363,8 @@ void WhiteboardCanvas::Reset() {
     view_group_idx_   = -1;
     prev_gray_ = cv::Mat();
     has_content_ = false;
+    stale_reattach_fail_count_ = 0;
+    merge_timer_initialized_ = false;
     BumpCanvasVersion();
     frame_w_ = frame_h_ = 0;
     processed_frame_id_ = 0;
@@ -2541,6 +2544,48 @@ int WhiteboardCanvas::GetSortedPosition(int idx) const {
     return (idx >= 0 && idx < (int)groups_.size()) ? idx : -1;
 }
 
+bool WhiteboardCanvas::TryMergeGroupsNow() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return TryMergeGroupsNowLocked();
+}
+
+int WhiteboardCanvas::GetSubCanvasPeakIndex(int canvas_idx) const {
+    if (remote_process_ && helper_client_) return helper_client_->GetSubCanvasPeakIndex(canvas_idx);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (canvas_idx < 0 || canvas_idx >= (int)groups_.size()) return -1;
+    return FindGraphHistoryPeakIndex(*groups_[canvas_idx]);
+}
+
+int WhiteboardCanvas::GetSubCanvasHistoryCount(int canvas_idx) const {
+    if (remote_process_ && helper_client_) return helper_client_->GetSubCanvasHistoryCount(canvas_idx);
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (canvas_idx < 0 || canvas_idx >= (int)groups_.size()) return 0;
+    return (int)groups_[canvas_idx]->graph_history.size();
+}
+
+bool WhiteboardCanvas::GetOverviewBlockingForCanvas(int canvas_idx, int history_idx,
+                                                     cv::Size viewSize, cv::Mat& out_frame) {
+    if (remote_process_ && helper_client_)
+        return helper_client_->GetOverviewBlockingForCanvas(canvas_idx, history_idx, viewSize, out_frame);
+    if (viewSize.width <= 0 || viewSize.height <= 0) return false;
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (canvas_idx < 0 || canvas_idx >= (int)groups_.size()) return false;
+    auto& group = *groups_[canvas_idx];
+    const CanvasRenderMode mode = GetRenderMode();
+    const int n = (int)group.graph_history.size();
+    if (n > 1 && history_idx >= 0 && history_idx < n - 1) {
+        // Historical snapshot — render to a temporary cache (no state mutation)
+        cv::Mat temp_cache;
+        if (!BuildGraphHistoryRenderCache(group.graph_history[history_idx], mode, temp_cache))
+            return false;
+        return RenderOverviewToFrame(temp_cache, viewSize, out_frame);
+    } else {
+        // Latest state
+        if (!EnsureRenderCacheReady(group, mode)) return false;
+        return RenderOverviewToFrame(GetRenderCacheForMode(group, mode), viewSize, out_frame);
+    }
+}
+
 // ============================================================================
 //  SECTION 5: Worker thread
 // ============================================================================
@@ -2697,6 +2742,38 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
         CreateSubCanvas(frame, binary, blobs, current_frame);
         recompute_has_content();
     }
+
+    // --- Stale canvas detection ---
+    // When the active group has not received any new nodes for kStaleNoGrowthFrames
+    // and there are strokes on-screen, try to re-attach for kNewCanvasConfirmFrames
+    // consecutive frames before actually spawning a new canvas.
+    if (graph_ready && !mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
+        const auto& ag = *groups_[active_group_idx_];
+        const int no_growth = (ag.last_node_added_frame >= 0)
+            ? (current_frame - ag.last_node_added_frame)
+            : current_frame;
+        if (no_growth > kStaleNoGrowthFrames) {
+            const int reattach = TryReattachToExistingGroup(blobs, current_frame);
+            if (reattach >= 0) {
+                stale_reattach_fail_count_ = 0;
+            } else {
+                stale_reattach_fail_count_++;
+                if (stale_reattach_fail_count_ >= kNewCanvasConfirmFrames) {
+                    stale_reattach_fail_count_ = 0;
+                    CreateSubCanvas(frame, binary, blobs, current_frame);
+                    recompute_has_content();
+                    last_lifecycle_event_.store(2 | (active_group_idx_ << 8),
+                                                std::memory_order_relaxed);
+                }
+            }
+        } else {
+            stale_reattach_fail_count_ = 0;
+        }
+    } else {
+        stale_reattach_fail_count_ = 0;
+    }
+
+    MaybeRunPeriodicMergeLocked();
 }
 
 // ============================================================================
@@ -2850,7 +2927,8 @@ cv::Point2f WhiteboardCanvas::GlobalShapePass(WhiteboardGroup& group,
 // MatchBlobsToGraph — orchestrates all 3 steps
 // ---------------------------------------------------------------------------
 cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
-                                                  std::vector<FrameBlob>& blobs) {
+                                                  std::vector<FrameBlob>& blobs,
+                                                  int partition_count) {
     if (blobs.empty() || group.nodes.empty()) return {};
 
     for (auto& b : blobs) { b.matched_node_id = -1; b.matched_offset = {}; }
@@ -2924,7 +3002,7 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
     for (int i = 0; i < (int)blobs.size(); i++) {
         const auto& blob = blobs[i];
         const int partition_idx = GetHorizontalMatchPartition(
-            blob.centroid.x, frame_w_, kHorizontalMatchPartitions);
+            blob.centroid.x, frame_w_, partition_count);
 
         const ShapeMatchCandidate best_match = find_best_shape_match(
             blob, rough_offset, kShapeMatchSearchRadius,
@@ -2948,10 +3026,9 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
     const cv::Point2f precise_delta = ComputeMeanDeltaVector(global_inlier_matches);
     const cv::Point2f precise_offset = rough_offset + precise_delta;
 
-    std::array<cv::Point2f, kHorizontalMatchPartitions> partition_offsets;
-    partition_offsets.fill(precise_offset);
+    std::vector<cv::Point2f> partition_offsets(partition_count, precise_offset);
 
-    for (int partition_idx = 0; partition_idx < kHorizontalMatchPartitions; partition_idx++) {
+    for (int partition_idx = 0; partition_idx < partition_count; partition_idx++) {
         std::vector<ShapeMatch> partition_matches;
         for (const auto& match : global_inlier_matches) {
             if (match.partition_idx == partition_idx)
@@ -2971,7 +3048,7 @@ cv::Point2f WhiteboardCanvas::MatchBlobsToGraph(WhiteboardGroup& group,
 
     for (auto& blob : blobs) {
         const int partition_idx = GetHorizontalMatchPartition(
-            blob.centroid.x, frame_w_, kHorizontalMatchPartitions);
+            blob.centroid.x, frame_w_, partition_count);
         blob.matched_offset = partition_offsets[partition_idx];
     }
 
@@ -3170,6 +3247,7 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
 
     // --- 4c. Dedupe unmatched frame blobs, then add surviving ones as new nodes ---
     const int matched_count = (int)seen_node_ids.size();
+    if (matched_count > 0) group.last_match_frame = current_frame;
     std::vector<int> new_node_ids;
     if (matched_count >= kMinMatchesForNewNode) {
         for (auto& blob : blobs) {
@@ -3202,6 +3280,8 @@ bool WhiteboardCanvas::UpdateGraph(WhiteboardGroup& group,
                     new_node_ids.push_back(id_before);
             }
         }
+
+        if (!new_node_ids.empty()) group.last_node_added_frame = current_frame;
 
         // Extend same-frame hard-edge creation to include matched existing nodes
         // and brand-new inserted nodes from this update.
@@ -3897,6 +3977,311 @@ int WhiteboardCanvas::GetSelectedGraphHistoryNodeContours(float* buffer,
 }
 
 // ============================================================================
+//  SECTION 15: Multi-canvas lifecycle
+// ============================================================================
+
+// Try to re-attach the current frame's blobs to an existing (non-active) group.
+// Runs MatchBlobsToGraph on each candidate group in order; attaches to the first
+// one where the matched blob count meets kReattachMinMatches.
+// Returns the index of the newly-active group on success, -1 on failure.
+// Caller must hold state_mutex_.
+int WhiteboardCanvas::TryReattachToExistingGroup(std::vector<FrameBlob>& blobs,
+                                                  int current_frame) {
+    for (int i = 0; i < (int)groups_.size(); i++) {
+        if (i == active_group_idx_) continue;
+        auto& group = *groups_[i];
+        if ((int)group.nodes.size() < kStableGraphNodeThreshold) continue;
+        MatchBlobsToGraph(group, blobs);
+        int matched = 0;
+        for (const auto& b : blobs) if (b.matched_node_id >= 0) matched++;
+        if (matched >= kReattachMinMatches) {
+            active_group_idx_ = i;
+            group.last_node_added_frame = current_frame;
+            if (!canvas_view_mode_.load()) view_group_idx_ = i;
+            last_lifecycle_event_.store(1 | (i << 8), std::memory_order_relaxed);
+            BumpCanvasVersion();
+            return i;
+        }
+    }
+    return -1;
+}
+
+// Merge src group into dst group. offset is the translation applied to all src
+// nodes so they align with dst's canvas coordinate system.
+// Caller must hold state_mutex_.
+void WhiteboardCanvas::MergeGroupsLocked(int dst_idx, int src_idx, cv::Point2f offset) {
+    if (dst_idx < 0 || dst_idx >= (int)groups_.size()) return;
+    if (src_idx < 0 || src_idx >= (int)groups_.size()) return;
+    if (dst_idx == src_idx) return;
+
+    auto& dst = *groups_[dst_idx];
+    auto& src = *groups_[src_idx];
+
+    // Spatial join: translate src nodes by offset and insert into dst.
+    // DrawingNode::contour is relative to bbox_canvas origin, so no contour translation needed.
+    for (auto& [src_id, src_node_ptr] : src.nodes) {
+        auto new_node = std::make_unique<DrawingNode>(*src_node_ptr);
+        const int new_id = dst.next_node_id++;
+        new_node->id = new_id;
+        new_node->centroid_canvas += offset;
+        new_node->bbox_canvas.x += (int)std::round(offset.x);
+        new_node->bbox_canvas.y += (int)std::round(offset.y);
+        dst.spatial_index.Insert(new_id, new_node->centroid_canvas);
+        dst.nodes[new_id] = std::move(new_node);
+    }
+
+    // Expand dst bounds to cover translated src bounds.
+    dst.stroke_min_px_x = std::min(dst.stroke_min_px_x, (int)std::round(src.stroke_min_px_x + offset.x));
+    dst.stroke_min_px_y = std::min(dst.stroke_min_px_y, (int)std::round(src.stroke_min_px_y + offset.y));
+    dst.stroke_max_px_x = std::max(dst.stroke_max_px_x, (int)std::round(src.stroke_max_px_x + offset.x));
+    dst.stroke_max_px_y = std::max(dst.stroke_max_px_y, (int)std::round(src.stroke_max_px_y + offset.y));
+    dst.raw_min_px_x = std::min(dst.raw_min_px_x, (int)std::round(src.raw_min_px_x + offset.x));
+    dst.raw_min_px_y = std::min(dst.raw_min_px_y, (int)std::round(src.raw_min_px_y + offset.y));
+    dst.raw_max_px_x = std::max(dst.raw_max_px_x, (int)std::round(src.raw_max_px_x + offset.x));
+    dst.raw_max_px_y = std::max(dst.raw_max_px_y, (int)std::round(src.raw_max_px_y + offset.y));
+
+    // Timeline join (concatenation, not interleave): append src history to end
+    // of dst history with monotonically increasing frame IDs.
+    {
+        int next_frame = dst.graph_history.empty() ? 0
+                       : dst.graph_history.back().frame_id + 1;
+        for (auto& entry : src.graph_history) {
+            GraphHistoryEntry appended = entry;
+            appended.frame_id = next_frame++;
+            const size_t bytes = EstimateGraphHistoryEntryStorageBytes(appended);
+            dst.graph_history_storage_bytes += bytes;
+            dst.graph_history.push_back(std::move(appended));
+        }
+        // Trim oldest entries if over budget.
+        while ((int)dst.graph_history.size() > kMaxGraphHistoryEntries) {
+            dst.graph_history_storage_bytes -=
+                EstimateGraphHistoryEntryStorageBytes(dst.graph_history.front());
+            dst.graph_history.erase(dst.graph_history.begin());
+        }
+    }
+
+    dst.stroke_cache_dirty = true;
+    dst.raw_cache_dirty    = true;
+
+    // Remove src from groups_ and fix up active/view indices.
+    groups_.erase(groups_.begin() + src_idx);
+
+    auto fix_idx = [&](int& idx) {
+        if (idx == src_idx) idx = (dst_idx > src_idx) ? dst_idx - 1 : dst_idx;
+        else if (idx > src_idx) idx--;
+    };
+    fix_idx(active_group_idx_);
+    fix_idx(view_group_idx_);
+
+    last_lifecycle_event_.store(3 | (active_group_idx_ << 8), std::memory_order_relaxed);
+    BumpCanvasVersion();
+}
+
+// Merge src group into dst group using the same shape-matching pipeline as frame
+// addition: src nodes are converted to FrameBlobs (centroid_canvas acts as "frame
+// space"), GlobalShapePass + MatchBlobsToGraph compute the per-partition alignment,
+// matched src nodes refresh their counterparts in dst, and unmatched src nodes are
+// inserted via InsertOrMergeBlobNode.  Falls back to center-to-center translation
+// when dst is too small to produce reliable shape matches.
+// Caller must hold state_mutex_.
+void WhiteboardCanvas::MergeGroupsWithMatchingLocked(int dst_idx, int src_idx) {
+    if (dst_idx < 0 || dst_idx >= (int)groups_.size()) return;
+    if (src_idx < 0 || src_idx >= (int)groups_.size()) return;
+    if (dst_idx == src_idx) return;
+
+    auto& dst = *groups_[dst_idx];
+    auto& src = *groups_[src_idx];
+
+    // Fall back when dst has too few nodes for reliable shape matching.
+    if ((int)dst.nodes.size() < kStableGraphNodeThreshold || src.nodes.empty()) {
+        const float dst_cx = (dst.raw_min_px_x + dst.raw_max_px_x) * 0.5f;
+        const float dst_cy = (dst.raw_min_px_y + dst.raw_max_px_y) * 0.5f;
+        const float src_cx = (src.raw_min_px_x + src.raw_max_px_x) * 0.5f;
+        const float src_cy = (src.raw_min_px_y + src.raw_max_px_y) * 0.5f;
+        MergeGroupsLocked(dst_idx, src_idx, cv::Point2f(dst_cx - src_cx, dst_cy - src_cy));
+        return;
+    }
+
+    // Build FrameBlobs from src nodes.  centroid_canvas / bbox_canvas serve as the
+    // "frame-space" coordinates; GlobalShapePass/MatchBlobsToGraph produce an offset
+    // that is exactly the src→dst canvas translation.
+    std::vector<FrameBlob> blobs;
+    blobs.reserve(src.nodes.size());
+    for (const auto& [id, node_ptr] : src.nodes) {
+        const DrawingNode& n = *node_ptr;
+        FrameBlob b;
+        b.centroid       = n.centroid_canvas;
+        b.bbox           = n.bbox_canvas;
+        b.binary_mask    = n.binary_mask;   // shallow copy; read-only below
+        b.color_pixels   = n.color_pixels;
+        b.contour        = n.contour;
+        std::copy(std::begin(n.hu),        std::end(n.hu),        std::begin(b.hu));
+        std::copy(std::begin(n.hu_smooth), std::end(n.hu_smooth), std::begin(b.hu_smooth));
+        std::copy(std::begin(n.hu_log),    std::end(n.hu_log),    std::begin(b.hu_log));
+        b.hu_smooth_valid  = n.hu_smooth_valid;
+        b.area             = n.area;
+        b.matched_node_id  = -1;
+        b.matched_offset   = {0.0f, 0.0f};
+        blobs.push_back(std::move(b));
+    }
+
+    // MatchBlobsToGraph calls GlobalShapePass internally and writes matched_node_id
+    // + matched_offset on each blob.  Use a single partition so canvas-space x
+    // coordinates (which may exceed frame_w_) don't all collapse into partition 2.
+    MatchBlobsToGraph(dst, blobs, /*partition_count=*/1);
+
+    // Use a synthetic frame id that won't collide with dst's live last_seen_frame values.
+    const int synthetic_frame = dst.next_node_id + 100000;
+
+    // Process matched blobs: refresh the corresponding dst node.
+    for (auto& blob : blobs) {
+        if (blob.matched_node_id < 0) continue;
+        auto nit = dst.nodes.find(blob.matched_node_id);
+        if (nit == dst.nodes.end()) continue;
+        DrawingNode& node = *nit->second;
+        if (node.user_locked) continue;
+        const cv::Point2f canvas_centroid(blob.centroid.x + blob.matched_offset.x,
+                                          blob.centroid.y + blob.matched_offset.y);
+        const cv::Rect canvas_bbox(
+            blob.bbox.x + (int)std::round(blob.matched_offset.x),
+            blob.bbox.y + (int)std::round(blob.matched_offset.y),
+            blob.bbox.width, blob.bbox.height);
+        node.last_seen_frame = synthetic_frame;
+        RefreshNodeFromBlob(dst, node, blob, canvas_centroid, canvas_bbox);
+    }
+
+    // Process unmatched blobs: insert into dst with full duplicate detection.
+    for (auto& blob : blobs) {
+        if (blob.matched_node_id >= 0) continue;
+        const cv::Point2f canvas_centroid(blob.centroid.x + blob.matched_offset.x,
+                                          blob.centroid.y + blob.matched_offset.y);
+        const cv::Rect canvas_bbox(
+            blob.bbox.x + (int)std::round(blob.matched_offset.x),
+            blob.bbox.y + (int)std::round(blob.matched_offset.y),
+            blob.bbox.width, blob.bbox.height);
+        InsertOrMergeBlobNode(dst, blob, canvas_centroid, canvas_bbox,
+                              synthetic_frame,
+                              /*enable_duplicate_merge=*/true,
+                              /*duplicate_debug_mode=*/false,
+                              kMergeSearchRadiusPx,
+                              kDuplicatePosOverlapThreshold,
+                              kDuplicateCentroidIouThreshold,
+                              kDuplicateBboxIouThreshold,
+                              kDuplicateMaxShapeDifference);
+    }
+
+    // Update dst bounds to cover all nodes (simpler than tracking translated src bounds).
+    for (const auto& [id, node_ptr] : dst.nodes) {
+        const DrawingNode& n = *node_ptr;
+        dst.stroke_min_px_x = std::min(dst.stroke_min_px_x, n.bbox_canvas.x);
+        dst.stroke_min_px_y = std::min(dst.stroke_min_px_y, n.bbox_canvas.y);
+        dst.stroke_max_px_x = std::max(dst.stroke_max_px_x, n.bbox_canvas.x + n.bbox_canvas.width);
+        dst.stroke_max_px_y = std::max(dst.stroke_max_px_y, n.bbox_canvas.y + n.bbox_canvas.height);
+        dst.raw_min_px_x = dst.stroke_min_px_x;
+        dst.raw_min_px_y = dst.stroke_min_px_y;
+        dst.raw_max_px_x = dst.stroke_max_px_x;
+        dst.raw_max_px_y = dst.stroke_max_px_y;
+    }
+
+    // Timeline join: append src history with monotonically increasing frame IDs.
+    {
+        int next_frame = dst.graph_history.empty() ? 0
+                       : dst.graph_history.back().frame_id + 1;
+        for (auto& entry : src.graph_history) {
+            GraphHistoryEntry appended = entry;
+            appended.frame_id = next_frame++;
+            const size_t bytes = EstimateGraphHistoryEntryStorageBytes(appended);
+            dst.graph_history_storage_bytes += bytes;
+            dst.graph_history.push_back(std::move(appended));
+        }
+        while ((int)dst.graph_history.size() > kMaxGraphHistoryEntries) {
+            dst.graph_history_storage_bytes -=
+                EstimateGraphHistoryEntryStorageBytes(dst.graph_history.front());
+            dst.graph_history.erase(dst.graph_history.begin());
+        }
+    }
+
+    dst.stroke_cache_dirty = true;
+    dst.raw_cache_dirty    = true;
+
+    groups_.erase(groups_.begin() + src_idx);
+
+    auto fix_idx = [&](int& idx) {
+        if (idx == src_idx) idx = (dst_idx > src_idx) ? dst_idx - 1 : dst_idx;
+        else if (idx > src_idx) idx--;
+    };
+    fix_idx(active_group_idx_);
+    fix_idx(view_group_idx_);
+
+    last_lifecycle_event_.store(3 | (active_group_idx_ << 8), std::memory_order_relaxed);
+    BumpCanvasVersion();
+}
+
+// Find the closest pair of groups (by canvas-space bbox proximity) and merge them.
+// Caller must hold state_mutex_.
+bool WhiteboardCanvas::TryMergeGroupsNowLocked() {
+    if (groups_.size() < 2) return false;
+
+    const int fw = frame_w_ > 0 ? frame_w_ : kDefaultCanvasWidth;
+
+    int best_a = -1, best_b = -1;
+    int best_proximity = INT_MAX;
+
+    for (int i = 0; i < (int)groups_.size(); i++) {
+        for (int j = i + 1; j < (int)groups_.size(); j++) {
+            const auto& a = *groups_[i];
+            const auto& b = *groups_[j];
+            if (a.nodes.empty() || b.nodes.empty()) continue;
+            // Canvas-space gap between the two bboxes (0 = overlapping or adjacent).
+            const int dx = std::max(0,
+                std::max(a.raw_min_px_x, b.raw_min_px_x) -
+                std::min(a.raw_max_px_x, b.raw_max_px_x));
+            const int dy = std::max(0,
+                std::max(a.raw_min_px_y, b.raw_min_px_y) -
+                std::min(a.raw_max_px_y, b.raw_max_px_y));
+            const int proximity = dx + dy;
+            if (proximity < fw && proximity < best_proximity) {
+                best_proximity = proximity;
+                best_a = i;
+                best_b = j;
+            }
+        }
+    }
+
+    if (best_a < 0) return false;
+
+    // Merge the group with fewer history entries into the one with more.
+    int dst = best_a, src = best_b;
+    if (groups_[src]->graph_history.size() > groups_[dst]->graph_history.size()) {
+        std::swap(dst, src);
+    }
+
+    MergeGroupsWithMatchingLocked(dst, src);
+    return true;
+}
+
+// Called from the worker thread (state_mutex_ already held) to run periodic merges.
+void WhiteboardCanvas::MaybeRunPeriodicMergeLocked() {
+    if (groups_.size() < 2) return;
+    using clock = std::chrono::steady_clock;
+    const auto now = clock::now();
+    if (!merge_timer_initialized_) {
+        last_merge_attempt_ = now;
+        merge_timer_initialized_ = true;
+        return;
+    }
+    const auto elapsed_sec =
+        std::chrono::duration_cast<std::chrono::seconds>(now - last_merge_attempt_).count();
+    if (elapsed_sec < kMergeIntervalSec) return;
+    last_merge_attempt_ = now;
+    TryMergeGroupsNowLocked();
+}
+
+int WhiteboardCanvas::GetLastLifecycleEventAndClear() {
+    return last_lifecycle_event_.exchange(0, std::memory_order_relaxed);
+}
+
+// ============================================================================
 //  SECTION 14: FFI exports
 // ============================================================================
 
@@ -4180,4 +4565,35 @@ bool GetCanvasFullResRgba(uint8_t* buffer, int max_w, int max_h, int* out_w, int
     if (out_w) *out_w = overview.cols;
     if (out_h) *out_h = overview.rows;
     return CopyBgrFrameToRgbaBuffer(overview, buffer, overview.cols, overview.rows);
+}
+
+bool TryMergeGroupsNow() {
+    return g_whiteboard_canvas && g_whiteboard_canvas->TryMergeGroupsNow();
+}
+
+int GetLastLifecycleEvent() {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetLastLifecycleEventAndClear() : 0;
+}
+
+int GetSubCanvasPeakIndex(int canvas_idx) {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetSubCanvasPeakIndex(canvas_idx) : -1;
+}
+
+int GetSubCanvasHistoryCount(int canvas_idx) {
+    return g_whiteboard_canvas ? g_whiteboard_canvas->GetSubCanvasHistoryCount(canvas_idx) : 0;
+}
+
+bool GetSubCanvasOverviewRgba(int canvas_idx, int history_idx,
+                               uint8_t* buffer, int width, int height) {
+    if (!g_whiteboard_canvas || !buffer || width <= 0 || height <= 0) return false;
+    cv::Mat out;
+    if (!g_whiteboard_canvas->GetOverviewBlockingForCanvas(
+            canvas_idx, history_idx, cv::Size(width, height), out)) return false;
+    if (out.empty()) return false;
+    if (out.cols != width || out.rows != height) {
+        cv::Mat resized;
+        cv::resize(out, resized, cv::Size(width, height), 0, 0, cv::INTER_LINEAR);
+        return CopyBgrFrameToRgbaBuffer(resized, buffer, width, height);
+    }
+    return CopyBgrFrameToRgbaBuffer(out, buffer, width, height);
 }

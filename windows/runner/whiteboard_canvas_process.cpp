@@ -56,6 +56,12 @@ constexpr int kMaxEditMoves = 256;
 constexpr DWORD kEditCommandTimeoutMs = 2000;
 constexpr int kMaxMaskDataBytes = 20 * 1024 * 1024;  // 20 MB for node RGBA masks
 constexpr DWORD kMaskRequestTimeoutMs = 3000;
+constexpr int kMaxSubCanvases = 64;
+constexpr int kCanvasExportMaxWidth = 1920;
+constexpr int kCanvasExportMaxHeight = 1080;
+constexpr size_t kCanvasExportMaxBytes =
+    static_cast<size_t>(kCanvasExportMaxWidth) * kCanvasExportMaxHeight * 3;
+constexpr DWORD kCanvasExportTimeoutMs = 5000;
 bool g_is_helper_process = false;
 std::string g_helper_session_id;
 
@@ -152,6 +158,22 @@ struct SharedState {
     LONG mask_result_id = 0;
     LONG mask_result_bytes = 0;
     unsigned char mask_data[kMaxMaskDataBytes];
+
+    // Per-canvas history metadata (helper -> client)
+    LONG per_canvas_history_counts[kMaxSubCanvases] = {};
+    LONG per_canvas_peak_indices[kMaxSubCanvases] = {};
+
+    // Per-canvas overview export request/response (client -> helper -> client)
+    LONG canvas_export_request_id = 0;
+    LONG canvas_export_canvas_idx = -1;
+    LONG canvas_export_history_idx = -1;
+    LONG canvas_export_req_width = 0;
+    LONG canvas_export_req_height = 0;
+    LONG canvas_export_result_id = 0;
+    LONG canvas_export_result_ok = 0;
+    LONG canvas_export_width = 0;
+    LONG canvas_export_height = 0;
+    unsigned char canvas_export_bgr[kCanvasExportMaxBytes];
 };
 #pragma pack(pop)
 
@@ -186,6 +208,11 @@ struct HelperStateSnapshot {
     int edit_delete_ids[kMaxEditDeletes] = {};
     float edit_moves[kMaxEditMoves * 3] = {};
     int mask_request_id = 0;
+    int canvas_export_request_id = 0;
+    int canvas_export_canvas_idx = -1;
+    int canvas_export_history_idx = -1;
+    int canvas_export_req_width = 0;
+    int canvas_export_req_height = 0;
 };
 
 std::wstring Utf16FromUtf8(const std::string& utf8) {
@@ -285,6 +312,7 @@ public:
 
         int last_edit_request_id = 0;
         int last_mask_request_id = 0;
+        int last_canvas_export_request_id = 0;
         int edit_result_id = 0;
         bool edit_result_ready = false;
         bool edit_result_ok = false;
@@ -436,6 +464,38 @@ public:
                 }
             }
 
+            // Process canvas export request
+            if (snapshot.canvas_export_request_id > 0 &&
+                snapshot.canvas_export_request_id != last_canvas_export_request_id) {
+                int ew = snapshot.canvas_export_req_width;
+                int eh = snapshot.canvas_export_req_height;
+                if (ew <= 0 || eh <= 0) { ew = kCanvasExportMaxWidth; eh = kCanvasExportMaxHeight; }
+                ew = std::min(ew, kCanvasExportMaxWidth);
+                eh = std::min(eh, kCanvasExportMaxHeight);
+                cv::Mat export_img;
+                const bool export_ok = canvas.GetOverviewBlockingForCanvas(
+                    snapshot.canvas_export_canvas_idx,
+                    snapshot.canvas_export_history_idx,
+                    cv::Size(ew, eh),
+                    export_img);
+                last_canvas_export_request_id = snapshot.canvas_export_request_id;
+                if (WaitAndLock(mutex_.get(), 50)) {
+                    shared_->canvas_export_result_ok = export_ok ? 1 : 0;
+                    if (export_ok && !export_img.empty()) {
+                        const size_t bytes = static_cast<size_t>(export_img.cols) *
+                                             export_img.rows * 3;
+                        std::memcpy(shared_->canvas_export_bgr, export_img.data, bytes);
+                        shared_->canvas_export_width  = export_img.cols;
+                        shared_->canvas_export_height = export_img.rows;
+                    } else {
+                        shared_->canvas_export_width  = 0;
+                        shared_->canvas_export_height = 0;
+                    }
+                    shared_->canvas_export_result_id = snapshot.canvas_export_request_id;
+                    Unlock(mutex_.get());
+                }
+            }
+
             WriteResults(canvas,
                          last_viewport,
                          last_overview,
@@ -561,6 +621,13 @@ private:
         // Read mask request
         snapshot.mask_request_id = static_cast<int>(shared_->mask_request_id);
 
+        // Read canvas export request
+        snapshot.canvas_export_request_id = static_cast<int>(shared_->canvas_export_request_id);
+        snapshot.canvas_export_canvas_idx  = static_cast<int>(shared_->canvas_export_canvas_idx);
+        snapshot.canvas_export_history_idx = static_cast<int>(shared_->canvas_export_history_idx);
+        snapshot.canvas_export_req_width   = static_cast<int>(shared_->canvas_export_req_width);
+        snapshot.canvas_export_req_height  = static_cast<int>(shared_->canvas_export_req_height);
+
         Unlock(mutex_.get());
         return true;
     }
@@ -586,6 +653,17 @@ private:
         const cv::Size canvas_size = has_content ? canvas.GetCanvasSize() : cv::Size(0, 0);
         const int subcanvas_count = has_content ? canvas.GetSubCanvasCount() : 0;
         const int active_subcanvas = has_content ? canvas.GetActiveSubCanvasIndex() : -1;
+
+        // Pre-read per-canvas history metadata outside the shared mutex
+        int local_per_canvas_history_counts[kMaxSubCanvases] = {};
+        int local_per_canvas_peak_indices[kMaxSubCanvases];
+        std::fill(std::begin(local_per_canvas_peak_indices),
+                  std::end(local_per_canvas_peak_indices), -1);
+        const int per_canvas_n = std::min(subcanvas_count, kMaxSubCanvases);
+        for (int ci = 0; ci < per_canvas_n; ci++) {
+            local_per_canvas_history_counts[ci] = canvas.GetSubCanvasHistoryCount(ci);
+            local_per_canvas_peak_indices[ci]   = canvas.GetSubCanvasPeakIndex(ci);
+        }
 
         // Pre-read graph debug data outside the shared mutex
         int graph_node_count = 0;
@@ -775,6 +853,14 @@ private:
             shared_->edit_result_id = edit_result_id;
         }
 
+        // Write per-canvas history metadata
+        for (int ci = 0; ci < kMaxSubCanvases; ci++) {
+            shared_->per_canvas_history_counts[ci] =
+                ci < per_canvas_n ? local_per_canvas_history_counts[ci] : 0L;
+            shared_->per_canvas_peak_indices[ci] =
+                ci < per_canvas_n ? local_per_canvas_peak_indices[ci] : -1L;
+        }
+
         Unlock(mutex_.get());
     }
 
@@ -807,6 +893,7 @@ struct WhiteboardCanvasHelperClient::Impl {
     mutable std::atomic<int> next_graph_compare_request_id{1};
     mutable std::atomic<int> next_edit_request_id{1};
     mutable std::atomic<int> next_mask_request_id{1};
+    mutable std::atomic<int> next_canvas_export_request_id{1};
 
     ~Impl() {
         if (shared) {
@@ -1609,6 +1696,72 @@ int WhiteboardCanvasHelperClient::GetGraphNodeMasks(uint8_t* buffer, int max_byt
     }
 
     return 0;
+}
+
+int WhiteboardCanvasHelperClient::GetSubCanvasHistoryCount(int canvas_idx) const {
+    if (!IsReady() || canvas_idx < 0 || canvas_idx >= kMaxSubCanvases) return 0;
+    int count = 0;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        count = static_cast<int>(impl_->shared->per_canvas_history_counts[canvas_idx]);
+    });
+    return count;
+}
+
+int WhiteboardCanvasHelperClient::GetSubCanvasPeakIndex(int canvas_idx) const {
+    if (!IsReady() || canvas_idx < 0 || canvas_idx >= kMaxSubCanvases) return -1;
+    int idx = -1;
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        idx = static_cast<int>(impl_->shared->per_canvas_peak_indices[canvas_idx]);
+    });
+    return idx;
+}
+
+bool WhiteboardCanvasHelperClient::GetOverviewBlockingForCanvas(
+        int canvas_idx, int history_idx, cv::Size viewSize, cv::Mat& out_frame) {
+    if (!IsReady() || canvas_idx < 0) return false;
+    if (viewSize.width <= 0 || viewSize.height <= 0) return false;
+
+    const int request_id =
+        impl_->next_canvas_export_request_id.fetch_add(1, std::memory_order_relaxed);
+    const bool queued = impl_->WithLock(20, [&]() {
+        impl_->shared->canvas_export_request_id  = request_id;
+        impl_->shared->canvas_export_canvas_idx  = canvas_idx;
+        impl_->shared->canvas_export_history_idx = history_idx;
+        impl_->shared->canvas_export_req_width   = viewSize.width;
+        impl_->shared->canvas_export_req_height  = viewSize.height;
+        impl_->shared->canvas_export_result_id   = 0;
+        impl_->shared->canvas_export_result_ok   = 0;
+    });
+    if (!queued) return false;
+
+    impl_->SignalHelper();
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds(kCanvasExportTimeoutMs);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool ready = false;
+        bool ok = false;
+
+        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+            ready = impl_->shared->canvas_export_result_id == request_id;
+            if (ready) {
+                ok = impl_->shared->canvas_export_result_ok != 0;
+                const int w = static_cast<int>(impl_->shared->canvas_export_width);
+                const int h = static_cast<int>(impl_->shared->canvas_export_height);
+                if (ok && w > 0 && h > 0 &&
+                    w <= kCanvasExportMaxWidth && h <= kCanvasExportMaxHeight) {
+                    cv::Mat src(h, w, CV_8UC3, impl_->shared->canvas_export_bgr);
+                    src.copyTo(out_frame);
+                }
+            }
+        });
+
+        if (ready) return ok && !out_frame.empty();
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    return false;
 }
 
 void SetWhiteboardCanvasHelperProcessMode(bool helper_mode, const std::string& session_id) {

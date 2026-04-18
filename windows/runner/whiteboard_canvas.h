@@ -16,6 +16,7 @@
 
 #include <opencv2/opencv.hpp>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <memory>
 #include <mutex>
@@ -222,6 +223,10 @@ std::unordered_map<int, std::unique_ptr<DrawingNode>> nodes;
     std::vector<GraphHistoryEntry> graph_history;
     size_t graph_history_storage_bytes = 0;
     int selected_graph_history_index = -1;
+
+    // Multi-canvas lifecycle tracking (updated by worker thread, read under state_mutex_)
+    int last_node_added_frame = -1;
+    int last_match_frame = -1;
 };
 
 // ---------------------------------------------------------------------------
@@ -271,6 +276,14 @@ public:
     int  GetSubCanvasCount() const;
     int  GetActiveSubCanvasIndex() const;
     void SetActiveSubCanvas(int idx);
+    bool TryMergeGroupsNow();
+    int  GetLastLifecycleEventAndClear();
+
+    // --- Per-canvas history access (by vector index, no active-group side effects) ---
+    int  GetSubCanvasPeakIndex(int canvas_idx) const;
+    int  GetSubCanvasHistoryCount(int canvas_idx) const;
+    bool GetOverviewBlockingForCanvas(int canvas_idx, int history_idx,
+                                      cv::Size viewSize, cv::Mat& out_frame);
     int  GetSortedSubCanvasIndex(int pos) const;
     int  GetSortedPosition(int idx) const;
 
@@ -312,10 +325,10 @@ private:
     static constexpr bool  kEnableMotionGate            = true;
     // Fraction of changed pixels above which a frame is considered too shaky and skipped.
     // Lower = stricter (fewer frames accepted, less ghosting). Higher = more frames processed including shaky ones.
-    static constexpr float kMaxMotionFraction            = 0.05f;
+    static constexpr float kMaxMotionFraction            = 0.06f;
     // Once a low-motion frame is accepted, the gate enters a lock state and stays there
     // until a later frame exceeds this motion fraction. The unlocking frame is also skipped.
-    static constexpr float kOpenMotionGateLockFraction   = 0.11f;
+    static constexpr float kOpenMotionGateLockFraction   = 0.09f;
     // Frame is downscaled to this long-edge size before computing motion. Smaller = faster.
     static const int       kMotionLongEdge               = 256;
     // Pixel absolute-difference value above which a pixel is counted as "changed" for motion.
@@ -325,10 +338,10 @@ private:
     // --- Bootstrapping ---
     // Minimum foreground pixel count in a frame before a new sub-canvas is created.
     // Raise to avoid creating a canvas on noise/reflections. Lower to start capturing sooner.
-    static const int       kMinStrokePixelsForNewSC      = 500;
+    static const int       kMinStrokePixelsForNewSC      = 1500;
     // Graph must have at least this many nodes before matching is attempted.
     // Too low = matching starts before enough reference strokes exist, producing bad offsets.
-    static const int       kStableGraphNodeThreshold     = 5;
+    static const int       kStableGraphNodeThreshold     = 10;
 
 
     // --- Binarization ---
@@ -435,7 +448,7 @@ private:
     // A node is only absence-penalised if a matched node exists within this radius (canvas px).
     // This acts as a "visibility proxy": we only penalise what we can actually see.
     // Raise if nodes far from current strokes are decaying too fast.
-    static constexpr float kAbsenceNearbyRadius          = 100.0f;
+    static constexpr float kAbsenceNearbyRadius          = 150.0f;
     // Inward margin shrunk from the cropped frame edges to define the "observable region."
     // When -1, uses max(1, frame_dim/50) (~2%), which exceeds the reject-mask edge strips (~1%).
     // Nodes outside this region are protected from absence decay.
@@ -457,6 +470,15 @@ private:
     // --- Canvas defaults ---
     static const int kDefaultCanvasWidth  = 1920;
     static const int kDefaultCanvasHeight = 1080;
+
+    // --- Multi-canvas lifecycle ---
+    // Frames without any new node added before considering the canvas stale.
+    // At ~24fps processing this is ~10 seconds.
+    static const int   kStaleNoGrowthFrames  = 240;
+    // Minimum blob→node matches needed to re-attach to an existing group.
+    static const int   kReattachMinMatches   = 6;
+    // Seconds between automatic merge attempts.
+    static const int   kMergeIntervalSec     = 180;
 
     // -----------------------------------------------------------------------
     // Sub-canvas collection (protected by state_mutex_)
@@ -503,6 +525,19 @@ private:
     int processed_frame_id_ = 0;
 
     // -----------------------------------------------------------------------
+    // Multi-canvas lifecycle state
+    // -----------------------------------------------------------------------
+    // Packed: bits 0-7 = event type (0=None, 1=Reattach, 2=Spawned, 3=Merged),
+    //         bits 8-23 = target group index.  Read-and-clear via GetLastLifecycleEvent().
+    std::atomic<int> last_lifecycle_event_{0};
+    std::chrono::steady_clock::time_point last_merge_attempt_;
+    bool merge_timer_initialized_ = false;
+    // Consecutive frames where stale fired but re-attach failed. Only after
+    // kNewCanvasConfirmFrames consecutive failures do we actually spawn a new canvas.
+    int stale_reattach_fail_count_ = 0;
+    static const int kNewCanvasConfirmFrames = 1;
+
+    // -----------------------------------------------------------------------
     // Internal methods (run on worker_thread_)
     // -----------------------------------------------------------------------
     void WorkerLoop();
@@ -517,7 +552,8 @@ private:
     cv::Point2f GlobalShapePass(WhiteboardGroup& group,
                                 const std::vector<FrameBlob>& blobs);
     cv::Point2f MatchBlobsToGraph(WhiteboardGroup& group,
-                                   std::vector<FrameBlob>& blobs);
+                                   std::vector<FrameBlob>& blobs,
+                                   int partition_count = kHorizontalMatchPartitions);
     bool UpdateGraph(WhiteboardGroup& group, std::vector<FrameBlob>& blobs,
                      int current_frame, cv::Point2f frame_offset,
                      const cv::Rect& lecturer_canvas_rect = cv::Rect());
@@ -532,6 +568,13 @@ private:
                                  int current_frame);
     void UpdateGroupBounds(WhiteboardGroup& group);
     void RecordGraphHistorySnapshot(WhiteboardGroup& group, int frame_id);
+
+    // --- Multi-canvas lifecycle (called with state_mutex_ already held) ---
+    int  TryReattachToExistingGroup(std::vector<FrameBlob>& blobs, int current_frame);
+    void MergeGroupsLocked(int dst_idx, int src_idx, cv::Point2f offset);
+    void MergeGroupsWithMatchingLocked(int dst_idx, int src_idx);
+    bool TryMergeGroupsNowLocked();
+    void MaybeRunPeriodicMergeLocked();
 };
 
 // ---------------------------------------------------------------------------
@@ -627,4 +670,14 @@ extern "C" {
     __declspec(dllexport) uint64_t GetCanvasVersion();
     __declspec(dllexport) bool     GetCanvasFullResRgba(uint8_t* buffer, int max_w, int max_h,
                                                          int* out_w, int* out_h);
+
+    // Multi-canvas lifecycle
+    __declspec(dllexport) bool TryMergeGroupsNow();
+    __declspec(dllexport) int  GetLastLifecycleEvent();
+
+    // Per-canvas export (by vector index)
+    __declspec(dllexport) int  GetSubCanvasPeakIndex(int canvas_idx);
+    __declspec(dllexport) int  GetSubCanvasHistoryCount(int canvas_idx);
+    __declspec(dllexport) bool GetSubCanvasOverviewRgba(int canvas_idx, int history_idx,
+                                                         uint8_t* buffer, int width, int height);
 }
