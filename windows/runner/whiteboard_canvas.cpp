@@ -2148,6 +2148,7 @@ WhiteboardCanvas::WhiteboardCanvas() {
     stop_worker_ = false;
     duplicate_debug_mode_ = g_duplicate_debug_mode.load();
 
+#ifndef KAPTCHI_CLI
     if (!IsWhiteboardCanvasHelperProcess()) {
         auto client = std::make_unique<WhiteboardCanvasHelperClient>();
         if (client && client->Start()) {
@@ -2159,6 +2160,7 @@ WhiteboardCanvas::WhiteboardCanvas() {
             return;
         }
     }
+#endif
 
     worker_thread_ = std::thread(&WhiteboardCanvas::WorkerLoop, this);
 }
