@@ -247,6 +247,11 @@ public:
 
     // --- Frame scheduling ---
     void ProcessFrame(const cv::Mat& frame, const cv::Mat& person_mask);
+    // Synchronous variant for batch/CLI use: no worker thread, no queue.
+    // Accepts empty person_mask (treated as all-zero).
+    void ProcessFrameSync(const cv::Mat& frame,
+                          const cv::Mat& person_mask = cv::Mat());
+    std::string DumpProfile() const;
 
     // --- Viewport rendering ---
     bool GetViewport(float panX, float panY, float zoom,
@@ -531,6 +536,7 @@ private:
     //         bits 8-23 = target group index.  Read-and-clear via GetLastLifecycleEvent().
     std::atomic<int> last_lifecycle_event_{0};
     std::chrono::steady_clock::time_point last_merge_attempt_;
+    std::chrono::steady_clock::time_point last_profile_dump_;
     bool merge_timer_initialized_ = false;
     // Consecutive frames where stale fired but re-attach failed. Only after
     // kNewCanvasConfirmFrames consecutive failures do we actually spawn a new canvas.
@@ -575,6 +581,21 @@ private:
     void MergeGroupsWithMatchingLocked(int dst_idx, int src_idx);
     bool TryMergeGroupsNowLocked();
     void MaybeRunPeriodicMergeLocked();
+
+    // -----------------------------------------------------------------------
+    // Per-stage profiling (always-on; reset via Reset())
+    // -----------------------------------------------------------------------
+    struct StageProfile {
+        std::atomic<int64_t> total_us{0};
+        std::atomic<int64_t> calls{0};
+        void Reset() { total_us.store(0); calls.store(0); }
+    };
+    enum ProfStage {
+        kProfMotionGate = 0, kProfBinarize, kProfExtractBlobs,
+        kProfMatchBlobs, kProfUpdateGraph, kProfReattach, kProfTotal,
+        kProfCount
+    };
+    mutable StageProfile prof_[kProfCount];
 };
 
 // ---------------------------------------------------------------------------

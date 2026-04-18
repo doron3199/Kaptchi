@@ -243,67 +243,64 @@ int main(int argc, char** argv) {
     WhiteboardCanvas canvas;
 
     std::vector<PdfWriter::Page> pages;
-    double last_snapshot_sec = -1e9;  // Force first snapshot at t=0 if interval<=0
+    double last_snapshot_sec = -1e9;
 
     int frame_idx = 0;
+    int next_process_frame = 0;
     double prev_print_pct = -1.0;
 
-    while (frame_idx < static_cast<int>(total_frames)) {
-        // Seek to the desired frame
-        cap.set(cv::CAP_PROP_POS_FRAMES, static_cast<double>(frame_idx));
-        cv::Mat frame;
-        if (!cap.read(frame) || frame.empty()) {
-            // Try to continue to next step
-            frame_idx += frame_step;
-            continue;
-        }
+    // Sequential grab/retrieve: grab() decodes only the container header (cheap);
+    // retrieve() decodes the pixel data and is called only on frames we process.
+    // This avoids the per-frame seek that cap.set(POS_FRAMES) requires.
+    while (cap.grab()) {
+        const double current_sec = frame_idx / video_fps;
 
-        double current_sec = frame_idx / video_fps;
+        if (frame_idx == next_process_frame) {
+            cv::Mat frame;
+            cap.retrieve(frame);
 
-        // Feed frame to WhiteboardCanvas (no person mask in CLI mode)
-        canvas.ProcessFrame(frame, cv::Mat());
+            if (!frame.empty()) {
+                // ProcessFrameSync: synchronous, no worker thread, accepts empty mask.
+                canvas.ProcessFrameSync(frame);
 
-        // Print progress (throttled to avoid console spam)
-        double pct = frame_idx / total_frames;
-        if (pct - prev_print_pct >= 0.005) {
-            printProgress(pct, current_sec, total_seconds);
-            prev_print_pct = pct;
-        }
+                // Progress (throttled)
+                double pct = frame_idx / total_frames;
+                if (pct - prev_print_pct >= 0.005) {
+                    printProgress(pct, current_sec, total_seconds);
+                    prev_print_pct = pct;
+                }
 
-        // Snapshot check
-        if (current_sec - last_snapshot_sec >= interval_sec) {
-            // GetOverviewBlocking waits for the worker thread to finish
-            cv::Mat overview;
-            if (canvas.GetOverviewBlocking(cv::Size(1920, 1080), overview)
-                && canvas.HasContent()
-                && !overview.empty()) {
+                // Snapshot check
+                if (current_sec - last_snapshot_sec >= interval_sec) {
+                    cv::Mat overview;
+                    if (canvas.GetOverviewBlocking(cv::Size(1920, 1080), overview)
+                        && canvas.HasContent()
+                        && !overview.empty()) {
 
-                // Convert BGR→RGB for JPEG encoding (PDF /DeviceRGB)
-                cv::Mat rgb;
-                cv::cvtColor(overview, rgb, cv::COLOR_BGR2RGB);
-
-                std::vector<uint8_t> jpeg_buf;
-                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 92};
-                if (cv::imencode(".jpg", rgb, jpeg_buf, params)) {
-                    pages.push_back({
-                        jpeg_buf,
-                        overview.cols,
-                        overview.rows
-                    });
-                    int mm = static_cast<int>(current_sec) / 60;
-                    int ss = static_cast<int>(current_sec) % 60;
-                    std::cout << "\n  Snapshot at "
-                              << std::setfill('0') << std::setw(2) << mm << ":"
-                              << std::setw(2) << ss
-                              << " → page " << pages.size() << "\n";
-                    std::cout << std::flush;
-                    prev_print_pct = -1.0;  // Force progress reprint
+                        cv::Mat rgb;
+                        cv::cvtColor(overview, rgb, cv::COLOR_BGR2RGB);
+                        std::vector<uint8_t> jpeg_buf;
+                        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 92};
+                        if (cv::imencode(".jpg", rgb, jpeg_buf, params)) {
+                            pages.push_back({jpeg_buf, overview.cols, overview.rows});
+                            int mm = static_cast<int>(current_sec) / 60;
+                            int ss = static_cast<int>(current_sec) % 60;
+                            std::cout << "\n  Snapshot at "
+                                      << std::setfill('0') << std::setw(2) << mm << ":"
+                                      << std::setw(2) << ss
+                                      << " \xe2\x86\x92 page " << pages.size() << "\n"
+                                      << std::flush;
+                            prev_print_pct = -1.0;
+                        }
+                    }
+                    last_snapshot_sec = current_sec;
                 }
             }
-            last_snapshot_sec = current_sec;
+
+            next_process_frame += frame_step;
         }
 
-        frame_idx += frame_step;
+        ++frame_idx;
     }
 
     // Final snapshot
@@ -331,6 +328,8 @@ int main(int argc, char** argv) {
         std::cerr << "No content captured. Is the video a whiteboard recording?\n";
         return 1;
     }
+
+    std::cout << canvas.DumpProfile();
 
     std::cout << "Writing " << pages.size() << " page(s) to " << output_path << "...\n";
     if (!PdfWriter::write(output_path, pages)) {

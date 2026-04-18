@@ -34,6 +34,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <numeric>
@@ -62,6 +63,20 @@ std::atomic<float> g_absence_score_seen_threshold{kAbsenceScoreSeenThreshold};
 namespace {
 
 using SteadyClock = std::chrono::steady_clock;
+
+struct ScopeTimer {
+    SteadyClock::time_point start_ = SteadyClock::now();
+    std::atomic<int64_t>& us_;
+    std::atomic<int64_t>& n_;
+    ScopeTimer(std::atomic<int64_t>& us, std::atomic<int64_t>& n) : us_(us), n_(n) {}
+    ~ScopeTimer() {
+        us_.fetch_add(
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                SteadyClock::now() - start_).count(),
+            std::memory_order_relaxed);
+        n_.fetch_add(1, std::memory_order_relaxed);
+    }
+};
 
 static constexpr int kEnhancePadding = 10;
 static constexpr float kWhiteboardSideCropFraction = 0.03f;
@@ -2281,6 +2296,49 @@ void WhiteboardCanvas::ProcessFrame(const cv::Mat& frame, const cv::Mat& person_
     queue_cv_.notify_one();
 }
 
+void WhiteboardCanvas::ProcessFrameSync(const cv::Mat& frame,
+                                         const cv::Mat& person_mask) {
+    if (frame.empty()) return;
+    cv::Mat mask;
+    if (person_mask.empty()) {
+        mask = cv::Mat::zeros(frame.size(), CV_8UC1);
+    } else {
+        if (person_mask.size() != frame.size() || person_mask.type() != CV_8UC1) return;
+        mask = person_mask;
+    }
+    ProcessFrameInternal(frame, mask);
+}
+
+std::string WhiteboardCanvas::DumpProfile() const {
+    static const char* names[kProfCount] = {
+        "MotionGate ", "Binarize   ", "ExtractBlobs",
+        "MatchBlobs ", "UpdateGraph", "Reattach   ", "TOTAL      "
+    };
+    const int64_t total_total_us = std::max<int64_t>(1, prof_[kProfTotal].total_us.load());
+    std::ostringstream ss;
+    ss << "\n--- Pipeline Profile ---\n";
+    ss << std::left  << std::setw(14) << "Stage"
+       << std::right << std::setw(8)  << "Calls"
+       << std::setw(12) << "Total ms"
+       << std::setw(10) << "Avg ms"
+       << std::setw(8)  << "% Total"
+       << "\n" << std::string(52, '-') << "\n";
+    for (int i = 0; i < kProfCount; ++i) {
+        const int64_t calls    = prof_[i].calls.load();
+        const int64_t total_us = prof_[i].total_us.load();
+        const double total_ms  = total_us / 1000.0;
+        const double avg_ms    = (calls > 0) ? (total_ms / calls) : 0.0;
+        const double pct       = (100.0 * total_us) / total_total_us;
+        ss << std::left  << std::setw(14) << names[i]
+           << std::right << std::setw(8)  << calls
+           << std::fixed << std::setprecision(1)
+           << std::setw(12) << total_ms
+           << std::setw(10) << avg_ms
+           << std::setw(8)  << pct << "\n";
+    }
+    return ss.str();
+}
+
 bool WhiteboardCanvas::GetViewport(float panX, float panY, float zoom,
                                     cv::Size viewSize, cv::Mat& out_frame) {
     if (remote_process_ && helper_client_)
@@ -2368,6 +2426,7 @@ void WhiteboardCanvas::Reset() {
     BumpCanvasVersion();
     frame_w_ = frame_h_ = 0;
     processed_frame_id_ = 0;
+    for (auto& p : prof_) p.Reset();
 }
 
 void WhiteboardCanvas::RecordGraphHistorySnapshot(WhiteboardGroup& group,
@@ -2591,6 +2650,7 @@ bool WhiteboardCanvas::GetOverviewBlockingForCanvas(int canvas_idx, int history_
 // ============================================================================
 
 void WhiteboardCanvas::WorkerLoop() {
+    last_profile_dump_ = SteadyClock::now();
     while (true) {
         CanvasWorkItem item;
         {
@@ -2606,6 +2666,11 @@ void WhiteboardCanvas::WorkerLoop() {
             OutputDebugStringA((std::string("[WhiteboardCanvas] CV: ") + e.what() + "\n").c_str());
         } catch (...) {
             OutputDebugStringA("[WhiteboardCanvas] Unknown exception\n");
+        }
+        auto now = SteadyClock::now();
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - last_profile_dump_).count() >= 60) {
+            std::cerr << DumpProfile() << std::flush;
+            last_profile_dump_ = now;
         }
     }
 }
@@ -2664,6 +2729,8 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
     const cv::Rect roi = ComputeProcessingRoi(uncut_frame.size());
     if (roi.width <= 0 || roi.height <= 0) return;
 
+    ScopeTimer _total(prof_[kProfTotal].total_us, prof_[kProfTotal].calls);
+
     cv::Mat frame = uncut_frame(roi);
     cv::Mat cropped_mask = CropPersonMaskForProcessing(person_mask, roi);
 
@@ -2679,18 +2746,28 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
 
     // [1] Motion gate
     float mf = 0.0f; bool mth = false;
-    if (ApplyMotionGate(gray, mf, mth)) return;
+    {
+        ScopeTimer _t(prof_[kProfMotionGate].total_us, prof_[kProfMotionGate].calls);
+        if (ApplyMotionGate(gray, mf, mth)) return;
+    }
 
     // [2] Binarize
     int stroke_px = 0;
-    cv::Mat binary = BuildBinaryMask(gray, no_update_mask, stroke_px);
+    cv::Mat binary;
+    {
+        ScopeTimer _t(prof_[kProfBinarize].total_us, prof_[kProfBinarize].calls);
+        binary = BuildBinaryMask(gray, no_update_mask, stroke_px);
+    }
 
     // [3] Extract blobs
-    std::vector<FrameBlob> blobs = ExtractFrameBlobs(binary, frame);
-    EnhanceFrameBlobs(blobs, frame, g_canvas_enhance_threshold.load());
-
-    if (kEnableFrameStrokeRejectFilter && !reject_mask.empty())
-        FilterBlobsForCanvas(blobs, reject_mask, kFrameStrokeRejectMinWidth);
+    std::vector<FrameBlob> blobs;
+    {
+        ScopeTimer _t(prof_[kProfExtractBlobs].total_us, prof_[kProfExtractBlobs].calls);
+        blobs = ExtractFrameBlobs(binary, frame);
+        EnhanceFrameBlobs(blobs, frame, g_canvas_enhance_threshold.load());
+        if (kEnableFrameStrokeRejectFilter && !reject_mask.empty())
+            FilterBlobsForCanvas(blobs, reject_mask, kFrameStrokeRejectMinWidth);
+    }
 
     std::lock_guard<std::mutex> state_lock(state_mutex_);
 
@@ -2715,62 +2792,67 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
     cv::Point2f frame_offset(0, 0);
     if (graph_ready && !blobs.empty()) {
         auto& group = *groups_[active_group_idx_];
+        ScopeTimer _t(prof_[kProfMatchBlobs].total_us, prof_[kProfMatchBlobs].calls);
         frame_offset = MatchBlobsToGraph(group, blobs);
     }
 
     // [5] Update graph or bootstrap
-    if (!has_active) {
-        if (!mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
+    {
+        ScopeTimer _t(prof_[kProfUpdateGraph].total_us, prof_[kProfUpdateGraph].calls);
+        if (!has_active) {
+            if (!mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
+                CreateSubCanvas(frame, binary, blobs, current_frame);
+                recompute_has_content();
+            }
+        } else if (!graph_ready) {
+            auto& group = *groups_[active_group_idx_];
+            if (!mth && !blobs.empty()) {
+                SeedGroupFromFrameBlobs(group, blobs, current_frame);
+                recompute_has_content();
+            }
+        } else {
+            auto& group = *groups_[active_group_idx_];
+            const cv::Rect lecturer_canvas =
+                TranslateFrameRectToCanvas(lecturer_rect, frame_offset);
+            if (UpdateGraph(group, blobs, current_frame, frame_offset, lecturer_canvas))
+                recompute_has_content();
+        }
+
+        if (groups_.empty() && !mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
             CreateSubCanvas(frame, binary, blobs, current_frame);
             recompute_has_content();
         }
-    } else if (!graph_ready) {
-        auto& group = *groups_[active_group_idx_];
-        if (!mth && !blobs.empty()) {
-            SeedGroupFromFrameBlobs(group, blobs, current_frame);
-            recompute_has_content();
-        }
-    } else {
-        auto& group = *groups_[active_group_idx_];
-        const cv::Rect lecturer_canvas =
-            TranslateFrameRectToCanvas(lecturer_rect, frame_offset);
-        if (UpdateGraph(group, blobs, current_frame, frame_offset, lecturer_canvas))
-            recompute_has_content();
-    }
 
-    if (groups_.empty() && !mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
-        CreateSubCanvas(frame, binary, blobs, current_frame);
-        recompute_has_content();
-    }
-
-    // --- Stale canvas detection ---
-    // When the active group has not received any new nodes for kStaleNoGrowthFrames
-    // and there are strokes on-screen, try to re-attach for kNewCanvasConfirmFrames
-    // consecutive frames before actually spawning a new canvas.
-    if (graph_ready && !mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
-        const auto& ag = *groups_[active_group_idx_];
-        const int no_growth = (ag.last_node_added_frame >= 0)
-            ? (current_frame - ag.last_node_added_frame)
-            : current_frame;
-        if (no_growth > kStaleNoGrowthFrames) {
-            const int reattach = TryReattachToExistingGroup(blobs, current_frame);
-            if (reattach >= 0) {
-                stale_reattach_fail_count_ = 0;
-            } else {
-                stale_reattach_fail_count_++;
-                if (stale_reattach_fail_count_ >= kNewCanvasConfirmFrames) {
-                    stale_reattach_fail_count_ = 0;
-                    CreateSubCanvas(frame, binary, blobs, current_frame);
-                    recompute_has_content();
-                    last_lifecycle_event_.store(2 | (active_group_idx_ << 8),
-                                                std::memory_order_relaxed);
+        // --- Stale canvas detection ---
+        if (graph_ready && !mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
+            const auto& ag = *groups_[active_group_idx_];
+            const int no_growth = (ag.last_node_added_frame >= 0)
+                ? (current_frame - ag.last_node_added_frame)
+                : current_frame;
+            if (no_growth > kStaleNoGrowthFrames) {
+                int reattach;
+                {
+                    ScopeTimer _r(prof_[kProfReattach].total_us, prof_[kProfReattach].calls);
+                    reattach = TryReattachToExistingGroup(blobs, current_frame);
                 }
+                if (reattach >= 0) {
+                    stale_reattach_fail_count_ = 0;
+                } else {
+                    stale_reattach_fail_count_++;
+                    if (stale_reattach_fail_count_ >= kNewCanvasConfirmFrames) {
+                        stale_reattach_fail_count_ = 0;
+                        CreateSubCanvas(frame, binary, blobs, current_frame);
+                        recompute_has_content();
+                        last_lifecycle_event_.store(2 | (active_group_idx_ << 8),
+                                                    std::memory_order_relaxed);
+                    }
+                }
+            } else {
+                stale_reattach_fail_count_ = 0;
             }
         } else {
             stale_reattach_fail_count_ = 0;
         }
-    } else {
-        stale_reattach_fail_count_ = 0;
     }
 
     // MaybeRunPeriodicMergeLocked();
