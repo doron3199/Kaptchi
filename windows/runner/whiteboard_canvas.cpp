@@ -2868,26 +2868,42 @@ std::vector<FrameBlob> WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary
     if (binary.empty()) return result;
 
     cv::Mat labels, stats, centroids;
-    int nlabels = cv::connectedComponentsWithStats(binary, labels, stats, centroids);
+    int nlabels = cv::connectedComponentsWithStats(
+        binary, labels, stats, centroids, 8, CV_32S, cv::CCL_GRANA);
     if (nlabels <= 1) return result;
 
-    struct SC { int label; cv::Rect bbox; cv::Point2f centroid; double area;
-                std::vector<cv::Point> contour; };
-    std::vector<SC> components;
-    components.reserve(nlabels - 1);
+    const float max_dim = (frame_h_ > 0)
+        ? (float)frame_h_ * kMaxBlobDimensionFraction : 0.0f;
+    result.reserve(nlabels - 1);
 
     for (int i = 1; i < nlabels; i++) {
+        // ---- Cheap stats-only filters first (skip expensive work on rejects) ----
         int area = stats.at<int>(i, cv::CC_STAT_AREA);
         if (area < kMinContourArea) continue;
+
+        int bw = stats.at<int>(i, cv::CC_STAT_WIDTH);
+        int bh = stats.at<int>(i, cv::CC_STAT_HEIGHT);
+
+        // Elongation filter (whiteboard edge lines)
+        float le = (float)std::max(bw, bh);
+        float se = (float)std::min(bw, bh);
+        if (se > 0 && le / se > kMaxAllowedRectangle) continue;
+
+        // Size-vs-frame filter (whiteboard edges / borders)
+        if (max_dim > 0 && ((float)bw > max_dim || (float)bh > max_dim)) continue;
+
         int bx = std::max(0, stats.at<int>(i, cv::CC_STAT_LEFT));
         int by = std::max(0, stats.at<int>(i, cv::CC_STAT_TOP));
-        int bw = std::min(stats.at<int>(i, cv::CC_STAT_WIDTH),  binary.cols - bx);
-        int bh = std::min(stats.at<int>(i, cv::CC_STAT_HEIGHT), binary.rows - by);
+        bw = std::min(bw, binary.cols - bx);
+        bh = std::min(bh, binary.rows - by);
         if (bw <= 0 || bh <= 0) continue;
+
         cv::Rect bbox(bx, by, bw, bh);
+
+        // Build the per-component mask once and reuse it downstream.
         cv::Mat cc_mask = (labels(bbox) == i);
-        cv::Point2f lc = ComputeGravityCenter(cc_mask);
-        cv::Point2f gc(lc.x + bx, lc.y + by);
+
+        // Pick the largest contour.
         std::vector<std::vector<cv::Point>> contours;
         cv::findContours(cc_mask, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
         if (contours.empty()) continue;
@@ -2896,40 +2912,21 @@ std::vector<FrameBlob> WhiteboardCanvas::ExtractFrameBlobs(const cv::Mat& binary
             double ca = cv::contourArea(contours[ci]);
             if (ca > best_ca) { best_ca = ca; best_ci = ci; }
         }
-        components.push_back({i, bbox, gc, best_ca, contours[best_ci]});
-    }
-    if (components.empty()) return result;
 
-    for (const auto& component : components) {
-        cv::Rect g_bbox = component.bbox;
-
-        // Skip very elongated blobs (whiteboard edge lines)
-        float le = (float)std::max(g_bbox.width, g_bbox.height);
-        float se = (float)std::min(g_bbox.width, g_bbox.height);
-        if (se > 0 && le / se > kMaxAllowedRectangle) continue;
-
-        // Skip blobs that span most of the frame (whiteboard edges / borders)
-        if (frame_h_ > 0) {
-            float max_dim = frame_h_ * kMaxBlobDimensionFraction;
-            if (g_bbox.width > max_dim || g_bbox.height > max_dim) continue;
-        }
-
-        cv::Mat g_mask = cv::Mat::zeros(g_bbox.size(), CV_8UC1);
-        cv::Mat cc_mask = (labels(component.bbox) == component.label);
-        cc_mask.copyTo(g_mask, cc_mask);
+        // Centroid (once).
+        cv::Point2f lc = ComputeGravityCenter(cc_mask);
 
         FrameBlob blob;
-        blob.bbox = g_bbox;
-        blob.binary_mask = g_mask;
-        cv::Point2f lc = ComputeGravityCenter(g_mask);
-        blob.centroid = lc + cv::Point2f((float)g_bbox.x, (float)g_bbox.y);
-        blob.contour = component.contour;
-        blob.area = component.area;
+        blob.bbox         = bbox;
+        blob.binary_mask  = cc_mask;
+        blob.centroid     = lc + cv::Point2f((float)bx, (float)by);
+        blob.contour      = std::move(contours[best_ci]);
+        blob.area         = best_ca;
         cv::Moments m = cv::moments(blob.contour);
         cv::HuMoments(m, blob.hu);
         PopulateHuCache(blob.binary_mask, blob.hu,
                         blob.hu_smooth, blob.hu_smooth_valid, blob.hu_log);
-        if (!frame_bgr.empty()) blob.color_pixels = frame_bgr(g_bbox).clone();
+        if (!frame_bgr.empty()) blob.color_pixels = frame_bgr(bbox).clone();
         result.push_back(std::move(blob));
     }
     return result;
