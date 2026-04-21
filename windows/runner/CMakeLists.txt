@@ -17,6 +17,8 @@ add_executable(${BINARY_NAME} WIN32
   "whiteboard_canvas_process.cpp"
   "whiteboard_enhance.cpp"
   "virtual_display_manager.cpp"
+  "ai_canvas_checker.cpp"
+  "http_client.cpp"
   "${FLUTTER_MANAGED_DIR}/generated_plugin_registrant.cc"
   "Runner.rc"
   "runner.exe.manifest"
@@ -103,7 +105,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app flutter_wrapper_plugin)
-target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "d3d11.lib" "dxgi.lib" "setupapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "d3d11.lib" "dxgi.lib" "setupapi.lib" "winhttp.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.
@@ -118,6 +120,8 @@ add_executable(kaptchi_cli
   "whiteboard_canvas.cpp"
   "whiteboard_canvas_process.cpp"
   "whiteboard_enhance.cpp"
+  "ai_canvas_checker.cpp"
+  "http_client.cpp"
 )
 
 target_include_directories(kaptchi_cli PRIVATE "${OPENCV_ROOT}/include")
@@ -126,6 +130,7 @@ target_include_directories(kaptchi_cli PRIVATE "${CMAKE_SOURCE_DIR}")
 target_link_libraries(kaptchi_cli PRIVATE
   debug   "${OPENCV_ROOT}/x64/vc16/lib/opencv_world4120d.lib"
   optimized "${OPENCV_ROOT}/x64/vc16/lib/opencv_world4120.lib"
+  "winhttp.lib"
 )
 
 target_compile_definitions(kaptchi_cli PRIVATE "NOMINMAX" "KAPTCHI_CLI=1")

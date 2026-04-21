@@ -75,6 +75,8 @@ struct SharedState {
     LONG render_mode = static_cast<LONG>(CanvasRenderMode::kStroke);
     LONG whiteboard_debug = 0;
     LONG duplicate_debug_mode = 0;
+    LONG ai_enabled = 1;
+    LONG ai_status = 1;  // AICheckStatus int, written by child, read by parent
     LONG reset_requested = 0;
     LONG pending_active_subcanvas = kNoSubCanvasRequest;
     float pan_x = 0.5f;
@@ -184,6 +186,7 @@ struct HelperStateSnapshot {
     CanvasRenderMode render_mode = CanvasRenderMode::kStroke;
     bool debug_enabled = false;
     bool duplicate_debug_enabled = false;
+    bool ai_enabled = true;
     bool reset_requested = false;
     int requested_active_subcanvas = kNoSubCanvasRequest;
     float pan_x = 0.5f;
@@ -331,6 +334,8 @@ public:
 
             g_whiteboard_debug.store(snapshot.debug_enabled);
             g_duplicate_debug_mode.store(snapshot.duplicate_debug_enabled);
+            if (g_ai_checker.IsEnabled() != snapshot.ai_enabled)
+                g_ai_checker.SetEnabled(snapshot.ai_enabled);
             const float previous_seen_threshold = g_absence_score_seen_threshold.load();
             g_absence_score_seen_threshold.store(snapshot.absence_score_seen_threshold);
             g_canvas_enhance_threshold.store(snapshot.enhance_threshold);
@@ -564,6 +569,7 @@ private:
             : CanvasRenderMode::kStroke;
         snapshot.debug_enabled = shared_->whiteboard_debug != 0;
         snapshot.duplicate_debug_enabled = shared_->duplicate_debug_mode != 0;
+        snapshot.ai_enabled = shared_->ai_enabled != 0;
         snapshot.reset_requested = shared_->reset_requested != 0;
         snapshot.requested_active_subcanvas = shared_->pending_active_subcanvas;
         snapshot.pan_x = shared_->pan_x;
@@ -725,6 +731,7 @@ private:
         if (!WaitAndLock(mutex_.get(), 50)) return;
 
         shared_->helper_alive = 1;
+        shared_->ai_status = static_cast<LONG>(g_ai_checker.GetStatus());
         shared_->has_content = has_content ? 1 : 0;
         shared_->canvas_width = canvas_size.width;
         shared_->canvas_height = canvas_size.height;
@@ -1250,6 +1257,23 @@ void WhiteboardCanvasHelperClient::SetCanvasViewMode(bool mode) {
         impl_->RefreshCachedStateUnsafe();
     });
     impl_->SignalHelper();
+}
+
+void WhiteboardCanvasHelperClient::SetAIEnabled(bool enabled) {
+    if (!IsReady()) return;
+    impl_->WithLock(20, [&]() {
+        impl_->shared->ai_enabled = enabled ? 1 : 0;
+    });
+    impl_->SignalHelper();
+}
+
+int WhiteboardCanvasHelperClient::GetAIStatus() const {
+    if (!IsReady()) return 0;  // kDisabled
+    int status = 1;  // kIdle
+    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
+        status = static_cast<int>(impl_->shared->ai_status);
+    });
+    return status;
 }
 
 void WhiteboardCanvasHelperClient::SetRenderMode(CanvasRenderMode mode) {

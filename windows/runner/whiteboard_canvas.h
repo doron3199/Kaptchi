@@ -14,6 +14,8 @@
 //   UI thread      -> GetViewport()   (mutex, never stalls camera)
 // ============================================================================
 
+#include "ai_canvas_checker.h"
+
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <chrono>
@@ -275,6 +277,8 @@ public:
     }
     void RefreshSeenThresholdVisibility();
     void SyncRuntimeSettings();
+    void SetAIMode(bool enabled);
+    int  GetHelperAIStatus() const;
     void InvalidateRenderCaches();
 
     // --- Sub-canvas navigation ---
@@ -603,6 +607,7 @@ private:
 // ---------------------------------------------------------------------------
 extern WhiteboardCanvas*  g_whiteboard_canvas;
 extern std::atomic<bool>  g_whiteboard_enabled;
+extern AICanvasChecker    g_ai_checker;
 extern std::atomic<float> g_canvas_pan_x;
 extern std::atomic<float> g_canvas_pan_y;
 extern std::atomic<float> g_canvas_zoom;
@@ -695,6 +700,12 @@ extern "C" {
     // Multi-canvas lifecycle
     __declspec(dllexport) bool TryMergeGroupsNow();
     __declspec(dllexport) int  GetLastLifecycleEvent();
+
+    // AI canvas checker
+    __declspec(dllexport) void SetAIModeEnabled(bool enabled);
+    __declspec(dllexport) bool IsAIModeEnabled();
+    __declspec(dllexport) int  GetAIModeStatus();     // returns AICheckStatus int value
+    __declspec(dllexport) void TriggerLMSStart();
 
     // Per-canvas export (by vector index)
     __declspec(dllexport) int  GetSubCanvasPeakIndex(int canvas_idx);

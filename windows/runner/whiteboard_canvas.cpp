@@ -47,6 +47,7 @@
 
 WhiteboardCanvas*  g_whiteboard_canvas  = nullptr;
 std::atomic<bool>  g_whiteboard_enabled{false};
+AICanvasChecker    g_ai_checker;
 std::atomic<float> g_canvas_pan_x{0.5f};
 std::atomic<float> g_canvas_pan_y{0.5f};
 std::atomic<float> g_canvas_zoom{1.0f};
@@ -2185,6 +2186,19 @@ void WhiteboardCanvas::SyncRuntimeSettings() {
     }
 }
 
+void WhiteboardCanvas::SetAIMode(bool enabled) {
+    if (remote_process_ && helper_client_) {
+        helper_client_->SetAIEnabled(enabled);
+    }
+}
+
+int WhiteboardCanvas::GetHelperAIStatus() const {
+    if (remote_process_ && helper_client_) {
+        return helper_client_->GetAIStatus();
+    }
+    return static_cast<int>(g_ai_checker.GetStatus());
+}
+
 void WhiteboardCanvas::RefreshSeenThresholdVisibility() {
     if (remote_process_ && helper_client_) {
         SyncRuntimeSettings();
@@ -2803,8 +2817,22 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
         ScopeTimer _t(prof_[kProfUpdateGraph].total_us, prof_[kProfUpdateGraph].calls);
         if (!has_active) {
             if (!mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
-                CreateSubCanvas(frame, binary, blobs, current_frame);
-                recompute_has_content();
+                if (g_ai_checker.IsEnabled() && !g_ai_checker.IsSeedApproved()) {
+                    // Debug: log AI gate status every ~300 frames to avoid spam
+                    if (current_frame % 300 == 0) {
+                        fprintf(stderr, "[WBC] Hook1: AI GATING initial SC (frame=%d, status=%d, approved=%d)\n",
+                                current_frame, (int)g_ai_checker.GetStatus(), (int)g_ai_checker.IsSeedApproved());
+                        fflush(stderr);
+                    }
+                    g_ai_checker.MaybeRequestSeedCheck(frame);
+                } else {
+                    fprintf(stderr, "[WBC] Hook1: CREATING initial SC (frame=%d, ai_enabled=%d, approved=%d)\n",
+                            current_frame, (int)g_ai_checker.IsEnabled(), (int)g_ai_checker.IsSeedApproved());
+                    fflush(stderr);
+                    CreateSubCanvas(frame, binary, blobs, current_frame);
+                    g_ai_checker.ClearSeedApproval();
+                    recompute_has_content();
+                }
             }
         } else if (!graph_ready) {
             auto& group = *groups_[active_group_idx_];
@@ -2821,8 +2849,20 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
         }
 
         if (groups_.empty() && !mth && stroke_px >= kMinStrokePixelsForNewSC && !blobs.empty()) {
-            CreateSubCanvas(frame, binary, blobs, current_frame);
-            recompute_has_content();
+            if (g_ai_checker.IsEnabled() && !g_ai_checker.IsSeedApproved()) {
+                if (current_frame % 300 == 0) {
+                    fprintf(stderr, "[WBC] Hook2: AI GATING empty-groups SC (frame=%d, status=%d)\n",
+                            current_frame, (int)g_ai_checker.GetStatus());
+                    fflush(stderr);
+                }
+                g_ai_checker.MaybeRequestSeedCheck(frame);
+            } else {
+                fprintf(stderr, "[WBC] Hook2: CREATING SC from empty groups (frame=%d)\n", current_frame);
+                fflush(stderr);
+                CreateSubCanvas(frame, binary, blobs, current_frame);
+                g_ai_checker.ClearSeedApproval();
+                recompute_has_content();
+            }
         }
 
         // --- Stale canvas detection ---
@@ -2842,11 +2882,53 @@ void WhiteboardCanvas::ProcessFrameInternal(const cv::Mat& uncut_frame,
                 } else {
                     stale_reattach_fail_count_++;
                     if (stale_reattach_fail_count_ >= kNewCanvasConfirmFrames) {
-                        stale_reattach_fail_count_ = 0;
-                        CreateSubCanvas(frame, binary, blobs, current_frame);
-                        recompute_has_content();
-                        last_lifecycle_event_.store(2 | (active_group_idx_ << 8),
-                                                    std::memory_order_relaxed);
+                        fprintf(stderr, "[WBC] Hook3: stale threshold reached (frame=%d, ai_enabled=%d, pending=%d, passed=%d)\n",
+                                current_frame, (int)g_ai_checker.IsEnabled(),
+                                (int)g_ai_checker.IsDuplicateCheckPending(),
+                                (int)g_ai_checker.IsDuplicateCheckPassed());
+                        fflush(stderr);
+                        if (g_ai_checker.IsEnabled()) {
+                            if (g_ai_checker.IsDuplicateCheckPending()) {
+                                // Check in flight — keep waiting, don't reset counter
+                                stale_reattach_fail_count_ = kNewCanvasConfirmFrames;
+                            } else if (g_ai_checker.IsDuplicateCheckPassed()) {
+                                // AI says content is new — proceed
+                                fprintf(stderr, "[WBC] Hook3: dupe check PASSED -> creating new SC\n");
+                                fflush(stderr);
+                                stale_reattach_fail_count_ = 0;
+                                g_ai_checker.ResetDuplicateCheck();
+                                CreateSubCanvas(frame, binary, blobs, current_frame);
+                                recompute_has_content();
+                                last_lifecycle_event_.store(2 | (active_group_idx_ << 8),
+                                                            std::memory_order_relaxed);
+                            } else {
+                                // Queue a duplicate check using existing canvas overviews
+                                std::vector<cv::Mat> overviews;
+                                for (int gi = 0; gi < (int)groups_.size(); ++gi) {
+                                    if (gi == active_group_idx_) continue;
+                                    const auto& g = *groups_[gi];
+                                    const cv::Mat& cache = g.stroke_render_cache.empty()
+                                        ? g.raw_render_cache : g.stroke_render_cache;
+                                    if (!cache.empty()) {
+                                        cv::Mat thumb;
+                                        cv::resize(cache, thumb, cv::Size(256, 144),
+                                                   0, 0, cv::INTER_AREA);
+                                        overviews.push_back(thumb);
+                                    }
+                                }
+                                fprintf(stderr, "[WBC] Hook3: queuing dupe check (overviews=%zu)\n",
+                                        overviews.size());
+                                fflush(stderr);
+                                g_ai_checker.MaybeRequestDuplicateCheck(frame, overviews);
+                                stale_reattach_fail_count_ = kNewCanvasConfirmFrames;
+                            }
+                        } else {
+                            stale_reattach_fail_count_ = 0;
+                            CreateSubCanvas(frame, binary, blobs, current_frame);
+                            recompute_has_content();
+                            last_lifecycle_event_.store(2 | (active_group_idx_ << 8),
+                                                        std::memory_order_relaxed);
+                        }
                     }
                 }
             } else {
@@ -4376,12 +4458,16 @@ void SetPanoramaEnabled(bool enabled) {
         }
         g_whiteboard_canvas->SyncRuntimeSettings();
         g_whiteboard_enabled.store(true);
+        // Propagate AI enabled state to helper subprocess (if running)
+        if (g_whiteboard_canvas) g_whiteboard_canvas->SetAIMode(g_ai_checker.IsEnabled());
     } else {
         g_whiteboard_enabled.store(false);
         if (g_whiteboard_canvas) {
             g_whiteboard_canvas->SetCanvasViewMode(false);
             g_whiteboard_canvas->Reset();
+            g_whiteboard_canvas->SetAIMode(false);
         }
+        g_ai_checker.SetEnabled(false);
     }
 #ifndef KAPTCHI_CLI
     if (g_native_camera) g_native_camera->RefreshDisplayFrame();
@@ -4677,4 +4763,26 @@ bool GetSubCanvasOverviewRgba(int canvas_idx, int history_idx,
         return CopyBgrFrameToRgbaBuffer(resized, buffer, width, height);
     }
     return CopyBgrFrameToRgbaBuffer(out, buffer, width, height);
+}
+
+// ---------------------------------------------------------------------------
+// AI canvas checker FFI
+// ---------------------------------------------------------------------------
+
+void SetAIModeEnabled(bool enabled) {
+    g_ai_checker.SetEnabled(enabled);
+    if (g_whiteboard_canvas) g_whiteboard_canvas->SetAIMode(enabled);
+}
+
+bool IsAIModeEnabled() {
+    return g_ai_checker.IsEnabled();
+}
+
+int GetAIModeStatus() {
+    if (g_whiteboard_canvas) return g_whiteboard_canvas->GetHelperAIStatus();
+    return static_cast<int>(g_ai_checker.GetStatus());
+}
+
+void TriggerLMSStart() {
+    g_ai_checker.TriggerLMSStart();
 }

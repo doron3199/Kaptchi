@@ -115,6 +115,10 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isWhiteboardMode = false;
   bool _isCanvasViewMode = false;
   bool _isHighWhiteboardSensitivity = false;
+  // AI mode (off by default, toggled by user via smart_toy button)
+  bool _isAIMode = false;
+  int _aiStatus = 0; // AICheckStatus int: 0=disabled, 8=lmsOffline, etc.
+  bool _lmsDialogShown = false;
   double? _canvasAspectRatio; // null = use default 16:9
   Timer? _canvasPollTimer;
   List<GraphHistoryTimelineEntry> _graphHistoryTimeline = const [];
@@ -199,6 +203,19 @@ class _CameraScreenState extends State<CameraScreen>
           );
         }
       }
+      // Poll AI mode status
+      if (_isAIMode) {
+        final aiStatus = svc.getAIModeStatus();
+        if (aiStatus != _aiStatus) {
+          setState(() { _aiStatus = aiStatus; });
+          // Show LMS permission dialog once when LM Studio goes offline
+          if (aiStatus == 8 && !_lmsDialogShown) {
+            _lmsDialogShown = true;
+            _showLMSPermissionDialog();
+          }
+          if (aiStatus != 8) _lmsDialogShown = false;
+        }
+      }
       // Poll video file progress / completion
       if (_isVideoFileMode) {
         final progress = svc.getVideoProgress();
@@ -227,6 +244,83 @@ class _CameraScreenState extends State<CameraScreen>
     _canvasPollTimer = null;
     _canvasNavNotifier.value = (count: 0, active: 0);
     _resetWhiteboardUiState();
+  }
+
+  Widget _buildAIStatusChip() {
+    // status int values match AICheckStatus C++ enum
+    final (label, color) = switch (_aiStatus) {
+      0 => ('AI: Off', Colors.grey),
+      1 => ('AI: Ready', Colors.green),
+      2 => ('AI: Checking seed…', Colors.amber),
+      3 => ('AI: Checking dupe…', Colors.amber),
+      4 => ('AI: Seed OK', Colors.green),
+      5 => ('AI: Bad seed', Colors.orange),
+      6 => ('AI: New content', Colors.blue),
+      7 => ('AI: Duplicate!', Colors.red),
+      8 => ('LMS offline', Colors.red),
+      9 => ('Starting LMS…', Colors.amber),
+      _ => ('AI', Colors.grey),
+    };
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.55),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color, width: 1.5),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.smart_toy, size: 14, color: color),
+          const SizedBox(width: 4),
+          Text(label, style: TextStyle(color: color, fontSize: 11)),
+        ],
+      ),
+    );
+  }
+
+  void _toggleAIMode() {
+    final enable = !_isAIMode;
+    NativeCameraService().setAIModeEnabled(enable);
+    setState(() {
+      _isAIMode = enable;
+      _aiStatus = 0;
+      if (enable) _lmsDialogShown = false;  // reset so dialog can fire again
+    });
+  }
+
+  void _showLMSPermissionDialog() {
+    if (!mounted) return;
+    showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('LM Studio required'),
+        content: const Text(
+          'AI mode needs LM Studio to be running with the model loaded.\n\n'
+          'Start LM Studio manually, load the model, then press Retry.'),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(context);
+              // Disable AI mode so canvas creation isn't blocked indefinitely
+              NativeCameraService().setAIModeEnabled(false);
+              setState(() {
+                _isAIMode = false;
+                _aiStatus = 0;
+              });
+            },
+            child: const Text('Disable AI Mode'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              NativeCameraService().triggerLMSStart();
+              Navigator.pop(context);
+            },
+            child: const Text('Retry'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _setCanvasViewMode(bool enabled) {
@@ -1962,6 +2056,16 @@ class _CameraScreenState extends State<CameraScreen>
                   _setCanvasViewMode(!_isCanvasViewMode);
                 },
               ),
+            // AI mode toggle (default on when whiteboard mode is active)
+            if (Platform.isWindows && _isWhiteboardMode)
+              IconButton(
+                icon: Icon(
+                  Icons.smart_toy,
+                  color: _isAIMode ? Colors.purpleAccent : null,
+                ),
+                tooltip: _isAIMode ? 'Disable AI mode' : 'Enable AI mode',
+                onPressed: _toggleAIMode,
+              ),
             if (Platform.isWindows && _isWhiteboardMode)
               IconButton(
                 icon: Icon(
@@ -2076,6 +2180,13 @@ class _CameraScreenState extends State<CameraScreen>
         ),
         body: Stack(
           children: [
+            // AI status chip overlay
+            if (Platform.isWindows && _isWhiteboardMode && _isAIMode)
+              Positioned(
+                top: 8,
+                left: 8,
+                child: _buildAIStatusChip(),
+              ),
             // Main Content
             Positioned.fill(
               child: Column(

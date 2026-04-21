@@ -25,6 +25,8 @@ public:
     bool IsCanvasViewMode() const;
     void SetCanvasViewMode(bool mode);
     void SetRenderMode(CanvasRenderMode mode);
+    void SetAIEnabled(bool enabled);
+    int  GetAIStatus() const;
     CanvasRenderMode GetRenderMode() const;
     cv::Size GetCanvasSize() const;
     int GetSubCanvasCount() const;

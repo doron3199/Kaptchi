@@ -109,6 +109,19 @@ typedef SetAbsenceScoreSeenThreshold = void Function(double threshold);
 typedef GetAbsenceScoreSeenThresholdFunc = Float Function();
 typedef GetAbsenceScoreSeenThreshold = double Function();
 
+// AI canvas checker FFI types
+typedef SetAIModeEnabledFunc = Void Function(Bool enabled);
+typedef SetAIModeEnabled = void Function(bool enabled);
+
+typedef IsAIModeEnabledFunc = Bool Function();
+typedef IsAIModeEnabled = bool Function();
+
+typedef GetAIModeStatusFunc = Int32 Function();
+typedef GetAIModeStatus = int Function();
+
+typedef TriggerLMSStartFunc = Void Function();
+typedef TriggerLMSStart = void Function();
+
 // Sub-canvas navigation FFI types
 typedef GetSubCanvasCountFunc = Int32 Function();
 typedef GetSubCanvasCount = int Function();
@@ -382,7 +395,13 @@ class NativeCameraService {
   late SetCanvasEnhanceThreshold _setCanvasEnhanceThreshold;
   late SetAbsenceScoreSeenThreshold _setAbsenceScoreSeenThreshold;
   late GetAbsenceScoreSeenThreshold _getAbsenceScoreSeenThreshold;
-  
+
+  // AI canvas checker
+  late SetAIModeEnabled _setAIModeEnabled;
+  late IsAIModeEnabled _isAIModeEnabled;
+  late GetAIModeStatus _getAIModeStatus;
+  late TriggerLMSStart _triggerLMSStart;
+
   late GetCanvasVersionDart _getCanvasVersion;
   late GetCanvasOverviewJpegDart _getCanvasOverviewJpeg;
   
@@ -533,6 +552,20 @@ class NativeCameraService {
         .lookup<NativeFunction<GetAbsenceScoreSeenThresholdFunc>>(
           'GetAbsenceScoreSeenThreshold',
         )
+        .asFunction();
+
+    // AI canvas checker bindings
+    _setAIModeEnabled = _nativeLib
+        .lookup<NativeFunction<SetAIModeEnabledFunc>>('SetAIModeEnabled')
+        .asFunction();
+    _isAIModeEnabled = _nativeLib
+        .lookup<NativeFunction<IsAIModeEnabledFunc>>('IsAIModeEnabled')
+        .asFunction();
+    _getAIModeStatus = _nativeLib
+        .lookup<NativeFunction<GetAIModeStatusFunc>>('GetAIModeStatus')
+        .asFunction();
+    _triggerLMSStart = _nativeLib
+        .lookup<NativeFunction<TriggerLMSStartFunc>>('TriggerLMSStart')
         .asFunction();
 
     _getCanvasVersion = _nativeLib
@@ -900,6 +933,32 @@ class NativeCameraService {
   double getAbsenceScoreSeenThreshold() {
     initialize();
     return _getAbsenceScoreSeenThreshold();
+  }
+
+  // --- AI Canvas Checker Methods ---
+
+  void setAIModeEnabled(bool enabled) {
+    initialize();
+    _setAIModeEnabled(enabled);
+  }
+
+  bool isAIModeEnabled() {
+    initialize();
+    return _isAIModeEnabled();
+  }
+
+  /// Returns the AI checker status code (AICheckStatus enum int value).
+  /// 0=disabled, 1=idle, 2=checkingSeed, 3=checkingDupe,
+  /// 4=seedApproved, 5=seedRejected, 6=dupeNew, 7=dupeExists,
+  /// 8=lmsOffline, 9=lmsStarting
+  int getAIModeStatus() {
+    initialize();
+    return _getAIModeStatus();
+  }
+
+  void triggerLMSStart() {
+    initialize();
+    _triggerLMSStart();
   }
 
   // --- Sub-canvas Navigation Methods ---
