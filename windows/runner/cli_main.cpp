@@ -32,6 +32,8 @@
 #include <cstring>
 #include <algorithm>
 #include <filesystem>
+#include <thread>
+#include <chrono>
 
 // ---------------------------------------------------------------------------
 // Minimal PDF writer — embeds JPEG images, one per page
@@ -202,6 +204,11 @@ static bool isPdfOutputPath(const std::string& output_path) {
     return lowercaseCopy(std::filesystem::path(output_path).extension().string()) == ".pdf";
 }
 
+static bool isSingleImagePath(const std::string& output_path) {
+    auto ext = lowercaseCopy(std::filesystem::path(output_path).extension().string());
+    return ext == ".jpg" || ext == ".jpeg" || ext == ".png";
+}
+
 static void printProgress(double pct, double currentSec, double totalSec) {
     int p = static_cast<int>(pct * 100.0);
     int cur_m = static_cast<int>(currentSec) / 60;
@@ -284,8 +291,96 @@ static bool writeImagesToDirectory(const std::string& output_dir,
     return true;
 }
 
+// Returns fraction of pixels that are "dark" (non-white content)
+static double contentDensity(const cv::Mat& bgr) {
+    cv::Mat gray;
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat dark;
+    cv::threshold(gray, dark, 230, 1, cv::THRESH_BINARY_INV); // pixels darker than 230
+    return static_cast<double>(cv::countNonZero(dark)) / (bgr.rows * bgr.cols);
+}
+
+// Crop a canvas image to its ink bounding box + padding
+static cv::Mat cropToContent(const cv::Mat& bgr, int pad = 20) {
+    cv::Mat gray;
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+    cv::Mat dark;
+    cv::threshold(gray, dark, 230, 255, cv::THRESH_BINARY_INV);
+    cv::Rect bbox = cv::boundingRect(dark);
+    if (bbox.empty()) return bgr;
+    bbox.x = std::max(0, bbox.x - pad);
+    bbox.y = std::max(0, bbox.y - pad);
+    bbox.width  = std::min(bgr.cols - bbox.x, bbox.width  + pad * 2);
+    bbox.height = std::min(bgr.rows - bbox.y, bbox.height + pad * 2);
+    return bgr(bbox).clone();
+}
+
+static bool writeMergedImage(const std::string& output_path,
+                             const std::vector<PdfWriter::Page>& pages) {
+    if (pages.empty()) return false;
+
+    constexpr int kKeepTopN  = 5;   // keep only the N densest canvases
+    constexpr int kTargetH   = 800; // normalize all panels to this height
+    constexpr int kSep       = 16;
+
+    // Decode all, score by ink density, keep top-N
+    struct Candidate { cv::Mat img; double density; std::string name; };
+    std::vector<Candidate> candidates;
+
+    for (const auto& pg : pages) {
+        cv::Mat decoded = cv::imdecode(pg.jpeg, cv::IMREAD_COLOR);
+        if (decoded.empty()) continue;
+        double d = contentDensity(decoded);
+        candidates.push_back({decoded, d, pg.name});
+    }
+    // Sort descending by density
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b){ return a.density > b.density; });
+
+    // Keep top-N
+    if (static_cast<int>(candidates.size()) > kKeepTopN)
+        candidates.resize(kKeepTopN);
+
+    // Sort back by original order (index in name) so panels are chronological
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b){ return a.name < b.name; });
+
+    // Crop to content, scale to target height
+    std::vector<cv::Mat> imgs;
+    int total_w = 0;
+    for (const auto& c : candidates) {
+        std::cout << "  Keeping canvas " << c.name
+                  << " (density=" << static_cast<int>(c.density * 1000) / 10.0 << "%)\n";
+        cv::Mat cropped = cropToContent(c.img);
+        double scale = static_cast<double>(kTargetH) / cropped.rows;
+        cv::Mat scaled;
+        cv::resize(cropped, scaled, cv::Size(), scale, scale, cv::INTER_AREA);
+        imgs.push_back(scaled);
+        total_w += scaled.cols;
+    }
+    if (imgs.empty()) return false;
+    total_w += kSep * (static_cast<int>(imgs.size()) - 1);
+
+    cv::Mat merged(kTargetH, total_w, CV_8UC3, cv::Scalar(255, 255, 255));
+    int x = 0;
+    for (const auto& img : imgs) {
+        img.copyTo(merged(cv::Rect(x, 0, img.cols, img.rows)));
+        x += img.cols + kSep;
+    }
+
+    auto ext = lowercaseCopy(std::filesystem::path(output_path).extension().string());
+    std::vector<int> params;
+    if (ext == ".jpg" || ext == ".jpeg")
+        params = {cv::IMWRITE_JPEG_QUALITY, 92};
+
+    std::cout << "  Merged " << imgs.size() << " canvas(es) -> "
+              << merged.cols << "x" << merged.rows << "\n";
+    return cv::imwrite(output_path, merged, params);
+}
+
 static int exportPeakGraphPages(WhiteboardCanvas& canvas,
-                                std::vector<PdfWriter::Page>& pages) {
+                                std::vector<PdfWriter::Page>& pages,
+                                bool peaks_only = false) {
     constexpr int kStaleThreshold = 5;
 
     const cv::Size canvas_size = canvas.GetCanvasSize();
@@ -324,7 +419,7 @@ static int exportPeakGraphPages(WhiteboardCanvas& canvas,
         }
 
         const bool peak_is_stale = peak_idx < 0 || (latest_idx - peak_idx >= kStaleThreshold);
-        if (peak_is_stale && latest_idx >= 0) {
+        if (!peaks_only && peak_is_stale && latest_idx >= 0) {
             cv::Mat latest_overview;
             if (canvas.GetOverviewBlockingForCanvas(
                     canvas_idx,
@@ -358,23 +453,27 @@ int main(int argc, char** argv) {
     }
 
     if (argc < 3) {
-        std::cerr << "Usage: kaptchi_cli <input_video> <output.pdf|output_dir> [--skip <frames>]\n"
-                  << "  --skip      Frames to skip between processed frames (default: 0)\n";
+        std::cerr << "Usage: kaptchi_cli <input_video> <output.pdf|output_dir|output.jpg> [options]\n"
+                  << "  --skip <n>  Frames to skip between processed frames (default: 0)\n"
+                  << "  --ai        Enable AI seed/dupe gating via LM Studio\n";
         return 1;
     }
 
     std::string input_path  = argv[1];
     std::string output_path = argv[2];
     int skip_frames = std::stoi(argValue(argc, argv, "--skip", "0"));
-    const bool write_pdf = isPdfOutputPath(output_path);
+    const bool write_pdf    = isPdfOutputPath(output_path);
+    const bool write_single = isSingleImagePath(output_path);
+    const bool ai_enabled   = hasFlag(argc, argv, "--ai");
 
     if (skip_frames < 0) skip_frames = 0;
 
     std::cout << "kaptchi_cli — video whiteboard processor\n"
               << "  Input:    " << input_path    << "\n"
               << "  Output:   " << output_path   << "\n"
-              << "  Format:   " << (write_pdf ? "pdf" : "images") << "\n"
-              << "  Skip:     " << skip_frames   << " frame(s)\n\n";
+              << "  Format:   " << (write_pdf ? "pdf" : write_single ? "single image" : "images") << "\n"
+              << "  Skip:     " << skip_frames   << " frame(s)\n"
+              << "  AI mode:  " << (ai_enabled ? "ON" : "off") << "\n\n";
 
     if (hasFlag(argc, argv, "--interval")) {
         std::cout << "Note: --interval is ignored; pages now export using the UI peak-graph gallery algorithm.\n\n";
@@ -382,6 +481,16 @@ int main(int argc, char** argv) {
 
     if (hasFlag(argc, argv, "--fps")) {
         std::cout << "Note: --fps is ignored; use --skip to control frame sampling.\n\n";
+    }
+
+    // AI mode setup
+    if (ai_enabled) {
+        std::cout << "AI mode: starting LM Studio and loading model...\n";
+        g_ai_checker.TriggerLMSStart();
+        g_ai_checker.SetEnabled(true);
+        // Give LMS a few seconds to start before the first frame
+        std::this_thread::sleep_for(std::chrono::seconds(5));
+        std::cout << "AI mode: ready (seed gate active).\n\n";
     }
 
     // Open video
@@ -430,8 +539,26 @@ int main(int argc, char** argv) {
             cap.retrieve(frame);
 
             if (!frame.empty()) {
+                // Keep AI checker in sync with video position for interval gating.
+                if (ai_enabled) g_ai_checker.SetVideoPosition(current_sec);
+
                 // ProcessFrameSync: synchronous, no worker thread, accepts empty mask.
                 canvas.ProcessFrameSync(frame);
+
+                // When AI is on and a seed check is actively in flight, pause
+                // so we don't race past the relevant video section.
+                // Between checks the video processes at full speed — the
+                // kSeedCheckIntervalSec (30s real time) already spaces them out.
+                if (ai_enabled && !g_ai_checker.IsSeedApproved() &&
+                    g_ai_checker.GetStatus() == AICheckStatus::kCheckingSeed) {
+                    std::cout << "\n[AI] Seed check in flight — pausing video...\n";
+                    while (!g_ai_checker.IsSeedApproved() &&
+                           g_ai_checker.GetStatus() == AICheckStatus::kCheckingSeed) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+                    }
+                    std::cout << "[AI] Seed check done (status="
+                              << static_cast<int>(g_ai_checker.GetStatus()) << ")\n";
+                }
 
                 // Progress (throttled)
                 double pct = frame_idx / total_frames;
@@ -448,7 +575,7 @@ int main(int argc, char** argv) {
     }
 
     std::cout << "\nFinalizing canvas and exporting peak graph pages...\n";
-    const int added_pages = exportPeakGraphPages(canvas, pages);
+    const int added_pages = exportPeakGraphPages(canvas, pages, /*peaks_only=*/write_single);
 
     if (pages.empty()) {
         if (added_pages == 0 && canvas.GetSubCanvasCount() == 0) {
@@ -461,7 +588,15 @@ int main(int argc, char** argv) {
 
     std::cout << canvas.DumpProfile();
 
-    if (write_pdf) {
+    if (write_single) {
+        std::cout << "Merging " << pages.size() << " canvas(es) into single image "
+                  << output_path << "...\n";
+        if (!writeMergedImage(output_path, pages)) {
+            std::cerr << "Failed to write merged image.\n";
+            return 1;
+        }
+        std::cout << "Done. Image saved to: " << output_path << "\n";
+    } else if (write_pdf) {
         std::cout << "Writing " << pages.size() << " page(s) to " << output_path << "...\n";
         if (!PdfWriter::write(output_path, pages)) {
             return 1;

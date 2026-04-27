@@ -747,14 +747,10 @@ private:
         }
 
         if (!has_content) {
-            shared_->viewport_width = 0;
-            shared_->viewport_height = 0;
-            shared_->overview_width = 0;
-            shared_->overview_height = 0;
-            shared_->graph_node_count = 0;
-            shared_->graph_node_floats_written = 0;
-            shared_->graph_edge_count = 0;
-            shared_->graph_contour_floats_written = 0;
+            shared_->viewport_width = 0;  shared_->viewport_height = 0;
+            shared_->overview_width = 0;  shared_->overview_height = 0;
+            shared_->graph_node_count = 0; shared_->graph_node_floats_written = 0;
+            shared_->graph_edge_count = 0; shared_->graph_contour_floats_written = 0;
             shared_->graph_bounds_valid = 0;
             shared_->graph_history_count = 0;
             shared_->graph_history_peak_index = -1;
@@ -768,105 +764,97 @@ private:
             return;
         }
 
-        if (!viewport.empty() && IsValidFrameSize(viewport.cols, viewport.rows)) {
-            const size_t viewport_bytes = FrameBytesForSize(viewport.cols, viewport.rows);
-            std::memcpy(shared_->viewport_bgr, viewport.data, viewport_bytes);
-            shared_->viewport_width = viewport.cols;
-            shared_->viewport_height = viewport.rows;
-        } else {
-            shared_->viewport_width = 0;
-            shared_->viewport_height = 0;
-        }
+        auto write_images = [&] {
+            if (!viewport.empty() && IsValidFrameSize(viewport.cols, viewport.rows)) {
+                std::memcpy(shared_->viewport_bgr, viewport.data,
+                            FrameBytesForSize(viewport.cols, viewport.rows));
+                shared_->viewport_width = viewport.cols;
+                shared_->viewport_height = viewport.rows;
+            } else {
+                shared_->viewport_width = 0;
+                shared_->viewport_height = 0;
+            }
+            if (!overview.empty() && IsValidOverviewSize(overview.cols, overview.rows)) {
+                std::memcpy(shared_->overview_bgr, overview.data,
+                            FrameBytesForSize(overview.cols, overview.rows));
+                shared_->overview_width = overview.cols;
+                shared_->overview_height = overview.rows;
+            } else {
+                shared_->overview_width = 0;
+                shared_->overview_height = 0;
+            }
+        };
 
-        if (!overview.empty() && IsValidOverviewSize(overview.cols, overview.rows)) {
-            const size_t overview_bytes = FrameBytesForSize(overview.cols, overview.rows);
-            std::memcpy(shared_->overview_bgr, overview.data, overview_bytes);
-            shared_->overview_width = overview.cols;
-            shared_->overview_height = overview.rows;
-        } else {
-            shared_->overview_width = 0;
-            shared_->overview_height = 0;
-        }
+        auto write_graph_nodes = [&] {
+            shared_->graph_node_count = graph_node_count;
+            shared_->graph_node_floats_written = graph_node_floats;
+            shared_->graph_edge_count = graph_edge_count;
+            shared_->graph_contour_floats_written = graph_contour_floats;
+            if (graph_node_floats > 0)
+                std::memcpy(shared_->graph_nodes, local_graph_nodes,
+                            static_cast<size_t>(graph_node_floats) * sizeof(float));
+            if (graph_edge_count > 0)
+                std::memcpy(shared_->graph_edges, local_graph_edges,
+                            static_cast<size_t>(graph_edge_count) * kGraphEdgeStride * sizeof(int));
+            if (graph_contour_floats > 0)
+                std::memcpy(shared_->graph_contours, local_graph_contours.data(),
+                            static_cast<size_t>(graph_contour_floats) * sizeof(float));
+            shared_->graph_bounds_valid = graph_bounds_valid ? 1 : 0;
+            if (graph_bounds_valid) {
+                shared_->graph_bounds_x = graph_bounds[0];
+                shared_->graph_bounds_y = graph_bounds[1];
+                shared_->graph_bounds_w = graph_bounds[2];
+                shared_->graph_bounds_h = graph_bounds[3];
+            }
+        };
 
-        // Write graph debug data
-        shared_->graph_node_count = graph_node_count;
-        shared_->graph_node_floats_written = graph_node_floats;
-        shared_->graph_edge_count = graph_edge_count;
-        shared_->graph_contour_floats_written = graph_contour_floats;
-        if (graph_node_floats > 0) {
-            std::memcpy(shared_->graph_nodes, local_graph_nodes,
-                        static_cast<size_t>(graph_node_floats) * sizeof(float));
-        }
-        if (graph_edge_count > 0) {
-            std::memcpy(shared_->graph_edges, local_graph_edges,
-                        static_cast<size_t>(graph_edge_count) * kGraphEdgeStride * sizeof(int));
-        }
-        if (graph_contour_floats > 0) {
-            std::memcpy(shared_->graph_contours, local_graph_contours.data(),
-                        static_cast<size_t>(graph_contour_floats) * sizeof(float));
-        }
-        shared_->graph_bounds_valid = graph_bounds_valid ? 1 : 0;
-        if (graph_bounds_valid) {
-            shared_->graph_bounds_x = graph_bounds[0];
-            shared_->graph_bounds_y = graph_bounds[1];
-            shared_->graph_bounds_w = graph_bounds[2];
-            shared_->graph_bounds_h = graph_bounds[3];
-        }
+        auto write_graph_history = [&] {
+            shared_->graph_history_count = graph_history_count;
+            shared_->graph_history_peak_index = graph_history_peak_index;
+            shared_->graph_history_selected_index = graph_history_selected_index;
+            shared_->graph_history_timeline_entries = graph_history_timeline_entries;
+            shared_->graph_history_selected_node_count = graph_history_selected_node_count;
+            shared_->graph_history_selected_node_floats_written = graph_history_selected_node_floats;
+            shared_->graph_history_selected_contour_floats_written = graph_history_selected_contour_floats;
+            if (graph_history_timeline_entries > 0)
+                std::memcpy(shared_->graph_history_timeline, local_graph_history_timeline,
+                            static_cast<size_t>(graph_history_timeline_entries) *
+                                kGraphHistoryTimelineStride * sizeof(int));
+            if (graph_history_selected_node_floats > 0)
+                std::memcpy(shared_->graph_history_selected_nodes,
+                            local_graph_history_selected_nodes,
+                            static_cast<size_t>(graph_history_selected_node_floats) * sizeof(float));
+            if (graph_history_selected_contour_floats > 0)
+                std::memcpy(shared_->graph_history_selected_contours,
+                            local_graph_history_selected_contours.data(),
+                            static_cast<size_t>(graph_history_selected_contour_floats) * sizeof(float));
+            shared_->graph_history_selected_bounds_valid = graph_history_selected_bounds_valid ? 1 : 0;
+            if (graph_history_selected_bounds_valid) {
+                shared_->graph_history_selected_bounds_x = graph_history_selected_bounds[0];
+                shared_->graph_history_selected_bounds_y = graph_history_selected_bounds[1];
+                shared_->graph_history_selected_bounds_w = graph_history_selected_bounds[2];
+                shared_->graph_history_selected_bounds_h = graph_history_selected_bounds[3];
+            }
+        };
 
-        shared_->graph_history_count = graph_history_count;
-        shared_->graph_history_peak_index = graph_history_peak_index;
-        shared_->graph_history_selected_index = graph_history_selected_index;
-        shared_->graph_history_timeline_entries = graph_history_timeline_entries;
-        shared_->graph_history_selected_node_count = graph_history_selected_node_count;
-        shared_->graph_history_selected_node_floats_written =
-            graph_history_selected_node_floats;
-        shared_->graph_history_selected_contour_floats_written =
-            graph_history_selected_contour_floats;
-        if (graph_history_timeline_entries > 0) {
-            std::memcpy(shared_->graph_history_timeline,
-                        local_graph_history_timeline,
-                        static_cast<size_t>(graph_history_timeline_entries) *
-                            kGraphHistoryTimelineStride * sizeof(int));
-        }
-        if (graph_history_selected_node_floats > 0) {
-            std::memcpy(shared_->graph_history_selected_nodes,
-                        local_graph_history_selected_nodes,
-                        static_cast<size_t>(graph_history_selected_node_floats) *
-                            sizeof(float));
-        }
-        if (graph_history_selected_contour_floats > 0) {
-            std::memcpy(shared_->graph_history_selected_contours,
-                        local_graph_history_selected_contours.data(),
-                        static_cast<size_t>(graph_history_selected_contour_floats) *
-                            sizeof(float));
-        }
-        shared_->graph_history_selected_bounds_valid =
-            graph_history_selected_bounds_valid ? 1 : 0;
-        if (graph_history_selected_bounds_valid) {
-            shared_->graph_history_selected_bounds_x =
-                graph_history_selected_bounds[0];
-            shared_->graph_history_selected_bounds_y =
-                graph_history_selected_bounds[1];
-            shared_->graph_history_selected_bounds_w =
-                graph_history_selected_bounds[2];
-            shared_->graph_history_selected_bounds_h =
-                graph_history_selected_bounds[3];
-        }
+        auto write_edit_and_metadata = [&] {
+            if (edit_result_ready) {
+                shared_->edit_result_ready = 1;
+                shared_->edit_result_ok = edit_result_ok ? 1 : 0;
+                shared_->edit_result_id = edit_result_id;
+            }
+            for (int ci = 0; ci < kMaxSubCanvases; ci++) {
+                shared_->per_canvas_history_counts[ci] =
+                    ci < per_canvas_n ? local_per_canvas_history_counts[ci] : 0L;
+                shared_->per_canvas_peak_indices[ci] =
+                    ci < per_canvas_n ? local_per_canvas_peak_indices[ci] : -1L;
+            }
+        };
 
-        // Write edit command results
-        if (edit_result_ready) {
-            shared_->edit_result_ready = 1;
-            shared_->edit_result_ok = edit_result_ok ? 1 : 0;
-            shared_->edit_result_id = edit_result_id;
-        }
-
-        // Write per-canvas history metadata
-        for (int ci = 0; ci < kMaxSubCanvases; ci++) {
-            shared_->per_canvas_history_counts[ci] =
-                ci < per_canvas_n ? local_per_canvas_history_counts[ci] : 0L;
-            shared_->per_canvas_peak_indices[ci] =
-                ci < per_canvas_n ? local_per_canvas_peak_indices[ci] : -1L;
-        }
+        write_images();
+        write_graph_nodes();
+        write_graph_history();
+        write_edit_and_metadata();
 
         Unlock(mutex_.get());
     }
@@ -950,6 +938,30 @@ struct WhiteboardCanvasHelperClient::Impl {
         if (wake_event.get()) {
             SetEvent(wake_event.get());
         }
+    }
+
+    template <class T, class Reader>
+    T ReadField(T fallback, Reader read) const {
+        T value = fallback;
+        WithLock(kStateReadLockTimeoutMs, [&]{ value = read(); });
+        return value;
+    }
+
+    template <class Init, class Check>
+    bool AwaitResponse(std::atomic<int>& next_id, DWORD timeout_ms,
+                       Init init, Check check, int sleep_ms = 5) const {
+        const int request_id = next_id.fetch_add(1, std::memory_order_relaxed);
+        if (!WithLock(20, [&]{ init(request_id); })) return false;
+        SignalHelper();
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(timeout_ms);
+        while (std::chrono::steady_clock::now() < deadline) {
+            bool done = false;
+            WithLock(kStateReadLockTimeoutMs, [&]{ done = check(request_id); });
+            if (done) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+        }
+        return false;
     }
 };
 
@@ -1269,11 +1281,7 @@ void WhiteboardCanvasHelperClient::SetAIEnabled(bool enabled) {
 
 int WhiteboardCanvasHelperClient::GetAIStatus() const {
     if (!IsReady()) return 0;  // kDisabled
-    int status = 1;  // kIdle
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        status = static_cast<int>(impl_->shared->ai_status);
-    });
-    return status;
+    return impl_->ReadField<int>(1, [&]{ return static_cast<int>(impl_->shared->ai_status); });
 }
 
 void WhiteboardCanvasHelperClient::SetRenderMode(CanvasRenderMode mode) {
@@ -1355,11 +1363,7 @@ void WhiteboardCanvasHelperClient::SyncSettings(bool debug_enabled,
 
 int WhiteboardCanvasHelperClient::GetGraphNodeCount() const {
     if (!IsReady()) return 0;
-    int count = 0;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        count = static_cast<int>(impl_->shared->graph_node_count);
-    });
-    return count;
+    return impl_->ReadField<int>(0, [&]{ return static_cast<int>(impl_->shared->graph_node_count); });
 }
 
 int WhiteboardCanvasHelperClient::GetGraphNodes(float* buffer, int max_nodes) const {
@@ -1422,20 +1426,12 @@ bool WhiteboardCanvasHelperClient::GetGraphCanvasBounds(int* bounds) const {
 
 int WhiteboardCanvasHelperClient::GetGraphHistoryCount() const {
     if (!IsReady()) return 0;
-    int count = 0;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        count = static_cast<int>(impl_->shared->graph_history_count);
-    });
-    return count;
+    return impl_->ReadField<int>(0, [&]{ return static_cast<int>(impl_->shared->graph_history_count); });
 }
 
 int WhiteboardCanvasHelperClient::GetGraphHistorySelectedIndex() const {
     if (!IsReady()) return -1;
-    int index = -1;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        index = static_cast<int>(impl_->shared->graph_history_selected_index);
-    });
-    return index;
+    return impl_->ReadField<int>(-1, [&]{ return static_cast<int>(impl_->shared->graph_history_selected_index); });
 }
 
 void WhiteboardCanvasHelperClient::SetGraphHistorySelectedIndex(int idx) {
@@ -1463,20 +1459,12 @@ int WhiteboardCanvasHelperClient::GetGraphHistoryTimeline(int* buffer, int max_e
 
 int WhiteboardCanvasHelperClient::GetGraphHistoryPeakIndex() const {
     if (!IsReady()) return -1;
-    int index = -1;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        index = static_cast<int>(impl_->shared->graph_history_peak_index);
-    });
-    return index;
+    return impl_->ReadField<int>(-1, [&]{ return static_cast<int>(impl_->shared->graph_history_peak_index); });
 }
 
 int WhiteboardCanvasHelperClient::GetSelectedGraphHistoryNodeCount() const {
     if (!IsReady()) return 0;
-    int count = 0;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        count = static_cast<int>(impl_->shared->graph_history_selected_node_count);
-    });
-    return count;
+    return impl_->ReadField<int>(0, [&]{ return static_cast<int>(impl_->shared->graph_history_selected_node_count); });
 }
 
 int WhiteboardCanvasHelperClient::GetSelectedGraphHistoryNodes(float* buffer,
@@ -1532,98 +1520,55 @@ int WhiteboardCanvasHelperClient::GetSelectedGraphHistoryNodeContours(float* buf
 bool WhiteboardCanvasHelperClient::CompareGraphNodes(int id_a, int id_b, float* result) const {
     if (!IsReady() || !result) return false;
 
-    const int request_id =
-        impl_->next_graph_compare_request_id.fetch_add(1, std::memory_order_relaxed);
-    const bool queued = impl_->WithLock(20, [&]() {
-        impl_->shared->graph_compare_node_a = id_a;
-        impl_->shared->graph_compare_node_b = id_b;
-        impl_->shared->graph_compare_request_id = request_id;
-        impl_->shared->graph_compare_result_ready = 0;
-        impl_->shared->graph_compare_result_ok = 0;
-        impl_->shared->graph_compare_result_id = 0;
-    });
-    if (!queued) return false;
-
-    impl_->SignalHelper();
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(kGraphCompareTimeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool ready = false;
-        bool ok = false;
-        float local_result[kGraphCompareResultFloats] = {};
-
-        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-            ready = impl_->shared->graph_compare_result_ready != 0 &&
-                    impl_->shared->graph_compare_result_id == request_id;
-            if (ready) {
-                ok = impl_->shared->graph_compare_result_ok != 0;
-                if (ok) {
-                    std::memcpy(local_result,
-                                impl_->shared->graph_compare_result,
+    bool ok = false;
+    float local_result[kGraphCompareResultFloats] = {};
+    const bool done = impl_->AwaitResponse(
+        impl_->next_graph_compare_request_id, kGraphCompareTimeoutMs,
+        [&](int rid) {
+            impl_->shared->graph_compare_node_a = id_a;
+            impl_->shared->graph_compare_node_b = id_b;
+            impl_->shared->graph_compare_request_id = rid;
+            impl_->shared->graph_compare_result_ready = 0;
+            impl_->shared->graph_compare_result_ok = 0;
+            impl_->shared->graph_compare_result_id = 0;
+        },
+        [&](int rid) -> bool {
+            if (!(impl_->shared->graph_compare_result_ready != 0 &&
+                  impl_->shared->graph_compare_result_id == rid)) return false;
+            ok = impl_->shared->graph_compare_result_ok != 0;
+            if (ok) std::memcpy(local_result, impl_->shared->graph_compare_result,
                                 sizeof(local_result));
-                }
-            }
+            return true;
         });
 
-        if (ready) {
-            if (ok) {
-                std::memcpy(result, local_result, sizeof(local_result));
-            }
-            return ok;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-
-    return false;
+    if (done && ok) std::memcpy(result, local_result, sizeof(local_result));
+    return done && ok;
 }
 
 int WhiteboardCanvasHelperClient::LockAllGraphNodes() {
     if (!IsReady()) return 0;
 
-    const int request_id =
-        impl_->next_edit_request_id.fetch_add(1, std::memory_order_relaxed);
-    const bool queued = impl_->WithLock(20, [&]() {
-        impl_->shared->edit_lock_all = 1;
-        impl_->shared->edit_delete_count = 0;
-        impl_->shared->edit_move_count = 0;
-        impl_->shared->edit_request_id = request_id;
-        impl_->shared->edit_result_ready = 0;
-        impl_->shared->edit_result_ok = 0;
-        impl_->shared->edit_result_id = 0;
-    });
-    if (!queued) return 0;
-
-    impl_->SignalHelper();
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(kEditCommandTimeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool ready = false;
-        bool ok = false;
-
-        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-            ready = impl_->shared->edit_result_ready != 0 &&
-                    impl_->shared->edit_result_id == request_id;
-            if (ready) {
-                ok = impl_->shared->edit_result_ok != 0;
-            }
+    bool ok = false;
+    const bool done = impl_->AwaitResponse(
+        impl_->next_edit_request_id, kEditCommandTimeoutMs,
+        [&](int rid) {
+            impl_->shared->edit_lock_all = 1;
+            impl_->shared->edit_delete_count = 0;
+            impl_->shared->edit_move_count = 0;
+            impl_->shared->edit_request_id = rid;
+            impl_->shared->edit_result_ready = 0;
+            impl_->shared->edit_result_ok = 0;
+            impl_->shared->edit_result_id = 0;
+        },
+        [&](int rid) -> bool {
+            if (!(impl_->shared->edit_result_ready != 0 &&
+                  impl_->shared->edit_result_id == rid)) return false;
+            ok = impl_->shared->edit_result_ok != 0;
+            return true;
         });
 
-        if (ready) {
-            // Return node count from shared state as approximation
-            int count = 0;
-            impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-                count = static_cast<int>(impl_->shared->graph_node_count);
-            });
-            return ok ? count : 0;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-
-    return 0;
+    if (!done || !ok) return 0;
+    return impl_->ReadField<int>(0, [&]{ return static_cast<int>(impl_->shared->graph_node_count); });
 }
 
 bool WhiteboardCanvasHelperClient::ApplyUserEdits(const int* delete_ids, int delete_count,
@@ -1631,113 +1576,67 @@ bool WhiteboardCanvasHelperClient::ApplyUserEdits(const int* delete_ids, int del
     if (!IsReady()) return false;
     if (delete_count > kMaxEditDeletes || move_count > kMaxEditMoves) return false;
 
-    const int request_id =
-        impl_->next_edit_request_id.fetch_add(1, std::memory_order_relaxed);
-    const bool queued = impl_->WithLock(20, [&]() {
-        impl_->shared->edit_lock_all = 0;
-        impl_->shared->edit_delete_count = delete_count;
-        impl_->shared->edit_move_count = move_count;
-        if (delete_count > 0 && delete_ids) {
-            std::memcpy(impl_->shared->edit_delete_ids, delete_ids,
-                        static_cast<size_t>(delete_count) * sizeof(int));
-        }
-        if (move_count > 0 && moves) {
-            std::memcpy(impl_->shared->edit_moves, moves,
-                        static_cast<size_t>(move_count) * 3 * sizeof(float));
-        }
-        impl_->shared->edit_request_id = request_id;
-        impl_->shared->edit_result_ready = 0;
-        impl_->shared->edit_result_ok = 0;
-        impl_->shared->edit_result_id = 0;
-    });
-    if (!queued) return false;
-
-    impl_->SignalHelper();
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(kEditCommandTimeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool ready = false;
-        bool ok = false;
-
-        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-            ready = impl_->shared->edit_result_ready != 0 &&
-                    impl_->shared->edit_result_id == request_id;
-            if (ready) {
-                ok = impl_->shared->edit_result_ok != 0;
-            }
-        });
-
-        if (ready) {
-            return ok;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    }
-
-    return false;
+    bool ok = false;
+    return impl_->AwaitResponse(
+        impl_->next_edit_request_id, kEditCommandTimeoutMs,
+        [&](int rid) {
+            impl_->shared->edit_lock_all = 0;
+            impl_->shared->edit_delete_count = delete_count;
+            impl_->shared->edit_move_count = move_count;
+            if (delete_count > 0 && delete_ids)
+                std::memcpy(impl_->shared->edit_delete_ids, delete_ids,
+                            static_cast<size_t>(delete_count) * sizeof(int));
+            if (move_count > 0 && moves)
+                std::memcpy(impl_->shared->edit_moves, moves,
+                            static_cast<size_t>(move_count) * 3 * sizeof(float));
+            impl_->shared->edit_request_id = rid;
+            impl_->shared->edit_result_ready = 0;
+            impl_->shared->edit_result_ok = 0;
+            impl_->shared->edit_result_id = 0;
+        },
+        [&](int rid) -> bool {
+            if (!(impl_->shared->edit_result_ready != 0 &&
+                  impl_->shared->edit_result_id == rid)) return false;
+            ok = impl_->shared->edit_result_ok != 0;
+            return true;
+        }) && ok;
 }
 
 int WhiteboardCanvasHelperClient::GetGraphNodeMasks(uint8_t* buffer, int max_bytes) const {
     if (!IsReady() || !buffer || max_bytes <= 0) return 0;
 
-    const int request_id =
-        impl_->next_mask_request_id.fetch_add(1, std::memory_order_relaxed);
-    const bool queued = impl_->WithLock(20, [&]() {
-        impl_->shared->mask_request_id = request_id;
-        impl_->shared->mask_result_ready = 0;
-        impl_->shared->mask_result_id = 0;
-        impl_->shared->mask_result_bytes = 0;
-    });
-    if (!queued) return 0;
-
-    impl_->SignalHelper();
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(kMaskRequestTimeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool ready = false;
-        int bytes_written = 0;
-
-        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-            ready = impl_->shared->mask_result_ready != 0 &&
-                    impl_->shared->mask_result_id == request_id;
-            if (ready) {
-                bytes_written = static_cast<int>(impl_->shared->mask_result_bytes);
-                if (bytes_written > 0) {
-                    const int copy_bytes = std::min(bytes_written, max_bytes);
-                    std::memcpy(buffer, impl_->shared->mask_data, copy_bytes);
-                    bytes_written = copy_bytes;
-                }
+    int bytes_written = 0;
+    const bool done = impl_->AwaitResponse(
+        impl_->next_mask_request_id, kMaskRequestTimeoutMs,
+        [&](int rid) {
+            impl_->shared->mask_request_id = rid;
+            impl_->shared->mask_result_ready = 0;
+            impl_->shared->mask_result_id = 0;
+            impl_->shared->mask_result_bytes = 0;
+        },
+        [&](int rid) -> bool {
+            if (!(impl_->shared->mask_result_ready != 0 &&
+                  impl_->shared->mask_result_id == rid)) return false;
+            bytes_written = static_cast<int>(impl_->shared->mask_result_bytes);
+            if (bytes_written > 0) {
+                const int copy_bytes = std::min(bytes_written, max_bytes);
+                std::memcpy(buffer, impl_->shared->mask_data, copy_bytes);
+                bytes_written = copy_bytes;
             }
-        });
+            return true;
+        }, 10);
 
-        if (ready) {
-            return bytes_written;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    return 0;
+    return done ? bytes_written : 0;
 }
 
 int WhiteboardCanvasHelperClient::GetSubCanvasHistoryCount(int canvas_idx) const {
     if (!IsReady() || canvas_idx < 0 || canvas_idx >= kMaxSubCanvases) return 0;
-    int count = 0;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        count = static_cast<int>(impl_->shared->per_canvas_history_counts[canvas_idx]);
-    });
-    return count;
+    return impl_->ReadField<int>(0, [&]{ return static_cast<int>(impl_->shared->per_canvas_history_counts[canvas_idx]); });
 }
 
 int WhiteboardCanvasHelperClient::GetSubCanvasPeakIndex(int canvas_idx) const {
     if (!IsReady() || canvas_idx < 0 || canvas_idx >= kMaxSubCanvases) return -1;
-    int idx = -1;
-    impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-        idx = static_cast<int>(impl_->shared->per_canvas_peak_indices[canvas_idx]);
-    });
-    return idx;
+    return impl_->ReadField<int>(-1, [&]{ return static_cast<int>(impl_->shared->per_canvas_peak_indices[canvas_idx]); });
 }
 
 bool WhiteboardCanvasHelperClient::GetOverviewBlockingForCanvas(
@@ -1745,47 +1644,30 @@ bool WhiteboardCanvasHelperClient::GetOverviewBlockingForCanvas(
     if (!IsReady() || canvas_idx < 0) return false;
     if (viewSize.width <= 0 || viewSize.height <= 0) return false;
 
-    const int request_id =
-        impl_->next_canvas_export_request_id.fetch_add(1, std::memory_order_relaxed);
-    const bool queued = impl_->WithLock(20, [&]() {
-        impl_->shared->canvas_export_request_id  = request_id;
-        impl_->shared->canvas_export_canvas_idx  = canvas_idx;
-        impl_->shared->canvas_export_history_idx = history_idx;
-        impl_->shared->canvas_export_req_width   = viewSize.width;
-        impl_->shared->canvas_export_req_height  = viewSize.height;
-        impl_->shared->canvas_export_result_id   = 0;
-        impl_->shared->canvas_export_result_ok   = 0;
-    });
-    if (!queued) return false;
-
-    impl_->SignalHelper();
-
-    const auto deadline = std::chrono::steady_clock::now() +
-                          std::chrono::milliseconds(kCanvasExportTimeoutMs);
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool ready = false;
-        bool ok = false;
-
-        impl_->WithLock(kStateReadLockTimeoutMs, [&]() {
-            ready = impl_->shared->canvas_export_result_id == request_id;
-            if (ready) {
-                ok = impl_->shared->canvas_export_result_ok != 0;
-                const int w = static_cast<int>(impl_->shared->canvas_export_width);
-                const int h = static_cast<int>(impl_->shared->canvas_export_height);
-                if (ok && w > 0 && h > 0 &&
-                    w <= kCanvasExportMaxWidth && h <= kCanvasExportMaxHeight) {
-                    cv::Mat src(h, w, CV_8UC3, impl_->shared->canvas_export_bgr);
-                    src.copyTo(out_frame);
-                }
+    bool ok = false;
+    return impl_->AwaitResponse(
+        impl_->next_canvas_export_request_id, kCanvasExportTimeoutMs,
+        [&](int rid) {
+            impl_->shared->canvas_export_request_id  = rid;
+            impl_->shared->canvas_export_canvas_idx  = canvas_idx;
+            impl_->shared->canvas_export_history_idx = history_idx;
+            impl_->shared->canvas_export_req_width   = viewSize.width;
+            impl_->shared->canvas_export_req_height  = viewSize.height;
+            impl_->shared->canvas_export_result_id   = 0;
+            impl_->shared->canvas_export_result_ok   = 0;
+        },
+        [&](int rid) -> bool {
+            if (impl_->shared->canvas_export_result_id != rid) return false;
+            ok = impl_->shared->canvas_export_result_ok != 0;
+            const int w = static_cast<int>(impl_->shared->canvas_export_width);
+            const int h = static_cast<int>(impl_->shared->canvas_export_height);
+            if (ok && w > 0 && h > 0 &&
+                w <= kCanvasExportMaxWidth && h <= kCanvasExportMaxHeight) {
+                cv::Mat src(h, w, CV_8UC3, impl_->shared->canvas_export_bgr);
+                src.copyTo(out_frame);
             }
-        });
-
-        if (ready) return ok && !out_frame.empty();
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    return false;
+            return true;
+        }, 10) && ok && !out_frame.empty();
 }
 
 void SetWhiteboardCanvasHelperProcessMode(bool helper_mode, const std::string& session_id) {

@@ -1,5 +1,5 @@
 // ============================================================================
-// http_client.cpp -- WinHTTP POST helper, isolated from OpenCV headers
+// http_client.cpp -- WinHTTP POST/GET helpers, isolated from OpenCV headers
 // ============================================================================
 
 // Isolated from OpenCV to avoid the Windows / OpenCV header ordering conflict.
@@ -19,6 +19,7 @@
 #include "http_client.h"
 
 #include <cstdio>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -30,106 +31,84 @@ static void HttpLog(const char* msg) {
     fflush(stderr);
 }
 
-std::string HttpPostLocal(int port, const std::string& path,
-                          const std::string& body, int timeout_ms) {
-    HINTERNET hSess = WinHttpOpen(L"KaptchiAI/1.0",
-                                   WINHTTP_ACCESS_TYPE_NO_PROXY,
-                                   WINHTTP_NO_PROXY_NAME,
-                                   WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSess) { HttpLog("WinHttpOpen FAILED"); return {}; }
+namespace {
 
-    HINTERNET hConn = WinHttpConnect(hSess, L"localhost",
-                                      static_cast<INTERNET_PORT>(port), 0);
-    if (!hConn) { HttpLog("WinHttpConnect FAILED"); WinHttpCloseHandle(hSess); return {}; }
+struct HInternetDeleter {
+    void operator()(HINTERNET h) const { if (h) WinHttpCloseHandle(h); }
+};
+using UniqueHInternet = std::unique_ptr<void, HInternetDeleter>;
+
+static std::string HttpSendLocal(int port, const wchar_t* verb,
+                                 const std::string& path,
+                                 const std::string* body,
+                                 int timeout_ms,
+                                 bool log_errors = true) {
+    UniqueHInternet sess{WinHttpOpen(L"KaptchiAI/1.0",
+        WINHTTP_ACCESS_TYPE_NO_PROXY, WINHTTP_NO_PROXY_NAME,
+        WINHTTP_NO_PROXY_BYPASS, 0)};
+    if (!sess) {
+        if (log_errors) HttpLog("WinHttpOpen FAILED");
+        return {};
+    }
+
+    UniqueHInternet conn{WinHttpConnect(sess.get(), L"localhost",
+        static_cast<INTERNET_PORT>(port), 0)};
+    if (!conn) {
+        if (log_errors) HttpLog("WinHttpConnect FAILED");
+        return {};
+    }
 
     std::wstring wpath(path.begin(), path.end());
-    HINTERNET hReq = WinHttpOpenRequest(hConn, L"POST", wpath.c_str(),
-                                         nullptr, WINHTTP_NO_REFERER,
-                                         WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hReq) {
-        HttpLog("WinHttpOpenRequest FAILED");
-        WinHttpCloseHandle(hConn);
-        WinHttpCloseHandle(hSess);
+    UniqueHInternet req{WinHttpOpenRequest(conn.get(), verb, wpath.c_str(),
+        nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, 0)};
+    if (!req) {
+        if (log_errors) HttpLog("WinHttpOpenRequest FAILED");
         return {};
     }
-    WinHttpSetTimeouts(hReq, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
-    BOOL ok = WinHttpSendRequest(
-        hReq,
-        L"Content-Type: application/json\r\n",
-        static_cast<DWORD>(-1L),
-        const_cast<void*>(static_cast<const void*>(body.c_str())),
-        static_cast<DWORD>(body.size()),
-        static_cast<DWORD>(body.size()),
-        0);
+    WinHttpSetTimeouts(req.get(), timeout_ms, timeout_ms, timeout_ms, timeout_ms);
 
-    if (!ok) {
-        char errbuf[64];
-        snprintf(errbuf, sizeof(errbuf), "WinHttpSendRequest FAILED err=%lu", GetLastError());
-        HttpLog(errbuf);
-        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
+    LPCWSTR headers = body ? L"Content-Type: application/json\r\n"
+                           : WINHTTP_NO_ADDITIONAL_HEADERS;
+    DWORD hlen = body ? static_cast<DWORD>(-1L) : 0;
+    void* data = body ? const_cast<char*>(body->data()) : WINHTTP_NO_REQUEST_DATA;
+    DWORD dlen = body ? static_cast<DWORD>(body->size()) : 0;
+
+    if (!WinHttpSendRequest(req.get(), headers, hlen, data, dlen, dlen, 0)) {
+        if (log_errors) {
+            char errbuf[64];
+            snprintf(errbuf, sizeof(errbuf), "WinHttpSendRequest FAILED err=%lu", GetLastError());
+            HttpLog(errbuf);
+        }
         return {};
     }
-    if (!WinHttpReceiveResponse(hReq, nullptr)) {
-        char errbuf[64];
-        snprintf(errbuf, sizeof(errbuf), "WinHttpReceiveResponse FAILED err=%lu", GetLastError());
-        HttpLog(errbuf);
-        WinHttpCloseHandle(hReq);
-        WinHttpCloseHandle(hConn);
-        WinHttpCloseHandle(hSess);
+    if (!WinHttpReceiveResponse(req.get(), nullptr)) {
+        if (log_errors) {
+            char errbuf[64];
+            snprintf(errbuf, sizeof(errbuf), "WinHttpReceiveResponse FAILED err=%lu", GetLastError());
+            HttpLog(errbuf);
+        }
         return {};
     }
 
     std::string response;
     DWORD avail = 0;
-    while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
-        std::vector<char> chunk(static_cast<size_t>(avail) + 1, '\0');
+    while (WinHttpQueryDataAvailable(req.get(), &avail) && avail > 0) {
+        std::vector<char> chunk(static_cast<size_t>(avail));
         DWORD read = 0;
-        if (!WinHttpReadData(hReq, chunk.data(), avail, &read)) break;
+        if (!WinHttpReadData(req.get(), chunk.data(), avail, &read)) break;
         response.append(chunk.data(), read);
     }
-
-    WinHttpCloseHandle(hReq);
-    WinHttpCloseHandle(hConn);
-    WinHttpCloseHandle(hSess);
     return response;
 }
 
+}  // namespace
+
+std::string HttpPostLocal(int port, const std::string& path,
+                          const std::string& body, int timeout_ms) {
+    return HttpSendLocal(port, L"POST", path, &body, timeout_ms, true);
+}
+
 std::string HttpGetLocal(int port, const std::string& path, int timeout_ms) {
-    HINTERNET hSess = WinHttpOpen(L"KaptchiAI/1.0",
-                                   WINHTTP_ACCESS_TYPE_NO_PROXY,
-                                   WINHTTP_NO_PROXY_NAME,
-                                   WINHTTP_NO_PROXY_BYPASS, 0);
-    if (!hSess) return {};
-
-    HINTERNET hConn = WinHttpConnect(hSess, L"localhost",
-                                      static_cast<INTERNET_PORT>(port), 0);
-    if (!hConn) { WinHttpCloseHandle(hSess); return {}; }
-
-    std::wstring wpath(path.begin(), path.end());
-    HINTERNET hReq = WinHttpOpenRequest(hConn, L"GET", wpath.c_str(),
-                                         nullptr, WINHTTP_NO_REFERER,
-                                         WINHTTP_DEFAULT_ACCEPT_TYPES, 0);
-    if (!hReq) { WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess); return {}; }
-    WinHttpSetTimeouts(hReq, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-
-    if (!WinHttpSendRequest(hReq, WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(hReq, nullptr)) {
-        WinHttpCloseHandle(hReq); WinHttpCloseHandle(hConn); WinHttpCloseHandle(hSess);
-        return {};
-    }
-
-    std::string response;
-    DWORD avail = 0;
-    while (WinHttpQueryDataAvailable(hReq, &avail) && avail > 0) {
-        std::vector<char> chunk(static_cast<size_t>(avail) + 1, '\0');
-        DWORD read = 0;
-        if (!WinHttpReadData(hReq, chunk.data(), avail, &read)) break;
-        response.append(chunk.data(), read);
-    }
-    WinHttpCloseHandle(hReq);
-    WinHttpCloseHandle(hConn);
-    WinHttpCloseHandle(hSess);
-    return response;
+    return HttpSendLocal(port, L"GET", path, nullptr, timeout_ms, false);
 }

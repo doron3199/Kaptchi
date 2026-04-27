@@ -31,6 +31,7 @@ import '../widgets/native_texture_view.dart';
 import '../widgets/resizable_overlay.dart';
 import '../services/gallery_service.dart';
 import '../services/filters_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../widgets/mobile_connection_dialog.dart';
 import '../widgets/video_source_sheet.dart';
 import '../widgets/graph_history_sparkline.dart';
@@ -296,8 +297,9 @@ class _CameraScreenState extends State<CameraScreen>
       builder: (_) => AlertDialog(
         title: const Text('LM Studio required'),
         content: const Text(
-          'AI mode needs LM Studio to be running with the model loaded.\n\n'
-          'Start LM Studio manually, load the model, then press Retry.'),
+          'AI mode needs LM Studio running with the model loaded.\n\n'
+          'Press Retry to auto-start LM Studio and load the model. '
+          'This may take a minute on first load.'),
         actions: [
           TextButton(
             onPressed: () {
@@ -658,6 +660,13 @@ class _CameraScreenState extends State<CameraScreen>
       _isDigitalZoomOverride = true;
       _isHighWhiteboardSensitivity =
           NativeCameraService().getAbsenceScoreSeenThreshold() <= 0.5;
+      SharedPreferences.getInstance().then((prefs) {
+        final defaultAI = prefs.getBool('default_ai_mode') ?? true;
+        if (defaultAI && mounted) {
+          NativeCameraService().triggerLMSStart();
+          setState(() { _isAIMode = true; });
+        }
+      });
     }
 
     // Setup Raw Socket Listener (Android)
@@ -753,6 +762,7 @@ class _CameraScreenState extends State<CameraScreen>
         final svc = NativeCameraService();
         svc.setPanoramaEnabled(true);
         svc.setCanvasViewMode(true);
+        if (_isAIMode) svc.setAIModeEnabled(true);
         setState(() {
           _isVideoFileMode = true;
           _isVideoPaused = false;
@@ -1164,6 +1174,7 @@ class _CameraScreenState extends State<CameraScreen>
             final svc = NativeCameraService();
             svc.setPanoramaEnabled(true);
             svc.setCanvasViewMode(true);
+            if (_isAIMode) svc.setAIModeEnabled(true);
             setState(() {
               _isDigitalZoomOverride = true;
               _lockedPhoneZoom = 1.0;
@@ -2035,11 +2046,13 @@ class _CameraScreenState extends State<CameraScreen>
 
                   if (enableWhiteboard) {
                     _startCanvasPollTimer();
+                    if (_isAIMode) NativeCameraService().setAIModeEnabled(true);
                   } else {
                     _stopCanvasPollTimer();
                     if (_isCanvasViewMode) {
                       _setCanvasViewMode(false);
                     }
+                    NativeCameraService().setAIModeEnabled(false);
                   }
 
                   NativeCameraService().setPanoramaEnabled(enableWhiteboard);

@@ -59,6 +59,12 @@ public:
     void TriggerLMSStart();
     AICheckStatus GetStatus() const;
 
+    // Video-time tracking (CLI only) -------------------------------------
+    // Call before each processed frame so interval gates use video-seconds
+    // instead of wall-clock seconds. Not called by UI — falls back to
+    // real-time when never set.
+    void SetVideoPosition(double sec);
+
 private:
     struct CheckRequest {
         enum Kind { kSeed, kDuplicate } kind;
@@ -77,12 +83,19 @@ private:
     std::atomic<bool> dupe_pending_;
     std::atomic<bool> dupe_passed_;
 
-    static constexpr int kSeedCheckIntervalSec = 30;
-    static constexpr int kDupeCheckIntervalSec = 10;
+    static constexpr int kInitialDelaySeconds   = 10;
+    static constexpr int kSeedCheckIntervalSec  = 30;
+    static constexpr int kDupeCheckIntervalSec  = 10;
 
     using Clock = std::chrono::steady_clock;
+    Clock::time_point enabled_time_;
     Clock::time_point last_seed_check_time_;
     Clock::time_point last_dupe_check_time_;
+
+    // Video-time tracking (all protected by queue_mutex_ when accessed there)
+    std::atomic<int64_t> video_pos_ms_;       // -1 = not set (UI mode)
+    double last_seed_check_video_sec_;
+    double last_dupe_check_video_sec_;
 
     std::deque<CheckRequest> queue_;
     std::mutex               queue_mutex_;
