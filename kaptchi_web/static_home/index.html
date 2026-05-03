@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Kaptchi - Whiteboard Assistant Software</title>
+  <meta name="description" content="Whiteboard assistant software designed specifically for users with low vision who have difficulty with distance vision. Easily capture and read whiteboards.">
+  <meta property="og:title" content="Kaptchi - Whiteboard Assistant">
+  <meta property="og:description" content="Notice: If you rely on a screen reader, this software is unfortunately not for you. It is designed specifically for users with low vision who have difficulty with distance vision.">
+  <link rel="icon" href="logo.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=Outfit:wght@400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --background: #ffffff;
+      --foreground: #0a0a0a;
+      --primary: #3b82f6;
+      --primary-hover: #2563eb;
+      --secondary: #f3f4f6;
+      --secondary-foreground: #1f2937;
+      --accent: #8b5cf6;
+      --accent-hover: #7c3aed;
+      --surface: #ffffff;
+      --border: #e5e7eb;
+      --radius: 12px;
+      --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --background: #09090b;
+        --foreground: #f8fafc;
+        --primary: #60a5fa;
+        --primary-hover: #93c5fd;
+        --secondary: #1e293b;
+        --secondary-foreground: #f1f5f9;
+        --accent: #a78bfa;
+        --accent-hover: #c4b5fd;
+        --surface: #18181b;
+        --border: #27272a;
+      }
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--background);
+      color: var(--foreground);
+      font-family: 'Inter', sans-serif;
+      line-height: 1.6;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    h1, h2, h3, h4, h5, h6 {
+      font-family: 'Outfit', sans-serif;
+      letter-spacing: -0.02em;
+      font-weight: 700;
+      line-height: 1.2;
+    }
+
+    a { color: var(--primary); text-decoration: none; transition: var(--transition); }
+    a:hover { text-decoration: underline; }
+
+    .container { width: 100%; max-width: 1200px; margin: 0 auto; padding: 0 1.5rem; }
+
+    .text-gradient {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0.75rem 1.5rem;
+      font-weight: 600;
+      border-radius: var(--radius);
+      border: none;
+      cursor: pointer;
+      transition: var(--transition);
+      font-family: 'Inter', sans-serif;
+      text-decoration: none !important;
+    }
+
+    .btn:active { transform: scale(0.98); }
+
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), var(--accent));
+      color: white;
+      box-shadow: 0 4px 14px 0 rgba(59, 130, 246, 0.39);
+    }
+
+    .btn-primary:hover {
+      box-shadow: 0 6px 20px rgba(59, 130, 246, 0.5);
+      transform: translateY(-2px);
+      color: white;
+    }
+
+    .btn-secondary { background-color: var(--secondary); color: var(--secondary-foreground); }
+    .btn-secondary:hover { background-color: var(--border); }
+
+    .section { padding: 6rem 0; }
+    .flex { display: flex; }
+    .items-center { align-items: center; }
+    .justify-center { justify-content: center; }
+    .justify-between { justify-content: space-between; }
+    .gap-4 { gap: 1rem; }
+    .text-center { text-align: center; }
+
+    @keyframes fadeInSlideUp {
+      from { opacity: 0; transform: translateY(20px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .animate-fade-in { animation: fadeInSlideUp 0.8s cubic-bezier(0.16, 1, 0.3, 1) forwards; }
+  </style>
+</head>
+<body>
+
+  <header class="container" style="padding: 2rem 1.5rem; display: flex; align-items: center;">
+    <div style="display: flex; align-items: center; gap: 0.75rem;">
+      <img src="logo.png" alt="Kaptchi Logo" width="40" height="40" style="border-radius: 10px;">
+      <span style="font-family: 'Outfit', sans-serif; font-size: 1.5rem; font-weight: 700;">Kaptchi</span>
+    </div>
+  </header>
+
+  <main style="flex: 1;">
+
+    <section class="section container text-center animate-fade-in" style="padding-bottom: 3rem;">
+      <div style="max-width: 800px; margin: 0 auto;">
+        <div style="display: inline-block; padding: 0.5rem 1rem; background: rgba(59, 130, 246, 0.1); color: var(--primary); border-radius: 100px; font-size: 0.875rem; font-weight: 600; margin-bottom: 1.5rem;">
+          Open Source Accessibility Tool
+        </div>
+        <h1 style="font-size: clamp(2.5rem, 5vw, 4rem); margin-bottom: 1.5rem;">
+          Whiteboard assistant software<br>
+          <span class="text-gradient">for the visually impaired.</span>
+        </h1>
+
+        <div class="flex justify-center gap-4" style="flex-wrap: wrap; margin-bottom: 3rem;">
+          <a href="https://github.com/doron3199/Kaptchi/releases/download/v1.1.1/KaptchiSetup.exe" class="btn btn-primary" style="font-size: 1.1rem;">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 0.5rem;">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+              <polyline points="7 10 12 15 17 10"></polyline>
+              <line x1="12" y1="15" x2="12" y2="3"></line>
+            </svg>
+            Install for Windows
+          </a>
+          <a href="https://github.com/doron3199/Kaptchi" target="_blank" rel="noopener noreferrer" class="btn btn-secondary" style="font-size: 1.1rem;">
+            View Source
+          </a>
+        </div>
+
+        <div style="border-radius: var(--radius); overflow: hidden; box-shadow: 0 20px 40px rgba(0,0,0,0.4); margin-bottom: 2rem;">
+          <img src="images/demostration.png" alt="Demonstration of Kaptchi in a classroom" style="width: 100%; height: auto; object-fit: cover; display: block;">
+        </div>
+
+        <div style="margin: 0 auto; max-width: 800px; padding: 1rem; border: 1px solid var(--border); border-radius: var(--radius); background: var(--secondary); text-align: left; display: flex; gap: 1rem; align-items: flex-start;">
+          <div style="color: #eab308; margin-top: 0.25rem; flex-shrink: 0;">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path>
+              <line x1="12" y1="9" x2="12" y2="13"></line>
+              <line x1="12" y1="17" x2="12.01" y2="17"></line>
+            </svg>
+          </div>
+          <div>
+            <strong style="display: block; margin-bottom: 0.25rem;">Notice</strong>
+            <p style="margin: 0; font-size: 0.95rem; opacity: 0.8;">
+              If you rely on a screen reader, this software is unfortunately not for you. It is designed specifically for users with low vision who have difficulty with distance vision.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="container animate-fade-in" style="padding: 2rem 1.5rem; max-width: 1000px; margin: 0 auto; display: flex; flex-direction: column; gap: 6rem;">
+
+      <div style="display: flex; flex-direction: column; gap: 2rem; align-items: center;">
+        <div style="width: 100%; border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border);">
+          <img src="images/homepage.png" alt="Kaptchi Available Cameras" style="width: 100%; height: auto; display: block;">
+        </div>
+        <div style="text-align: center; max-width: 800px;">
+          <h3 style="font-size: 1.75rem; margin-bottom: 1rem;">Versatile Capture Methods</h3>
+          <p style="font-size: 1.1rem; color: var(--secondary-foreground); opacity: 0.9; line-height: 1.6;">
+            You can choose between an integrated camera, a mobile camera using the Kaptchi Android app, a whole monitor, or a single window. Create a virtual monitor if you have only one screen, but still need to capture a different window.
+          </p>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 2rem; align-items: center;">
+        <div style="width: 100%; display: flex; flex-direction: column; gap: 1rem;">
+          <div style="border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border);">
+            <img src="images/filters.png" alt="Kaptchi Filters" style="width: 100%; height: auto; display: block;">
+          </div>
+          <div style="border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border);">
+            <img src="images/raw_image.png" alt="Raw Whiteboard Image" style="width: 100%; height: auto; display: block;">
+          </div>
+        </div>
+        <div style="text-align: center; max-width: 800px;">
+          <h3 style="font-size: 1.75rem; margin-bottom: 1rem;">Smart Processing</h3>
+          <p style="font-size: 1.1rem; color: var(--secondary-foreground); opacity: 0.9; line-height: 1.6;">
+            Use powerful filters and person removal software to get a clean whiteboard image without obstructions. (Thanks <a href="https://www.youtube.com/watch?v=fYyARMqiaag" target="_blank" rel="noopener noreferrer" style="text-decoration: underline; color: var(--primary);">Professor Leonard!</a>)
+          </p>
+        </div>
+      </div>
+
+      <div style="display: flex; flex-direction: column; gap: 2rem; align-items: center;">
+        <div style="width: 100%; display: flex; flex-direction: column; gap: 1rem;">
+          <div style="border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border);">
+            <img src="images/drawing.png" alt="Kaptchi Drawing Features" style="width: 100%; height: auto; display: block;">
+          </div>
+          <div style="border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border);">
+            <img src="images/share_bar.png" alt="Kaptchi Share Bar" style="width: 100%; height: auto; display: block;">
+          </div>
+        </div>
+        <div style="text-align: center; max-width: 800px;">
+          <h3 style="font-size: 1.75rem; margin-bottom: 1rem;">Edit &amp; Export</h3>
+          <p style="font-size: 1.1rem; color: var(--secondary-foreground); opacity: 0.9; line-height: 1.6;">
+            Cut and draw on "whiteboard screenshots", then export all of them in one PDF file.
+          </p>
+        </div>
+      </div>
+
+    </section>
+  </main>
+
+  <footer style="border-top: 1px solid var(--border); padding: 3rem 0; margin-top: 4rem;">
+    <div class="container flex items-center justify-between" style="gap: 1.5rem; flex-wrap: wrap;">
+      <div style="display: flex; align-items: center; gap: 0.75rem; opacity: 0.7;">
+        <img src="logo.png" alt="Kaptchi Logo" width="24" height="24" style="border-radius: 6px;">
+        <span style="font-weight: 600;">Kaptchi</span>
+      </div>
+      <div style="opacity: 0.7; font-size: 0.9rem; text-align: center;">
+        Open Source. Contributions are welcome!
+      </div>
+      <div style="display: flex; gap: 1.5rem;">
+        <a href="https://github.com/doron3199/Kaptchi" target="_blank" rel="noopener noreferrer" style="opacity: 0.7; text-decoration: none;">GitHub</a>
+        <a href="mailto:classboards2@gmail.com" style="opacity: 0.7; text-decoration: none;">classboards2@gmail.com</a>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>
